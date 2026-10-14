@@ -1,0 +1,47 @@
+# ntfy-idp-push example config. Every key can also be set as NTFY_IDP_PUSH_<KEY>
+# (dashes to underscores; lists comma-separated). SIGHUP reloads per-request settings.
+
+listen-https: ":443"
+# listen-http: ":8080"                 # plain HTTP behind a TLS proxy that preserves Host
+# public-url: "https://push.example.com"  # default: https://<duo-hostname>
+
+duo-hostname: "push.example.com"        # Authelia duo_api.hostname; also the WebAuthn RP ID
+duo-integration-key: "DI…"              # ntfy-idp-push keygen
+duo-secret-key: "…"
+duo-max-skew: "300s"
+push-timeout: "60s"
+push-disabled: false                    # kill switch: every preauth/auth answers deny
+duo-key-grace: "1h"                     # previous key accepted this long after keygen --rotate
+
+# IdPs pin Duo's CA bundle; the certificate must chain to one of those roots.
+tls-mode: "acme"                        # acme | file
+acme-ca: "https://dv.acme-v02.api.pki.goog/directory"
+acme-eab-kid: "…"                       # gcloud publicca external-account-keys create
+acme-eab-hmac: "…"
+acme-email: "admin@example.com"
+acme-key-type: "p256"
+acme-storage: "/var/lib/ntfy-idp-push/acme"
+# tls-cert-file: "/etc/ntfy-idp-push/tls.crt"   # tls-mode: file
+# tls-key-file: "/etc/ntfy-idp-push/tls.key"
+
+auth-mode: "forward"                    # forward: Remote-User from trusted-proxies | oidc
+trusted-proxies: ["10.0.0.0/8"]
+# oidc-issuer: "https://auth.example.com"
+# oidc-client-id: "ntfy-idp-push"
+# oidc-client-secret: "…"
+enroll-portal-url: "https://push.example.com/enroll"   # empty: unenrolled users are denied
+
+ntfy-base-url: "https://ntfy.example.com"
+ntfy-admin-token: "tk_…"
+ntfy-topic-prefix: "push-"
+default-topics: ["alerts", "${user}-inbox"]
+
+enroll-role: "user"
+enroll-access:
+  - "${user}-*:rw"
+  - "alerts:ro"
+enroll-access-reconcile: false
+
+webauthn-allow-synced: false
+webauthn-require-attestation: false
+database: "/var/lib/ntfy-idp-push/db.sqlite"
