@@ -1,0 +1,15 @@
+{{template "head" "Sign-in request"}}
+<h1>Sign-in request</h1>
+<dl>
+  <dt>User</dt><dd>{{.User}}</dd>
+  {{if .IP}}<dt>From</dt><dd>{{.IP}}</dd>{{end}}
+  {{if .Target}}<dt>To</dt><dd>{{.Target}}</dd>{{end}}
+  <dt>Expires</dt><dd><time datetime="{{.Expires}}">{{.Expires}}</time></dd>
+</dl>
+<div id="approve" data-id="{{.ID}}">
+  <button id="approve-btn" type="button">Approve with passkey</button>
+  <button id="fraud-btn" type="button" class="danger">This wasn't me</button>
+</div>
+<p id="status" role="status"></p>
+<script src="/static/app.js"></script>
+{{template "foot"}}

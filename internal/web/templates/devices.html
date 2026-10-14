@@ -1,0 +1,26 @@
+{{template "head" "Your phones"}}
+<h1>Your phones</h1>
+<p>Signed in as <strong>{{.User}}</strong>.{{if .Disabled}} <strong>Push sign-in is disabled for this account.</strong>{{end}}</p>
+{{if .Devices}}
+<table>
+  <thead><tr><th>Name</th><th>Status</th><th>Last used</th><th></th></tr></thead>
+  <tbody>
+  {{range .Devices}}
+  <tr>
+    <td>{{.Name}}</td>
+    <td>{{if .RevokedAt}}revoked, cleanup pending{{else if .VerifiedAt}}active{{else}}awaiting setup{{end}}</td>
+    <td>{{with .LastUsedAt}}{{.Format "2006-01-02 15:04"}}{{else}}never{{end}}</td>
+    <td><form method="post" action="/devices/{{.ID}}/revoke">
+      <label><input type="checkbox" name="reset_ntfy" value="1"> Also sign out all ntfy apps</label>
+      <button class="danger" type="submit">Revoke</button>
+    </form></td>
+  </tr>
+  {{end}}
+  </tbody>
+</table>
+<p class="note">A revoked phone can no longer approve sign-ins. Unless you also sign out all ntfy apps, it can
+still read the sign-in notifications sent to your other phones and deny them. Signing out all ntfy apps
+cuts it off completely; your other phones then need their ntfy link again.</p>
+{{else}}<p>No phones enrolled.</p>{{end}}
+<p><a class="button" href="/enroll">Enroll a phone</a> <a class="button" href="/provision">Set up ntfy</a></p>
+{{template "foot"}}

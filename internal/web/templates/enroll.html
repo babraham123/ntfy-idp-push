@@ -1,0 +1,28 @@
+{{template "head" "Enroll a phone"}}
+<h1>Enroll a phone</h1>
+<p>Signed in as <strong>{{.User}}</strong>. Do this <em>on the phone</em> that will approve sign-ins.</p>
+<form id="enroll" data-code="{{.Code}}">
+  <label>Device name <input name="name" maxlength="64" placeholder="Pixel 9" required></label>
+  <button type="submit">Create passkey</button>
+</form>
+<p id="status" role="status"></p>
+<section id="done" hidden>
+  <h2>Connect the ntfy app</h2>
+  <p><a id="ntfy-link" class="button" href="#">Open in ntfy</a></p>
+  <p id="code-expiry" hidden>The link signs the app in once and expires at <time></time>.</p>
+  <p id="no-code" hidden>Your ntfy server cannot issue sign-in codes, so the ntfy app must already be signed in as <strong>{{.User}}</strong>.</p>
+  <div id="manual">
+    <p>If the app does not sign you in (app versions without one-tap sign-in ignore the code), sign in manually, then open the link again:</p>
+    <p><button type="button" id="password-btn">Set an ntfy password</button></p>
+    <dl id="password" hidden>
+      <dt>Username</dt><dd><code id="password-user"></code></dd>
+      <dt>Password</dt><dd><code id="password-value"></code></dd>
+    </dl>
+  </div>
+  <p>On another device? Scan this with the phone:</p>
+  <img id="qr" alt="QR code for the ntfy link" width="240" height="240">
+  <p>A "Finish setup" notification will arrive in ntfy. Tap it to activate this phone.</p>
+  <p><button type="button" id="resend-btn">Resend setup notification</button></p>
+</section>
+<script src="/static/app.js"></script>
+{{template "foot"}}
