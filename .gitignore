@@ -1,0 +1,5 @@
+/ntfy-idp-push
+/dist/
+*.sqlite
+*.sqlite-*
+deploy/*.local.*
