@@ -1,0 +1,25 @@
+{{template "head" "Set up ntfy"}}
+<h1>Set up ntfy</h1>
+<p>Your ntfy account <strong>{{.User}}</strong> is ready.</p>
+{{if not .HasCode}}<p class="note">This ntfy server cannot issue one-tap sign-in codes. Sign in to the app as <strong>{{.User}}</strong> first, then use the buttons below.</p>{{end}}
+<form method="post" action="/provision/password" class="note">
+  <p>If the app does not sign you in (app versions without one-tap sign-in ignore the code), sign in manually with a new ntfy password:</p>
+  <button type="submit">Set an ntfy password</button>
+</form>
+{{if eq .Platform "android"}}
+  <p>1. Install ntfy: <a href="https://play.google.com/store/apps/details?id=io.heckel.ntfy">Google Play</a> · <a href="https://f-droid.org/en/packages/io.heckel.ntfy/">F-Droid</a></p>
+{{else if eq .Platform "ios"}}
+  <p>1. Install ntfy: <a href="https://apps.apple.com/us/app/ntfy/id1625396347">App Store</a></p>
+{{end}}
+{{if or (eq .Platform "android") (eq .Platform "ios")}}
+  <p>2. Subscribe:</p>
+  <ul class="links">{{range .Links}}<li><a class="button" href="{{.Link}}">{{.Topic}}</a></li>{{end}}</ul>
+{{else}}
+  {{with .QR}}<p>Scan with your phone to sign in and subscribe:</p><img src="{{.}}" alt="QR code" width="240" height="240">{{end}}
+  <p><a class="button" href="{{.WebApp}}">Open web app</a> (install it from the browser menu)</p>
+  {{with .Redeem}}
+    <p><a class="button" href="{{.}}">Sign in to web app</a> <a class="button" href="{{.}}">Subscribe to default topics</a></p>
+  {{end}}
+{{end}}
+{{if .HasCode}}<p>These buttons share one single-use sign-in code{{with .CodeMinutes}}, valid for {{.}} minutes{{end}}. Reloading this page, or enrolling a phone, issues a new code and cancels this one.</p>{{end}}
+{{template "foot"}}

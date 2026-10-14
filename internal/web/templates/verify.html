@@ -1,0 +1,8 @@
+{{template "head" "Finish setup"}}
+<h1>Finish setup</h1>
+<p>Activate this phone for sign-in approvals?</p>
+<form method="post" action="/enroll/verify/{{.Device}}">
+  <input type="hidden" name="t" value="{{.Token}}">
+  <button type="submit">Activate</button>
+</form>
+{{template "foot"}}
