@@ -1,6 +1,7 @@
 package duoapi_test
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha1"
 	"encoding/base64"
@@ -360,6 +361,18 @@ func TestV5JSONEnrollAndStatus(t *testing.T) {
 	}
 	if err := json.Unmarshal(res.body, &auth); err != nil || auth.Response.Result != "allow" {
 		t.Fatalf("auth: %s %v", res.body, err)
+	}
+
+	// The IdP may keep polling after the phone is removed; it must not keep reporting success.
+	var finished struct{ Device string }
+	if err := json.Unmarshal(b, &finished); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Svc.RevokeDevice(context.Background(), finished.Device, false, false, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if s := status(); s != "invalid" {
+		t.Fatalf("after revocation: %s", s)
 	}
 }
 
