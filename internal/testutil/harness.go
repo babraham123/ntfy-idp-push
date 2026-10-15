@@ -2,12 +2,12 @@ package testutil
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"html"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -113,8 +113,12 @@ func (h *Harness) serve(t *testing.T) {
 		t.Fatal(err)
 	}
 	mux := http.NewServeMux()
+	identity, err := web.NewIdentity(context.Background(), svc, mux)
+	if err != nil {
+		t.Fatal(err)
+	}
 	duoapi.New(svc, h.log).Register(mux)
-	web.New(svc, web.ForwardAuth{Trusted: func() []*net.IPNet { return svc.Config().TrustedNets }}, h.log).Register(mux)
+	web.New(svc, identity, h.log).Register(mux)
 	h.Server.Config.Handler = mux
 	h.Svc = svc
 }

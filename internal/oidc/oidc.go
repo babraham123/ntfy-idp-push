@@ -7,8 +7,10 @@ import (
 	"encoding/base64"
 	"errors"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
+	"unicode"
 
 	gooidc "github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
@@ -69,12 +71,23 @@ func (a *Auth) User(r *http.Request) string {
 	return u
 }
 
-// Login redirects to the provider. next must be a local path.
-func (a *Auth) Login(w http.ResponseWriter, r *http.Request) {
-	next := r.URL.Query().Get("next")
-	if !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") {
-		next = "/devices"
+// LocalPath returns next if it is a path on this origin, else /devices. Browsers read "\" as "/"
+// and drop tabs and newlines, so "/\evil.example" would otherwise redirect off-site.
+func LocalPath(next string) string {
+	const fallback = "/devices"
+	if !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") || strings.Contains(next, "\\") ||
+		strings.IndexFunc(next, unicode.IsControl) >= 0 {
+		return fallback
 	}
+	if u, err := url.Parse(next); err != nil || u.Scheme != "" || u.Host != "" {
+		return fallback
+	}
+	return next
+}
+
+// Login redirects to the provider, then back to next.
+func (a *Auth) Login(w http.ResponseWriter, r *http.Request) {
+	next := LocalPath(r.URL.Query().Get("next"))
 	state, verifier := challenge.RandomToken(16), oauth2.GenerateVerifier()
 	val := state + "." + verifier + "." + base64.RawURLEncoding.EncodeToString([]byte(next))
 	http.SetCookie(w, a.cookie(flowCookie, val, 10*time.Minute))
@@ -124,5 +137,5 @@ func (a *Auth) callback(w http.ResponseWriter, r *http.Request) (string, error) 
 		return "", err
 	}
 	http.SetCookie(w, a.cookie(sessionCookie, id, sessionTTL))
-	return string(next), nil
+	return LocalPath(string(next)), nil
 }

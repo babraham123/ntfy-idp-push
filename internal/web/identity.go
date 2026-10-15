@@ -1,11 +1,14 @@
 package web
 
 import (
+	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
 
+	"github.com/babraham123/ntfy-idp-push/internal/core"
 	"github.com/babraham123/ntfy-idp-push/internal/oidc"
 )
 
@@ -13,6 +16,22 @@ import (
 type Identity interface {
 	// User returns the username, or "" and false after writing a response (redirect or refusal).
 	User(w http.ResponseWriter, r *http.Request) (string, bool)
+}
+
+// NewIdentity returns the identity for svc's auth-mode. OIDC also registers its login and callback
+// routes on mux.
+func NewIdentity(ctx context.Context, svc *core.Service, mux *http.ServeMux) (Identity, error) {
+	cfg := svc.Config()
+	if cfg.AuthMode != "oidc" {
+		return ForwardAuth{Trusted: func() []*net.IPNet { return svc.Config().TrustedNets }}, nil
+	}
+	a, err := oidc.New(ctx, cfg.OIDCIssuer, cfg.OIDCClientID, cfg.OIDCClientSecret, cfg.PublicURL, svc.Store)
+	if err != nil {
+		return nil, fmt.Errorf("oidc: %w", err)
+	}
+	mux.HandleFunc("GET "+oidc.LoginPath, a.Login)
+	mux.HandleFunc("GET "+oidc.CallbackPath, a.Callback)
+	return OIDCAuth{Auth: a}, nil
 }
 
 func remoteIP(r *http.Request) net.IP {
