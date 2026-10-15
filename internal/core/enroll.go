@@ -271,6 +271,10 @@ func (s *Service) RevokeDevice(ctx context.Context, deviceID string, resetNtfyUs
 		if err := s.checkResettable(ctx, d.Username, force); err != nil {
 			return err
 		}
+		// Before anything can fail: the device row this would resume from may be purged first.
+		if err := s.Store.SetNtfyResetPending(ctx, d.Username, true); err != nil {
+			return err
+		}
 	}
 	if d.RevokedAt == nil {
 		if err := s.Store.RevokeDevice(ctx, d.ID, time.Now()); err != nil {
@@ -333,8 +337,12 @@ func (s *Service) checkResettable(ctx context.Context, username string, force bo
 
 // ResetNtfyUser deletes and recreates the ntfy user, invalidating every token it has. ntfy has no
 // admin endpoint to revoke another user's tokens, so this is the only way to cut a lost phone off.
+// Until it succeeds the reset stays pending, and the purge job retries it.
 func (s *Service) ResetNtfyUser(ctx context.Context, username string, force bool) error {
 	if err := s.checkResettable(ctx, username, force); err != nil {
+		return err
+	}
+	if err := s.Store.SetNtfyResetPending(ctx, username, true); err != nil {
 		return err
 	}
 	if err := s.Ntfy.DeleteUser(ctx, username); err != nil {
@@ -358,6 +366,9 @@ func (s *Service) ResetNtfyUser(ctx context.Context, username string, force bool
 		if err := s.Ntfy.AllowAccess(ctx, username, d.NtfyTopic, config.PermReadOnly); err != nil {
 			return err
 		}
+	}
+	if err := s.Store.SetNtfyResetPending(ctx, username, false); err != nil {
+		return err
 	}
 	s.Store.Audit(ctx, username, "ntfy_user_reset", map[string]any{"devices": len(devs)})
 	return nil

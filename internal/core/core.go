@@ -235,10 +235,21 @@ func (s *Service) clearPush(c *store.Challenge) {
 	}
 }
 
-// Purge expires challenges, removes devices never verified, and finishes revocations whose ntfy
-// cleanup failed earlier.
+// Purge expires challenges, removes devices never verified, and finishes revocations and ntfy user
+// resets whose ntfy calls failed earlier.
 func (s *Service) Purge(ctx context.Context) {
 	now := time.Now()
+	resets, err := s.Store.PendingNtfyResets(ctx)
+	if err != nil {
+		s.Log.Error("purge", "err", err)
+		return
+	}
+	for _, u := range resets {
+		// Forced: the foreign-grant check passed (or was overridden) when the reset was asked for.
+		if err := s.ResetNtfyUser(ctx, u, true); err != nil {
+			s.Log.Warn("purge: reset ntfy user", "user", u, "err", err)
+		}
+	}
 	// Times out challenges whose auth call is gone (the process restarted mid-push); deciding them
 	// clears their pushes from the phone.
 	if err := s.decidePending(ctx, store.ChallengeFilter{ExpiredBy: now}, store.StateTimeout); err != nil {

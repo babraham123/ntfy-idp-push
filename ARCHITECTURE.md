@@ -185,8 +185,10 @@ device lifetime, since the IdP keeps polling after the code's own expiry.
 | Rotate the IdP secret | `keygen --rotate` | new key written; the old one accepted for `duo-key-grace` |
 
 Revocation is resumable: if a remote step fails, the row keeps `revoked_at` and re-running the command
-(or the purge job, every 10 minutes) retries the remote steps. A user or grant already missing in ntfy
-counts as removed, so an interrupted reset resumes at recreation.
+(or the purge job, every 10 minutes) retries the remote steps. A requested ntfy user reset is recorded on
+the user before any step runs and cleared only when it completes, so the purge job finishes it even after
+the device row is gone. A user or grant already missing in ntfy counts as removed, so an interrupted reset
+resumes at recreation.
 
 After a plain revoke, a lost phone cannot approve anything, but its ntfy token is user-wide: it keeps the
 `enroll-access` grants and can read the push topics of the user's other phones, so it can deny their
