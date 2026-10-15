@@ -2,24 +2,20 @@ name: Release
 
 on:
   push:
-    tags: ["v*"]
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
 
 permissions:
   contents: read
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
-        with:
-          go-version-file: go.mod
-      - run: go test -race ./...
+  # The same gofmt, vet, staticcheck, govulncheck and test run as every PR, so a tag pushed without
+  # going through a PR still has to pass it.
+  ci:
+    uses: ./.github/workflows/ci.yml
 
   # Binaries and checksums on the GitHub release, with notes from the merged PRs.
   binaries:
-    needs: test
+    needs: ci
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -32,15 +28,17 @@ jobs:
           go-version-file: go.mod
       - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7
         with:
-          version: "~> v2"
+          # renovate: datasource=github-releases depName=goreleaser/goreleaser
+          version: "v2.18.3"
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # ghcr.io/<owner>/ntfy-idp-push:1.2.3, :1.2 and :latest for amd64 and arm64, with an SBOM and
   # build provenance attached.
+  # After binaries, so a failed goreleaser run never leaves image tags with no matching release.
   image:
-    needs: test
+    needs: [ci, binaries]
     runs-on: ubuntu-latest
     permissions:
       contents: read

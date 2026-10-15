@@ -8,6 +8,16 @@
   "schedule": ["before 6am on monday"],
   "minimumReleaseAge": "3 days",
   "postUpdateOptions": ["gomodTidy"],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "goreleaser version pinned in release.yml",
+      "managerFilePatterns": ["/^\\.github/workflows/release\\.yml$/"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\n\\s+version: \"(?<currentValue>v\\d+\\.\\d+\\.\\d+)\""
+      ]
+    }
+  ],
   "packageRules": [
     {
       "matchManagers": ["gomod"],

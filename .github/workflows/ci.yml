@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Reused as the gate in release.yml.
+  workflow_call:
   # Weekly, so a newly published vulnerability in a dependency fails a run without a code change.
   schedule:
     - cron: "17 6 * * 1"

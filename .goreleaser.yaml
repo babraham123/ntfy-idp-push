@@ -4,7 +4,8 @@ builds:
   - main: ./cmd/ntfy-idp-push
     env: [CGO_ENABLED=0]
     flags: [-trimpath]
-    ldflags: ["-s -w -X main.version={{ .Version }}"]
+    # .Tag keeps the v prefix, matching the image build and the module version go install records.
+    ldflags: ["-s -w -X main.version={{ .Tag }}"]
     goos: [linux, darwin]
     goarch: [amd64, arm64]
 
@@ -15,5 +16,10 @@ archives:
 checksum:
   name_template: checksums.txt
 
+release:
+  # v1.2.3-rc.1 is marked as a pre-release, so it never becomes the repo's "Latest release".
+  prerelease: auto
+
 changelog:
-  use: github
+  # GitHub's generated notes: the merged PRs since the previous tag.
+  use: github-native

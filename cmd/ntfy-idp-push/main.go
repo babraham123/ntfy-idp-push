@@ -53,7 +53,10 @@ var version = "dev"
 // buildVersion falls back to the version the Go toolchain records: the module version for
 // go install …@v1.2.3, or a pseudo-version from git for a plain go build in a checkout.
 func buildVersion() string {
-	if bi, ok := debug.ReadBuildInfo(); ok && version == "dev" && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+	if version != "dev" {
+		return version
+	}
+	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
 		return bi.Main.Version
 	}
 	return version

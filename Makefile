@@ -16,4 +16,4 @@ lint:
 	go tool govulncheck ./...
 
 image:
-	$(ENGINE) build -f Containerfile --build-arg VERSION=$(VERSION) -t $(IMAGE):$(VERSION) -t $(IMAGE):latest .
+	DOCKER_BUILDKIT=1 $(ENGINE) build -f Containerfile --build-arg VERSION=$(VERSION) -t $(IMAGE):$(VERSION) -t $(IMAGE):latest .
