@@ -88,12 +88,16 @@ func (s *Service) Reload(cfg *config.Config) {
 
 // denyPending denies the pending challenges matching f, waking their blocked auth calls.
 func (s *Service) denyPending(ctx context.Context, f store.ChallengeFilter) error {
+	return s.decidePending(ctx, f, store.StateDeny)
+}
+
+func (s *Service) decidePending(ctx context.Context, f store.ChallengeFilter, state store.ChallengeState) error {
 	ids, err := s.Store.PendingChallengeIDs(ctx, f)
 	if err != nil {
 		return err
 	}
 	for _, id := range ids {
-		if err := s.Challenges.Decide(ctx, id, store.StateDeny); err != nil && !errors.Is(err, challenge.ErrGone) {
+		if err := s.Challenges.Decide(ctx, id, state); err != nil && !errors.Is(err, challenge.ErrGone) {
 			return err
 		}
 	}
@@ -235,6 +239,11 @@ func (s *Service) clearPush(c *store.Challenge) {
 // cleanup failed earlier.
 func (s *Service) Purge(ctx context.Context) {
 	now := time.Now()
+	// Times out challenges whose auth call is gone (the process restarted mid-push); deciding them
+	// clears their pushes from the phone.
+	if err := s.decidePending(ctx, store.ChallengeFilter{ExpiredBy: now}, store.StateTimeout); err != nil {
+		s.Log.Error("purge: expire challenges", "err", err)
+	}
 	if err := s.Store.Purge(ctx, now, UnverifiedTTL, challengeRetention); err != nil {
 		s.Log.Error("purge", "err", err)
 		return

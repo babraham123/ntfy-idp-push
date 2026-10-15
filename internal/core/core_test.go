@@ -13,9 +13,11 @@ import (
 
 	"github.com/duosecurity/duo_api_golang/authapi"
 
+	"github.com/babraham123/ntfy-idp-push/internal/challenge"
 	"github.com/babraham123/ntfy-idp-push/internal/config"
 	"github.com/babraham123/ntfy-idp-push/internal/core"
 	"github.com/babraham123/ntfy-idp-push/internal/ntfy"
+	"github.com/babraham123/ntfy-idp-push/internal/store"
 	"github.com/babraham123/ntfy-idp-push/internal/testutil"
 )
 
@@ -630,6 +632,33 @@ func TestCleanupWhenNtfyUserAlreadyGone(t *testing.T) {
 	}
 	if _, err := h.Svc.Store.UserByName(ctx, "alice"); err == nil {
 		t.Fatal("user row kept")
+	}
+}
+
+// A push whose auth call is gone (the process restarted) is timed out by the purge job and
+// cleared from the phone, as a live one is when it expires.
+func TestPurgeTimesOutOrphanedPush(t *testing.T) {
+	ctx := context.Background()
+	h := testutil.NewHarness(t, nil)
+	dev := h.Enroll(t, "alice", testutil.NewAuthenticator(t, testutil.PublicURL))
+	orphan := func(ttl time.Duration) *store.Challenge {
+		c, _, err := h.Svc.Challenges.Create(ctx, challenge.Params{Username: "alice", DeviceID: dev.DeviceID, TTL: ttl})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	expired, live := orphan(-time.Second), orphan(time.Minute)
+
+	h.Svc.Purge(ctx)
+	if c, _ := h.Store.Challenge(ctx, expired.ID); c.State != store.StateTimeout {
+		t.Fatalf("expired challenge %s", c.State)
+	}
+	if c, _ := h.Store.Challenge(ctx, live.ID); c.State != store.StatePending {
+		t.Fatalf("unexpired challenge %s", c.State)
+	}
+	if got := h.Ntfy.Deleted(); len(got) != 1 || got[0] != dev.Topic+"/"+expired.ID {
+		t.Fatalf("deleted pushes %v", got)
 	}
 }
 
