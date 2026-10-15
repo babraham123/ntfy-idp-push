@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -46,7 +47,17 @@ Every key can be set as NTFY_IDP_PUSH_<KEY> (e.g. NTFY_IDP_PUSH_DUO_SECRET_KEY).
 from a file with <key>-file or NTFY_IDP_PUSH_<KEY>_FILE (e.g. NTFY_IDP_PUSH_DUO_SECRET_KEY_FILE).
 `
 
+// version is stamped by -ldflags "-X main.version=…" in release builds and the image.
 var version = "dev"
+
+// buildVersion falls back to the version the Go toolchain records: the module version for
+// go install …@v1.2.3, or a pseudo-version from git for a plain go build in a checkout.
+func buildVersion() string {
+	if bi, ok := debug.ReadBuildInfo(); ok && version == "dev" && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+		return bi.Main.Version
+	}
+	return version
+}
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -91,7 +102,7 @@ func run(args []string) error {
 	case "healthcheck":
 		return healthcheck(rest)
 	case "version":
-		fmt.Println(version)
+		fmt.Println(buildVersion())
 		return nil
 	}
 	// A missing default config file is fine when everything comes from the environment; a path

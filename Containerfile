@@ -1,12 +1,14 @@
 # syntax=docker/dockerfile:1
-FROM docker.io/library/golang:1.27 AS build
+# Built on the runner's platform and cross-compiled, so a multi-arch build needs no emulation.
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27 AS build
+ARG TARGETOS TARGETARCH
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 ARG VERSION=dev
 # modernc.org/sqlite is pure Go, so the binary is fully static.
-RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/ntfy-idp-push ./cmd/ntfy-idp-push \
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/ntfy-idp-push ./cmd/ntfy-idp-push \
  && mkdir -p /out/state
 
 FROM gcr.io/distroless/static-debian12:nonroot
