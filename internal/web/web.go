@@ -72,19 +72,19 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.Handle("POST /enroll/verify/{device}", s.limit(s.sameOrigin(s.verifyDevice)))
 	mux.Handle("POST /enroll/resend", s.limit(s.sameOrigin(s.enrollResend)))
 	mux.Handle("POST /enroll/password", s.limit(s.sameOrigin(s.enrollPassword)))
+	mux.HandleFunc("GET /enroll/qr", s.enrollQR)
 
-	mux.Handle("GET /c/{id}", s.limit(s.approvePage))
-	mux.Handle("GET /c/{id}/options", s.limit(s.assertionOptions))
-	mux.Handle("POST /c/{id}/assert", s.limit(s.sameOrigin(s.assert)))
+	mux.Handle("GET /challenge/{id}", s.limit(s.approvePage))
+	mux.Handle("GET /challenge/{id}/options", s.limit(s.assertionOptions))
+	mux.Handle("POST /challenge/{id}/assert", s.limit(s.sameOrigin(s.assert)))
 	// Called by the ntfy app's http action, which sends no Origin; the deny token authorizes it.
-	mux.Handle("POST /c/{id}/deny", s.limit(s.deny))
-	mux.Handle("POST /c/{id}/fraud", s.limit(s.sameOrigin(s.fraud)))
+	mux.Handle("POST /challenge/{id}/deny", s.limit(s.deny))
+	mux.Handle("POST /challenge/{id}/fraud", s.limit(s.sameOrigin(s.fraud)))
 
 	mux.HandleFunc("GET /provision", s.provisionPage)
 	mux.Handle("POST /provision/password", s.sameOrigin(s.provisionPassword))
 	mux.HandleFunc("GET /devices", s.devicesPage)
 	mux.Handle("POST /devices/{id}/revoke", s.sameOrigin(s.revoke))
-	mux.HandleFunc("GET /frame/qr", s.frameQR)
 }
 
 // ---- helpers
@@ -429,9 +429,9 @@ func (s *Server) fraud(w http.ResponseWriter, r *http.Request) {
 
 // ---- QR for IdP-driven enrollment
 
-// frameQR renders the enrollment URL only for codes the shim issued, so it cannot be used as a
+// enrollQR renders the enrollment URL only for codes the shim issued, so it cannot be used as a
 // general-purpose QR generator.
-func (s *Server) frameQR(w http.ResponseWriter, r *http.Request) {
+func (s *Server) enrollQR(w http.ResponseWriter, r *http.Request) {
 	value := r.URL.Query().Get("value")
 	prefix := s.svc.Config().PublicURL + "/enroll?code="
 	code := ""

@@ -138,11 +138,11 @@ if (approve) {
   document.getElementById("approve-btn").addEventListener("click", async () => {
     try {
       status("Waiting for passkey…");
-      const res = await fetch("/c/" + encodeURIComponent(id) + "/options", { credentials: "same-origin" });
+      const res = await fetch("/challenge/" + encodeURIComponent(id) + "/options", { credentials: "same-origin" });
       const opts = await res.json();
       if (!res.ok) throw new Error(opts.error || res.statusText);
       const cred = await navigator.credentials.get(requestOptions(opts));
-      await postJSON("/c/" + encodeURIComponent(id) + "/assert", assertionJSON(cred));
+      await postJSON("/challenge/" + encodeURIComponent(id) + "/assert", assertionJSON(cred));
       finish("Approved. You can close this page.");
     } catch (err) {
       status("Not approved: " + err.message);
@@ -151,7 +151,7 @@ if (approve) {
 
   document.getElementById("fraud-btn").addEventListener("click", async () => {
     try {
-      await postJSON("/c/" + encodeURIComponent(id) + "/fraud", {});
+      await postJSON("/challenge/" + encodeURIComponent(id) + "/fraud", {});
       finish("Reported and denied.");
     } catch (err) {
       status(err.message);

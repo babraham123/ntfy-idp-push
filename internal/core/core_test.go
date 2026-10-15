@@ -698,7 +698,7 @@ func TestPendingLoginBlockedByLaterDisable(t *testing.T) {
 		if st := approve(t, h, dev.Auth, m.Click); st != 403 {
 			t.Fatalf("approve for disabled user: %d", st)
 		}
-		id := strings.TrimPrefix(testutil.LocalPath(t, m.Click), "/c/")
+		id := strings.TrimPrefix(testutil.LocalPath(t, m.Click), "/challenge/")
 		if err := h.Svc.AdminApprove(ctx, id); err == nil {
 			t.Fatal("admin approve for disabled user succeeded")
 		}
