@@ -87,6 +87,18 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.Handle("POST /devices/{id}/revoke", s.sameOrigin(s.revoke))
 }
 
+// SecurityHeaders sets the headers every response carries, Duo API and static files included.
+// HSTS is sent on plain HTTP too: browsers ignore it there, and behind a TLS proxy it reaches them
+// over HTTPS. It leaves out includeSubDomains, as the shim does not own the rest of the domain.
+func SecurityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("Strict-Transport-Security", "max-age=31536000")
+		h.Set("X-Content-Type-Options", "nosniff")
+		next.ServeHTTP(w, r)
+	})
+}
+
 // ---- helpers
 
 func (s *Server) render(w http.ResponseWriter, status int, name string, data any) {

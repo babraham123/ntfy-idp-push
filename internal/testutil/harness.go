@@ -119,7 +119,7 @@ func (h *Harness) serve(t *testing.T) {
 	}
 	duoapi.New(svc, h.log).Register(mux)
 	web.New(svc, identity, h.log).Register(mux)
-	h.Server.Config.Handler = mux
+	h.Server.Config.Handler = web.SecurityHeaders(mux)
 	h.Svc = svc
 }
 
