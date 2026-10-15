@@ -38,7 +38,8 @@ Commands:
   version
 
 The config path defaults to $NTFY_IDP_PUSH_CONFIG, then /etc/ntfy-idp-push/server.yml.
-Every key can be set as NTFY_IDP_PUSH_<KEY> (e.g. NTFY_IDP_PUSH_DUO_SECRET_KEY).
+Every key can be set as NTFY_IDP_PUSH_<KEY> (e.g. NTFY_IDP_PUSH_DUO_SECRET_KEY). Secrets can be read
+from a file with <key>-file or NTFY_IDP_PUSH_<KEY>_FILE (e.g. NTFY_IDP_PUSH_DUO_SECRET_KEY_FILE).
 `
 
 var version = "dev"

@@ -157,3 +157,52 @@ ntfy-admin-token: tk_x
 		t.Fatal("unknown key accepted")
 	}
 }
+
+func TestSecretFiles(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, content string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	skey := strings.Repeat("k", 40)
+	cfgPath := write("server.yml", `duo-hostname: push.example.com
+duo-integration-key: DIAAAAAAAAAAAAAAAAAA
+duo-secret-key-file: `+write("skey", skey+"\n")+`
+tls-cert-file: /etc/tls.crt
+tls-key-file: /etc/tls.key
+trusted-proxies: ["10.0.0.0/8"]
+ntfy-base-url: https://ntfy.example.com
+`)
+	// Docker and Podman secrets, and systemd credentials, are files named by an env variable.
+	t.Setenv("NTFY_IDP_PUSH_NTFY_ADMIN_TOKEN_FILE", write("token", "tk_from_file\r\n"))
+	c, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.DuoSecretKey != skey || c.NtfyAdminToken != "tk_from_file" {
+		t.Fatalf("secrets not read from files: %q %q", c.DuoSecretKey, c.NtfyAdminToken)
+	}
+
+	// A reload re-reads the files, so a rotated secret file takes effect on SIGHUP.
+	write("token", "tk_rotated")
+	if c, err = Load(cfgPath); err != nil || c.NtfyAdminToken != "tk_rotated" {
+		t.Fatalf("reload: %v %q", err, c.NtfyAdminToken)
+	}
+
+	t.Setenv("NTFY_IDP_PUSH_NTFY_ADMIN_TOKEN", "tk_inline")
+	if _, err := Load(cfgPath); err == nil || !strings.Contains(err.Error(), "only one of ntfy-admin-token") {
+		t.Fatalf("value and file both set: %v", err)
+	}
+	os.Unsetenv("NTFY_IDP_PUSH_NTFY_ADMIN_TOKEN")
+	t.Setenv("NTFY_IDP_PUSH_NTFY_ADMIN_TOKEN_FILE", filepath.Join(dir, "missing"))
+	if _, err := Load(cfgPath); err == nil || !strings.Contains(err.Error(), "ntfy-admin-token-file") {
+		t.Fatalf("missing file: %v", err)
+	}
+
+	if _, err := RotateSecretKey(cfgPath, time.Now()); err == nil {
+		t.Fatal("rotated a key kept in a secret file")
+	}
+}

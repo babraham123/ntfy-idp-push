@@ -1,5 +1,7 @@
 # ntfy-idp-push example config. Every key can also be set as NTFY_IDP_PUSH_<KEY>
 # (dashes to underscores; lists comma-separated). SIGHUP reloads per-request settings.
+# Secrets (duo-secret-key, duo-secret-key-previous, ntfy-admin-token, oidc-client-secret) can instead
+# be read from a file: <key>-file here, or NTFY_IDP_PUSH_<KEY>_FILE.
 
 listen-https: ":443"
 # listen-http: ":8080"                 # plain HTTP behind a TLS proxy that preserves Host
@@ -8,6 +10,7 @@ listen-https: ":443"
 duo-hostname: "push.example.com"        # Authelia duo_api.hostname; also the WebAuthn RP ID
 duo-integration-key: "DI…"              # ntfy-idp-push keygen
 duo-secret-key: "…"
+# duo-secret-key-file: "/run/secrets/duo_secret_key"
 duo-max-skew: "300s"
 push-timeout: "60s"
 push-disabled: false                    # kill switch: every preauth/auth answers deny
@@ -20,11 +23,12 @@ auth-mode: "forward"                    # forward: Remote-User from trusted-prox
 trusted-proxies: ["10.0.0.0/8"]
 # oidc-issuer: "https://auth.example.com"
 # oidc-client-id: "ntfy-idp-push"
-# oidc-client-secret: "…"
+# oidc-client-secret: "…"                  # or oidc-client-secret-file
 enroll-portal-url: "https://push.example.com/enroll"   # empty: unenrolled users are denied
 
 ntfy-base-url: "https://ntfy.example.com"
 ntfy-admin-token: "tk_…"
+# ntfy-admin-token-file: "/run/secrets/ntfy_admin_token"
 ntfy-topic-prefix: "push-"
 default-topics: ["alerts", "${user}-inbox"]
 

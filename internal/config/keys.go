@@ -48,7 +48,7 @@ func RotateSecretKey(path string, now time.Time) (string, error) {
 	m := doc.Content[0]
 	old := lookup(m, "duo-secret-key")
 	if old == "" {
-		return "", fmt.Errorf("%s: no duo-secret-key to rotate (secrets from env must be rotated by hand)", path)
+		return "", fmt.Errorf("%s: no duo-secret-key to rotate (a key from the environment or a secret file must be rotated by hand)", path)
 	}
 	key := NewSecretKey()
 	set(m, "duo-secret-key", key)
