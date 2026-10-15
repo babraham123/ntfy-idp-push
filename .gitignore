@@ -3,3 +3,5 @@
 *.sqlite
 *.sqlite-*
 deploy/*.local.*
+deploy/config/
+deploy/secrets/

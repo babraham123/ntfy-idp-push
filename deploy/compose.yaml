@@ -1,0 +1,35 @@
+# docker compose -f deploy/compose.yaml up -d
+# ./config holds server.yml (from deploy/server.yml) and the TLS certificate and key. It is mounted as a
+# directory, not file by file, so replacing a file (keygen --rotate, certificate renewal) is seen inside
+# the container.
+services:
+  ntfy-idp-push:
+    image: ghcr.io/babraham123/ntfy-idp-push:latest
+    restart: unless-stopped
+    ports:
+      - "443:8443"   # IdPs always dial https://<duo-hostname>/
+    volumes:
+      - ./config:/etc/ntfy-idp-push:ro
+      - state:/var/lib/ntfy-idp-push
+    environment:
+      NTFY_IDP_PUSH_TLS_CERT_FILE: /etc/ntfy-idp-push/tls.crt
+      NTFY_IDP_PUSH_TLS_KEY_FILE: /etc/ntfy-idp-push/tls.key
+      # Secrets from files keep them out of server.yml and the environment; leave them out of server.yml.
+      NTFY_IDP_PUSH_DUO_SECRET_KEY_FILE: /run/secrets/duo_secret_key
+      NTFY_IDP_PUSH_NTFY_ADMIN_TOKEN_FILE: /run/secrets/ntfy_admin_token
+    secrets:
+      - duo_secret_key
+      - ntfy_admin_token
+    healthcheck:
+      test: ["CMD", "/usr/bin/ntfy-idp-push", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+
+secrets:
+  duo_secret_key:
+    file: ./secrets/duo_secret_key
+  ntfy_admin_token:
+    file: ./secrets/ntfy_admin_token
+
+volumes:
+  state:
