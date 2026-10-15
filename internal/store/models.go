@@ -137,6 +137,30 @@ func (s *Store) SetUserGrants(ctx context.Context, userID string, grants []confi
 	return err
 }
 
+// SetNtfyResetPending records whether username's ntfy user reset is unfinished.
+func (s *Store) SetNtfyResetPending(ctx context.Context, username string, pending bool) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE users SET ntfy_reset_pending = ? WHERE username = ?`, pending, username)
+	return err
+}
+
+// PendingNtfyResets lists the users whose ntfy user reset is unfinished.
+func (s *Store) PendingNtfyResets(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT username FROM users WHERE ntfy_reset_pending`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var u string
+		if err := rows.Scan(&u); err != nil {
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) SetUserDisabled(ctx context.Context, userID string, disabled bool) error {
 	var v any
 	if disabled {

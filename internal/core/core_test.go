@@ -818,6 +818,39 @@ func TestRevokeResumesAfterNtfyFailure(t *testing.T) {
 	}
 }
 
+// A reset asked for with a revoke must happen even when the revoke fails before reaching it and the
+// purge job then removes the device row a manual retry would need.
+func TestPurgeFinishesInterruptedReset(t *testing.T) {
+	ctx := context.Background()
+	h := testutil.NewHarness(t, nil)
+	kept := h.Enroll(t, "alice", testutil.NewAuthenticator(t, testutil.PublicURL))
+	lost := h.Enroll(t, "alice", testutil.NewAuthenticator(t, testutil.PublicURL))
+	before := h.Ntfy.Password("alice")
+
+	h.Ntfy.FailNext("DELETE", "/v1/users/access", 1)
+	if err := h.Svc.RevokeDevice(ctx, lost.DeviceID, true, false, "test"); err == nil {
+		t.Fatal("revoke reported success while ntfy failed")
+	}
+	if h.Ntfy.Password("alice") != before {
+		t.Fatal("fake ntfy did not fail before the reset")
+	}
+	h.Ntfy.FailNext("POST", "/v1/users", 1)
+	h.Svc.Purge(ctx)
+	if _, err := h.Svc.Store.Device(ctx, lost.DeviceID); err == nil {
+		t.Fatal("purge did not finish the revoke")
+	}
+	h.Svc.Purge(ctx)
+	if h.Ntfy.User("alice") == nil || h.Ntfy.Password("alice") == before {
+		t.Fatal("purge did not reset the ntfy user")
+	}
+	if h.Ntfy.Grant("alice", kept.Topic) != config.PermReadOnly || h.Ntfy.Grant("alice", lost.Topic) != "" {
+		t.Fatalf("grants after reset: %+v", h.Ntfy.User("alice").Grants)
+	}
+	if pending, _ := h.Store.PendingNtfyResets(ctx); len(pending) != 0 {
+		t.Fatalf("resets still pending: %v", pending)
+	}
+}
+
 func TestResetRefusesForeignGrantUnderPushPrefix(t *testing.T) {
 	h := testutil.NewHarness(t, nil)
 	dev := h.Enroll(t, "alice", testutil.NewAuthenticator(t, testutil.PublicURL))

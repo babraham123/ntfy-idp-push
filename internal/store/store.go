@@ -86,6 +86,9 @@ var migrations = []string{
 	// survive a restart, so it is stored (hashed) rather than kept in memory.
 	`ALTER TABLE devices ADD COLUMN result_token_hash BLOB;
 	CREATE UNIQUE INDEX devices_result_token ON devices(result_token_hash);`,
+	// Set while an ntfy user reset is unfinished, so the purge job completes it even after the
+	// revoked device's row, which a manual retry needs, is gone.
+	`ALTER TABLE users ADD COLUMN ntfy_reset_pending INTEGER NOT NULL DEFAULT 0;`,
 }
 
 func Open(path string) (*Store, error) {
