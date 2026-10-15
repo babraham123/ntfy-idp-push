@@ -241,14 +241,15 @@ func (s *Service) EnrollStatus(ctx context.Context, userID, code string) string 
 		return "invalid"
 	}
 	if ec.DeviceID != "" {
-		if d, err := s.Store.Device(ctx, ec.DeviceID); err == nil && d.VerifiedAt != nil {
+		d, err := s.Store.Device(ctx, ec.DeviceID)
+		switch {
+		case err != nil || d.RevokedAt != nil:
+			return "invalid"
+		case d.VerifiedAt != nil:
 			return "success"
 		}
 		// Enrolled but not yet verified: still waiting until the unverified device is purged.
-		if err == nil {
-			return "waiting"
-		}
-		return "invalid"
+		return "waiting"
 	}
 	if !time.Now().Before(ec.ExpiresAt) {
 		return "invalid"
