@@ -280,7 +280,7 @@ func (s *Service) RevokeDevice(ctx context.Context, deviceID string, resetNtfyUs
 	if err := s.denyPending(ctx, store.ChallengeFilter{DeviceID: d.ID}); err != nil {
 		return err
 	}
-	if err := s.Ntfy.ResetAccess(ctx, d.Username, d.NtfyTopic); err != nil && !ntfy.IsStatus(err, 404) {
+	if err := s.Ntfy.ResetAccess(ctx, d.Username, d.NtfyTopic); err != nil {
 		return fmt.Errorf("device revoked but its ntfy grant was not removed; re-run to retry: %w", err)
 	}
 	if resetNtfyUser {
@@ -336,7 +336,7 @@ func (s *Service) ResetNtfyUser(ctx context.Context, username string, force bool
 	if err := s.checkResettable(ctx, username, force); err != nil {
 		return err
 	}
-	if err := s.Ntfy.DeleteUser(ctx, username); err != nil && !ntfy.IsStatus(err, 404) {
+	if err := s.Ntfy.DeleteUser(ctx, username); err != nil {
 		return err
 	}
 	if _, err := s.Provision(ctx, username); err != nil {
@@ -399,7 +399,7 @@ func (s *Service) DeleteUser(ctx context.Context, username string, keepNtfy bool
 		}
 	}
 	if !keepNtfy {
-		if err := s.Ntfy.DeleteUser(ctx, username); err != nil && !ntfy.IsStatus(err, 404) {
+		if err := s.Ntfy.DeleteUser(ctx, username); err != nil {
 			return err
 		}
 	}
