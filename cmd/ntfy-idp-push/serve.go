@@ -45,7 +45,7 @@ func serve(cfg *config.Config, cfgPath string) error {
 	newServer := func(addr string) *http.Server {
 		return &http.Server{
 			Addr:              addr,
-			Handler:           mux,
+			Handler:           web.SecurityHeaders(mux),
 			ReadHeaderTimeout: 10 * time.Second,
 			ReadTimeout:       30 * time.Second,
 			// /auth/v2/auth extends its own deadline past push-timeout.
