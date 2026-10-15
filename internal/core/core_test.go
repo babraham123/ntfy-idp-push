@@ -3,6 +3,7 @@ package core_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"net/url"
@@ -848,6 +849,78 @@ func TestPurgeFinishesInterruptedReset(t *testing.T) {
 	}
 	if pending, _ := h.Store.PendingNtfyResets(ctx); len(pending) != 0 {
 		t.Fatalf("resets still pending: %v", pending)
+	}
+}
+
+// Disabling a user denies its logins; it must not stop a reset from recreating the ntfy account,
+// or the reset would delete the user and then stay pending forever.
+func TestResetWhileUserDisabled(t *testing.T) {
+	ctx := context.Background()
+	h := testutil.NewHarness(t, nil)
+	kept := h.Enroll(t, "alice", testutil.NewAuthenticator(t, testutil.PublicURL))
+	lost := h.Enroll(t, "alice", testutil.NewAuthenticator(t, testutil.PublicURL))
+	if err := h.Svc.SetUserDisabled(ctx, "alice", true); err != nil {
+		t.Fatal(err)
+	}
+	wantGrants := func(want map[string]string) {
+		t.Helper()
+		u := h.Ntfy.User("alice")
+		if u == nil {
+			t.Fatal("ntfy user not recreated")
+		}
+		got := map[string]string{}
+		for _, g := range u.Grants {
+			got[g.Topic] = g.Permission
+		}
+		if len(got) != len(want) {
+			t.Fatalf("grants %v, want %v", got, want)
+		}
+		for k, v := range want {
+			if got[k] != v {
+				t.Fatalf("grants %v, want %v", got, want)
+			}
+		}
+	}
+
+	before := h.Ntfy.Password("alice")
+	if err := h.Svc.RevokeDevice(ctx, lost.DeviceID, true, false, "test"); err != nil {
+		t.Fatalf("revoke with reset: %v", err)
+	}
+	if h.Ntfy.Password("alice") == before {
+		t.Fatal("ntfy user not recreated")
+	}
+	wantGrants(map[string]string{"alice-*": config.PermReadWrite, "alerts": config.PermReadOnly, kept.Topic: config.PermReadOnly})
+	if pending, _ := h.Store.PendingNtfyResets(ctx); len(pending) != 0 {
+		t.Fatalf("resets still pending: %v", pending)
+	}
+	if _, err := h.Svc.Store.Device(ctx, lost.DeviceID); err == nil {
+		t.Fatal("device row kept")
+	}
+
+	// Nothing is left for the purge job.
+	after := h.Ntfy.Password("alice")
+	if err := h.Svc.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if h.Ntfy.Password("alice") != after {
+		t.Fatal("reconcile reset the ntfy user again")
+	}
+
+	// user reset-ntfy works on a disabled user too; the user stays disabled.
+	if err := h.Svc.ResetNtfyUser(ctx, "alice", false); err != nil {
+		t.Fatalf("reset-ntfy: %v", err)
+	}
+	if h.Ntfy.Password("alice") == after {
+		t.Fatal("ntfy user not recreated")
+	}
+	wantGrants(map[string]string{"alice-*": config.PermReadWrite, "alerts": config.PermReadOnly, kept.Topic: config.PermReadOnly})
+	pre, _ := h.Duo(testutil.IKey, testutil.SKey).Preauth(authapi.PreauthUsername("alice"))
+	if pre.Response.Result != "deny" {
+		t.Fatalf("preauth after reset of a disabled user: %+v", pre.Response)
+	}
+	// Onboarding still refuses a disabled user.
+	if _, err := h.Svc.Provision(ctx, "alice"); !errors.Is(err, core.ErrUserDisabled) {
+		t.Fatalf("provision of a disabled user: %v", err)
 	}
 }
 
