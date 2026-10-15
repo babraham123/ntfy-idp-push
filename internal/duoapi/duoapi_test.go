@@ -308,7 +308,7 @@ func TestV5JSONEnrollAndStatus(t *testing.T) {
 	if resp.StatusCode != 200 || resp.Header.Get("Content-Type") != "image/png" || len(png) == 0 {
 		t.Fatalf("barcode: %d %s", resp.StatusCode, resp.Header.Get("Content-Type"))
 	}
-	resp, _ = h.Do(t, testutil.Request{Method: "GET", Path: "/frame/qr?value=" + url.QueryEscape("https://evil.example/")})
+	resp, _ = h.Do(t, testutil.Request{Method: "GET", Path: "/enroll/qr?value=" + url.QueryEscape("https://evil.example/")})
 	if resp.StatusCode != 404 {
 		t.Fatalf("arbitrary QR value: %d", resp.StatusCode)
 	}

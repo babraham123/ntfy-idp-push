@@ -54,7 +54,7 @@ func (s *Service) Authenticate(ctx context.Context, r AuthRequest) (store.Challe
 	if err != nil {
 		return store.StateDeny, err
 	}
-	approveURL := cfg.PublicURL + "/c/" + c.ID
+	approveURL := cfg.PublicURL + "/challenge/" + c.ID
 	if err := s.Ntfy.Publish(ctx, &ntfy.Message{
 		Topic:      r.Device.NtfyTopic,
 		SequenceID: c.ID,
