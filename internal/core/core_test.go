@@ -566,9 +566,70 @@ func TestStartupChecks(t *testing.T) {
 	if err := h.Svc.StartupChecks(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	h2 := testutil.NewHarness(t, func(c *config.Config) { c.NtfyAdminToken = "tk_wrong" })
-	if err := h2.Svc.StartupChecks(context.Background()); err == nil {
-		t.Fatal("wrong admin token passed startup checks")
+	for name, unsafe := range map[string]func(*testutil.Harness){
+		"wrong admin token": func(h *testutil.Harness) {
+			h.Restart(t, func(c *config.Config) { c.NtfyAdminToken = "tk_wrong" })
+		},
+		// A non-admin token could not manage users, and suggests the wrong token was configured.
+		"non-admin token": func(h *testutil.Harness) { h.Ntfy.AdminRole = "user" },
+		// Anyone could read the push topics, and with them the approve links and deny tokens.
+		"anonymous read": func(h *testutil.Harness) { h.Ntfy.AnonymousRead = true },
+	} {
+		h := testutil.NewHarness(t, nil)
+		unsafe(h)
+		if err := h.Svc.StartupChecks(context.Background()); err == nil {
+			t.Errorf("%s passed startup checks", name)
+		}
+	}
+}
+
+func TestResetResumesAfterNtfyUserDeleted(t *testing.T) {
+	ctx := context.Background()
+	h := testutil.NewHarness(t, nil)
+	dev := h.Enroll(t, "alice", testutil.NewAuthenticator(t, testutil.PublicURL))
+
+	// ntfy deleted the user, then failed to recreate it.
+	h.Ntfy.FailNext("POST", "/v1/users", 1)
+	if err := h.Svc.ResetNtfyUser(ctx, "alice", false); err == nil {
+		t.Fatal("reset reported success while ntfy failed")
+	}
+	if h.Ntfy.User("alice") != nil {
+		t.Fatal("fake ntfy did not get past the delete")
+	}
+	if err := h.Svc.ResetNtfyUser(ctx, "alice", false); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if h.Ntfy.Grant("alice", dev.Topic) != config.PermReadOnly || h.Ntfy.Grant("alice", "alice-*") != config.PermReadWrite {
+		t.Fatalf("grants after resumed reset: %+v", h.Ntfy.User("alice"))
+	}
+}
+
+func TestCleanupWhenNtfyUserAlreadyGone(t *testing.T) {
+	ctx := context.Background()
+	h := testutil.NewHarness(t, nil)
+	first := h.Enroll(t, "alice", testutil.NewAuthenticator(t, testutil.PublicURL))
+	h.Enroll(t, "alice", testutil.NewAuthenticator(t, testutil.PublicURL))
+	stale := h.Enroll(t, "alice", testutil.NewAuthenticator(t, testutil.PublicURL))
+	h.Ntfy.FailNext("DELETE", "/v1/users/access", 1)
+	_ = h.Svc.RevokeDevice(ctx, stale.DeviceID, false, false, "test")
+
+	// An ntfy admin removed the user by hand: there is nothing left to revoke there.
+	h.Ntfy.DeleteUser("alice")
+	if err := h.Svc.RevokeDevice(ctx, first.DeviceID, false, false, "test"); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	if _, err := h.Svc.Store.Device(ctx, first.DeviceID); err == nil {
+		t.Fatal("device row kept")
+	}
+	h.Svc.Purge(ctx)
+	if _, err := h.Svc.Store.Device(ctx, stale.DeviceID); err == nil {
+		t.Fatal("purge did not finish the revoke")
+	}
+	if err := h.Svc.DeleteUser(ctx, "alice", false); err != nil {
+		t.Fatalf("delete user: %v", err)
+	}
+	if _, err := h.Svc.Store.UserByName(ctx, "alice"); err == nil {
+		t.Fatal("user row kept")
 	}
 }
 

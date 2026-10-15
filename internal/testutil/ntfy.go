@@ -18,10 +18,15 @@ import (
 const AdminToken = "tk_admin"
 
 // FakeNtfy implements the slice of ntfy's API the shim uses, with auth-default-access: deny-all.
+// Error statuses and codes follow ntfy v2.30 (server/server_admin.go).
 type FakeNtfy struct {
 	*httptest.Server
 	// EnrollSupported toggles the ntfy#597 POST /v1/users/token/enroll endpoint.
 	EnrollSupported bool
+	// AdminRole is the role GET /v1/account reports for the admin token.
+	AdminRole string
+	// AnonymousRead simulates a server that lets anyone poll any topic.
+	AnonymousRead bool
 
 	mu        sync.Mutex
 	failures  map[string]int // "METHOD /path" -> calls left to fail with 500
@@ -36,6 +41,7 @@ type FakeNtfy struct {
 func NewFakeNtfy(t *testing.T) *FakeNtfy {
 	f := &FakeNtfy{
 		EnrollSupported: true,
+		AdminRole:       "admin",
 		users:           map[string]*ntfy.User{"idp-push": {Username: "idp-push", Role: "admin"}},
 		pubCh:           make(chan ntfy.Message, 100),
 		codes:           map[string]string{},
@@ -70,7 +76,7 @@ func (f *FakeNtfy) serve(w http.ResponseWriter, r *http.Request) {
 		delete(f.codes, body["code"])
 		json.NewEncoder(w).Encode(ntfy.Token{Token: "tk_" + user, Label: body["label"], Username: user})
 	case strings.HasSuffix(r.URL.Path, "/json") && r.Method == http.MethodGet:
-		if !admin {
+		if !admin && !f.AnonymousRead {
 			http.Error(w, `{"code":40301}`, http.StatusForbidden)
 			return
 		}
@@ -78,7 +84,7 @@ func (f *FakeNtfy) serve(w http.ResponseWriter, r *http.Request) {
 	case !admin:
 		http.Error(w, `{"code":40101}`, http.StatusUnauthorized)
 	case r.URL.Path == "/v1/account" && r.Method == http.MethodGet:
-		json.NewEncoder(w).Encode(ntfy.Account{Username: "idp-push", Role: "admin"})
+		json.NewEncoder(w).Encode(ntfy.Account{Username: "idp-push", Role: f.AdminRole})
 	case r.URL.Path == "/v1/users" && r.Method == http.MethodGet:
 		out := []ntfy.User{}
 		for _, u := range f.users {
@@ -98,15 +104,15 @@ func (f *FakeNtfy) serve(w http.ResponseWriter, r *http.Request) {
 		f.passwords[body["username"]] = body["password"]
 		w.Write([]byte(`{"success":true}`))
 	case r.URL.Path == "/v1/users" && r.Method == http.MethodPut:
+		// An upsert: ntfy creates a missing user.
 		if f.users[body["username"]] == nil {
-			http.Error(w, `{"code":40401}`, http.StatusNotFound)
-			return
+			f.users[body["username"]] = &ntfy.User{Username: body["username"], Role: "user"}
 		}
 		f.passwords[body["username"]] = body["password"]
 		w.Write([]byte(`{"success":true}`))
 	case r.URL.Path == "/v1/users" && r.Method == http.MethodDelete:
 		if f.users[body["username"]] == nil {
-			http.Error(w, `{"code":40401}`, http.StatusNotFound)
+			http.Error(w, `{"code":40031}`, http.StatusBadRequest)
 			return
 		}
 		delete(f.users, body["username"])
@@ -115,7 +121,7 @@ func (f *FakeNtfy) serve(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/v1/users/access" && (r.Method == http.MethodPut || r.Method == http.MethodPost):
 		u := f.users[body["username"]]
 		if u == nil {
-			http.Error(w, `{"code":40401}`, http.StatusNotFound)
+			http.Error(w, `{"code":40031}`, http.StatusBadRequest)
 			return
 		}
 		u.Grants = setGrant(u.Grants, ntfy.Grant{Topic: body["topic"], Permission: body["permission"]})
@@ -123,7 +129,8 @@ func (f *FakeNtfy) serve(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/v1/users/access" && r.Method == http.MethodDelete:
 		u := f.users[body["username"]]
 		if u == nil {
-			http.Error(w, `{"code":40401}`, http.StatusNotFound)
+			// ntfy passes user.ErrUserNotFound through unwrapped, which it reports as a generic 500.
+			http.Error(w, `{"code":50001}`, http.StatusInternalServerError)
 			return
 		}
 		u.Grants = setGrant(u.Grants, ntfy.Grant{Topic: body["topic"]})
@@ -249,4 +256,12 @@ func (f *FakeNtfy) Deleted() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.deleted...)
+}
+
+// DeleteUser removes the ntfy user directly, as an admin acting outside the shim would.
+func (f *FakeNtfy) DeleteUser(name string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.users, name)
+	f.dropCodes(name)
 }

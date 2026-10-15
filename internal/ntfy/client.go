@@ -29,7 +29,9 @@ func New(baseURL, token string) *Client {
 type HTTPError struct {
 	Method, Path string
 	Status       int
-	Body         string
+	// Code is ntfy's error code from the JSON body (e.g. 40031), or 0.
+	Code int
+	Body string
 }
 
 func (e *HTTPError) Error() string {
@@ -40,6 +42,18 @@ func IsStatus(err error, status int) bool {
 	var he *HTTPError
 	return errors.As(err, &he) && he.Status == status
 }
+
+// codeUserNotFound is ntfy's "invalid request: user does not exist" (HTTP 400).
+const codeUserNotFound = 40031
+
+// IsUserNotFound reports whether ntfy refused the call because the user does not exist.
+func IsUserNotFound(err error) bool {
+	var he *HTTPError
+	return errors.As(err, &he) && he.Code == codeUserNotFound
+}
+
+// maxResponse bounds every ntfy response read into memory.
+const maxResponse = 1 << 20
 
 func (c *Client) do(ctx context.Context, method, path string, in, out any, auth bool) error {
 	var body io.Reader
@@ -65,9 +79,19 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any, auth 
 		return err
 	}
 	defer resp.Body.Close()
-	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponse+1))
 	if resp.StatusCode/100 != 2 {
-		return &HTTPError{Method: method, Path: path, Status: resp.StatusCode, Body: string(bytes.TrimSpace(b))}
+		he := &HTTPError{Method: method, Path: path, Status: resp.StatusCode, Body: string(bytes.TrimSpace(b))}
+		var body struct{ Code int }
+		if json.Unmarshal(b, &body) == nil {
+			he.Code = body.Code
+		}
+		return he
+	}
+	if len(b) > maxResponse {
+		// GET /v1/users lists every ntfy user with its grants, so this is reached first by a large
+		// user base; a truncated list must never be mistaken for the whole one.
+		return fmt.Errorf("ntfy %s %s: response exceeds the %d MiB cap (too many ntfy users or grants for this client)", method, path, maxResponse>>20)
 	}
 	if out != nil {
 		return json.Unmarshal(b, out)
@@ -125,8 +149,14 @@ func (c *Client) ChangePassword(ctx context.Context, username, password string) 
 	return c.do(ctx, http.MethodPut, "/v1/users", map[string]string{"username": username, "password": password}, nil, true)
 }
 
+// DeleteUser removes username. A user that is already gone counts as deleted, so an interrupted
+// delete-and-recreate can resume.
 func (c *Client) DeleteUser(ctx context.Context, username string) error {
-	return c.do(ctx, http.MethodDelete, "/v1/users", map[string]string{"username": username}, nil, true)
+	err := c.do(ctx, http.MethodDelete, "/v1/users", map[string]string{"username": username}, nil, true)
+	if IsUserNotFound(err) {
+		return nil
+	}
+	return err
 }
 
 func (c *Client) AllowAccess(ctx context.Context, username, topic, permission string) error {
@@ -134,8 +164,17 @@ func (c *Client) AllowAccess(ctx context.Context, username, topic, permission st
 		map[string]string{"username": username, "topic": topic, "permission": permission}, nil, true)
 }
 
+// ResetAccess removes username's grant on topic. A missing user has no grants, so that counts as
+// done; ntfy reports it only as a generic 500, hence the lookup.
 func (c *Client) ResetAccess(ctx context.Context, username, topic string) error {
-	return c.do(ctx, http.MethodDelete, "/v1/users/access", map[string]string{"username": username, "topic": topic}, nil, true)
+	err := c.do(ctx, http.MethodDelete, "/v1/users/access", map[string]string{"username": username, "topic": topic}, nil, true)
+	if err == nil {
+		return nil
+	}
+	if u, lerr := c.User(ctx, username); lerr == nil && u == nil {
+		return nil
+	}
+	return err
 }
 
 type EnrollCode struct {

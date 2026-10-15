@@ -256,7 +256,7 @@ func (s *Service) Purge(ctx context.Context) {
 // removeDevice drops the device's topic grant, then its row. The row goes last so a failed ntfy
 // call leaves something to retry from.
 func (s *Service) removeDevice(ctx context.Context, d *store.Device) error {
-	if err := s.Ntfy.ResetAccess(ctx, d.Username, d.NtfyTopic); err != nil && !ntfy.IsStatus(err, 404) {
+	if err := s.Ntfy.ResetAccess(ctx, d.Username, d.NtfyTopic); err != nil {
 		return err
 	}
 	return s.Store.DeleteDevice(ctx, d.ID)
