@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -14,7 +13,6 @@ import (
 
 	"github.com/babraham123/ntfy-idp-push/internal/config"
 	"github.com/babraham123/ntfy-idp-push/internal/duoapi"
-	"github.com/babraham123/ntfy-idp-push/internal/oidc"
 	"github.com/babraham123/ntfy-idp-push/internal/tlsconfig"
 	"github.com/babraham123/ntfy-idp-push/internal/web"
 )
@@ -36,19 +34,10 @@ func serve(cfg *config.Config, cfgPath string) error {
 		return fmt.Errorf("startup check: %w", err)
 	}
 
-	var identity web.Identity
 	mux := http.NewServeMux()
-	switch cfg.AuthMode {
-	case "oidc":
-		a, err := oidc.New(ctx, cfg.OIDCIssuer, cfg.OIDCClientID, cfg.OIDCClientSecret, cfg.PublicURL, svc.Store)
-		if err != nil {
-			return fmt.Errorf("oidc: %w", err)
-		}
-		mux.HandleFunc("GET "+oidc.LoginPath, a.Login)
-		mux.HandleFunc("GET "+oidc.CallbackPath, a.Callback)
-		identity = web.OIDCAuth{Auth: a}
-	default:
-		identity = web.ForwardAuth{Trusted: func() []*net.IPNet { return svc.Config().TrustedNets }}
+	identity, err := web.NewIdentity(ctx, svc, mux)
+	if err != nil {
+		return err
 	}
 	duoapi.New(svc, log).Register(mux)
 	web.New(svc, identity, log).Register(mux)
