@@ -40,30 +40,34 @@ type Config struct {
 	// PublicURL is the origin users reach the shim at; defaults to https://<duo-hostname>.
 	PublicURL string `yaml:"public-url"`
 
-	DuoHostname           string   `yaml:"duo-hostname"`
-	DuoIntegrationKey     string   `yaml:"duo-integration-key"`
-	DuoSecretKey          string   `yaml:"duo-secret-key"`
-	DuoSecretKeyPrevious  string   `yaml:"duo-secret-key-previous"`
-	DuoSecretKeyRotatedAt string   `yaml:"duo-secret-key-rotated-at"`
-	DuoKeyGrace           Duration `yaml:"duo-key-grace"`
-	DuoMaxSkew            Duration `yaml:"duo-max-skew"`
-	PushTimeout           Duration `yaml:"push-timeout"`
-	PushDisabled          bool     `yaml:"push-disabled"`
+	DuoHostname              string   `yaml:"duo-hostname"`
+	DuoIntegrationKey        string   `yaml:"duo-integration-key"`
+	DuoSecretKey             string   `yaml:"duo-secret-key"`
+	DuoSecretKeyFile         string   `yaml:"duo-secret-key-file"`
+	DuoSecretKeyPrevious     string   `yaml:"duo-secret-key-previous"`
+	DuoSecretKeyPreviousFile string   `yaml:"duo-secret-key-previous-file"`
+	DuoSecretKeyRotatedAt    string   `yaml:"duo-secret-key-rotated-at"`
+	DuoKeyGrace              Duration `yaml:"duo-key-grace"`
+	DuoMaxSkew               Duration `yaml:"duo-max-skew"`
+	PushTimeout              Duration `yaml:"push-timeout"`
+	PushDisabled             bool     `yaml:"push-disabled"`
 
 	TLSCertFile string `yaml:"tls-cert-file"`
 	TLSKeyFile  string `yaml:"tls-key-file"`
 
-	AuthMode         string   `yaml:"auth-mode"`
-	TrustedProxies   []string `yaml:"trusted-proxies"`
-	OIDCIssuer       string   `yaml:"oidc-issuer"`
-	OIDCClientID     string   `yaml:"oidc-client-id"`
-	OIDCClientSecret string   `yaml:"oidc-client-secret"`
-	EnrollPortalURL  string   `yaml:"enroll-portal-url"`
+	AuthMode             string   `yaml:"auth-mode"`
+	TrustedProxies       []string `yaml:"trusted-proxies"`
+	OIDCIssuer           string   `yaml:"oidc-issuer"`
+	OIDCClientID         string   `yaml:"oidc-client-id"`
+	OIDCClientSecret     string   `yaml:"oidc-client-secret"`
+	OIDCClientSecretFile string   `yaml:"oidc-client-secret-file"`
+	EnrollPortalURL      string   `yaml:"enroll-portal-url"`
 
-	NtfyBaseURL     string   `yaml:"ntfy-base-url"`
-	NtfyAdminToken  string   `yaml:"ntfy-admin-token"`
-	NtfyTopicPrefix string   `yaml:"ntfy-topic-prefix"`
-	DefaultTopics   []string `yaml:"default-topics"`
+	NtfyBaseURL        string   `yaml:"ntfy-base-url"`
+	NtfyAdminToken     string   `yaml:"ntfy-admin-token"`
+	NtfyAdminTokenFile string   `yaml:"ntfy-admin-token-file"`
+	NtfyTopicPrefix    string   `yaml:"ntfy-topic-prefix"`
+	DefaultTopics      []string `yaml:"default-topics"`
 
 	EnrollRole            string   `yaml:"enroll-role"`
 	EnrollAccess          []string `yaml:"enroll-access"`
@@ -94,7 +98,8 @@ func defaults() *Config {
 	}
 }
 
-// Load reads path (may be empty), applies NTFY_IDP_PUSH_* env overrides and validates.
+// Load reads path (may be empty), applies NTFY_IDP_PUSH_* env overrides, reads secret files and
+// validates.
 func Load(path string) (*Config, error) {
 	c := defaults()
 	if path != "" {
@@ -110,6 +115,9 @@ func Load(path string) (*Config, error) {
 		}
 	}
 	if err := applyEnv(c, os.LookupEnv); err != nil {
+		return nil, err
+	}
+	if err := c.readSecretFiles(); err != nil {
 		return nil, err
 	}
 	if err := c.Validate(); err != nil {
@@ -261,6 +269,43 @@ func (c *Config) Validate() error {
 			errs = append(errs, fmt.Errorf("duo-secret-key-rotated-at: %w", err))
 		}
 		c.previousKeyEnd = at.Add(c.DuoKeyGrace.D())
+	}
+	return errors.Join(errs...)
+}
+
+// secretFile pairs a secret with the <key>-file setting that may supply it.
+type secretFile struct {
+	key         string
+	value, path *string
+}
+
+func (c *Config) secretFiles() []secretFile {
+	return []secretFile{
+		{"duo-secret-key", &c.DuoSecretKey, &c.DuoSecretKeyFile},
+		{"duo-secret-key-previous", &c.DuoSecretKeyPrevious, &c.DuoSecretKeyPreviousFile},
+		{"oidc-client-secret", &c.OIDCClientSecret, &c.OIDCClientSecretFile},
+		{"ntfy-admin-token", &c.NtfyAdminToken, &c.NtfyAdminTokenFile},
+	}
+}
+
+// readSecretFiles loads each <key>-file into <key>, for Docker/Podman secrets and systemd
+// credentials. Setting both would leave which one wins ambiguous, so it is refused.
+func (c *Config) readSecretFiles() error {
+	var errs []error
+	for _, s := range c.secretFiles() {
+		if *s.path == "" {
+			continue
+		}
+		if *s.value != "" {
+			errs = append(errs, fmt.Errorf("set only one of %s and %s-file", s.key, s.key))
+			continue
+		}
+		b, err := os.ReadFile(*s.path)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s-file: %w", s.key, err))
+			continue
+		}
+		*s.value = strings.TrimRight(string(b), "\r\n")
 	}
 	return errors.Join(errs...)
 }
