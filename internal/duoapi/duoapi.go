@@ -126,7 +126,7 @@ func (h *Handler) authenticate(r *http.Request, noReplay bool) (params, error) {
 	}
 	req.body = body
 	ct, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
-	values := url.Values{}
+	var values url.Values
 	switch {
 	case ct == "application/json":
 		req.json = true

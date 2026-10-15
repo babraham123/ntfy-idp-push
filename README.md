@@ -121,6 +121,7 @@ device list <u> | revoke <id> [--reset-ntfy-user] [--force]
 
 ```sh
 make test   # go test -race ./...
+make lint   # gofmt, go vet, staticcheck, govulncheck; CI runs both on every PR
 ```
 
 Tests drive the real `duo_api_golang` client (v2 form and v5 JSON signing) against the server, with a

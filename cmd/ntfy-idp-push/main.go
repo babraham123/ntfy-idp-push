@@ -209,7 +209,7 @@ func keygen(cfgPath string, args []string) error {
 func userCmd(ctx context.Context, svc *core.Service, args []string) error {
 	flags, pos := splitArgs(args)
 	if len(pos) == 0 {
-		return errors.New("usage: user list|provision|disable|enable|delete|approve|reset-ntfy ...")
+		return errors.New("usage: user list|provision|disable|enable|delete|approve|reset-ntfy [args]")
 	}
 	fs := flag.NewFlagSet("user", flag.ContinueOnError)
 	keepNtfy := fs.Bool("keep-ntfy-user", false, "keep the ntfy user when deleting")
