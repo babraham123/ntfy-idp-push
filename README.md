@@ -82,10 +82,22 @@ Set `tls-cert-file` and `tls-key-file`; the pair is reloaded when the certificat
 `listen-http` and terminate TLS in a proxy that preserves `Host`. Duo clients pin Duo's CA bundle, so the
 IdP must trust the shim's certificate chain or have that pinning disabled.
 
+## Backup
+
+The database holds every passkey; losing it means re-enrolling every phone. `backup` writes a
+consistent copy while the server runs, `-` to stdout:
+
+```sh
+docker compose -f deploy/compose.yaml exec -T ntfy-idp-push ntfy-idp-push backup - > backup.sqlite
+```
+
+To restore, stop the server and replace `db.sqlite` with the copy, deleting any `db.sqlite-wal` and
+`db.sqlite-shm` beside it.
+
 ## CLI
 
 ```
-serve | keygen [--rotate] | enroll-link <user> | audit [user] | healthcheck [url] | version
+serve | keygen [--rotate] | enroll-link <user> | audit [user] | backup <path>|- | healthcheck [url] | version
 user list | provision <u> | disable <u> | enable <u> | delete <u> [--keep-ntfy-user] | approve <challenge>
 user reset-ntfy <u> [--force]
 device list <u> | revoke <id> [--reset-ntfy-user] [--force]

@@ -7,13 +7,16 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"text/tabwriter"
 	"time"
 
+	"github.com/babraham123/ntfy-idp-push/internal/challenge"
 	"github.com/babraham123/ntfy-idp-push/internal/config"
 	"github.com/babraham123/ntfy-idp-push/internal/core"
 	"github.com/babraham123/ntfy-idp-push/internal/store"
@@ -34,6 +37,7 @@ Commands:
   device revoke <device-id> [--reset-ntfy-user] [--force]
   enroll-link <username>                  print a single-use enrollment link, valid 5 minutes
   audit [username]                        print the last 100 audit entries
+  backup <path>|-                         write a consistent copy of the database, safe while serving
   healthcheck [url]                       exit 0 if url (default https://127.0.0.1:8443/healthz) answers 200
   version
 
@@ -125,6 +129,11 @@ func run(args []string) error {
 		}
 		fmt.Println(link)
 		return nil
+	case "backup":
+		if len(rest) != 1 {
+			return errors.New("usage: backup <path>|-")
+		}
+		return backup(ctx, svc.Store, filepath.Dir(cfg.Database), rest[0])
 	case "audit":
 		user := ""
 		if len(rest) > 0 {
@@ -156,6 +165,26 @@ func open(cfg *config.Config) (*core.Service, func(), error) {
 		return nil, nil, err
 	}
 	return svc, func() { st.Close() }, nil
+}
+
+// backup writes the database copy to path, or to stdout for "-" by way of a temporary file in dir
+// (the state volume in a container, which is writable).
+func backup(ctx context.Context, st *store.Store, dir, path string) error {
+	if path != "-" {
+		return st.Backup(ctx, path)
+	}
+	tmp := filepath.Join(dir, ".backup-"+challenge.RandomToken(8)+".sqlite")
+	if err := st.Backup(ctx, tmp); err != nil {
+		return err
+	}
+	defer os.Remove(tmp)
+	f, err := os.Open(tmp)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = io.Copy(os.Stdout, f)
+	return err
 }
 
 func keygen(cfgPath string, args []string) error {
