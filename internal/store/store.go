@@ -229,8 +229,13 @@ func (s *Store) Purge(ctx context.Context, now time.Time, unverifiedTTL, challen
 	return nil
 }
 
-// StaleDevices lists devices never verified within unverifiedTTL and revoked devices whose ntfy
-// cleanup has not finished.
-func (s *Store) StaleDevices(ctx context.Context, now time.Time, unverifiedTTL time.Duration) ([]Device, error) {
-	return s.queryDevices(ctx, `WHERE (d.verified_at IS NULL AND d.created_at < ?) OR d.revoked_at IS NOT NULL`, unix(now.Add(-unverifiedTTL)))
+// ExpiredUnverifiedDevices lists unrevoked devices never verified within unverifiedTTL.
+func (s *Store) ExpiredUnverifiedDevices(ctx context.Context, now time.Time, unverifiedTTL time.Duration) ([]Device, error) {
+	return s.queryDevices(ctx, `WHERE d.verified_at IS NULL AND d.revoked_at IS NULL AND d.created_at < ?`, unix(now.Add(-unverifiedTTL)))
+}
+
+// RevokedDevices lists revoked devices whose row is still present: their ntfy cleanup has not
+// finished.
+func (s *Store) RevokedDevices(ctx context.Context) ([]Device, error) {
+	return s.queryDevices(ctx, `WHERE d.revoked_at IS NOT NULL`)
 }

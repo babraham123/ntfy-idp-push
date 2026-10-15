@@ -117,8 +117,8 @@ func (s *Service) Provision(ctx context.Context, username string) (*store.User, 
 	if err := ValidUsername(username); err != nil {
 		return nil, err
 	}
-	cfg := s.Config()
-	grants, err := config.ExpandAccess(cfg.Access, cfg.NtfyTopicPrefix, username)
+	// Expanded before the user row exists, so a name refused here leaves nothing behind.
+	grants, err := s.enrollGrants(username)
 	if err != nil {
 		return nil, err
 	}
@@ -129,33 +129,48 @@ func (s *Service) Provision(ctx context.Context, username string) (*store.User, 
 	if u.DisabledAt != nil {
 		return nil, ErrUserDisabled
 	}
-	if err := s.ensureNtfyUser(ctx, username); err != nil {
+	if err := s.applyNtfyAccount(ctx, u, grants); err != nil {
 		return nil, err
 	}
+	s.Store.Audit(ctx, username, "provision", map[string]any{"grants": grants})
+	return u, nil
+}
+
+// enrollGrants is enroll-access expanded for username.
+func (s *Service) enrollGrants(username string) ([]config.Grant, error) {
+	cfg := s.Config()
+	return config.ExpandAccess(cfg.Access, cfg.NtfyTopicPrefix, username)
+}
+
+// applyNtfyAccount ensures u's ntfy user exists with grants and records them on u. It applies no
+// user policy, so an ntfy user reset can restore a disabled user's account.
+func (s *Service) applyNtfyAccount(ctx context.Context, u *store.User, grants []config.Grant) error {
+	if err := s.ensureNtfyUser(ctx, u.Username); err != nil {
+		return err
+	}
 	for _, g := range grants {
-		if err := s.Ntfy.AllowAccess(ctx, username, g.Topic, g.Permission); err != nil {
-			return nil, err
+		if err := s.Ntfy.AllowAccess(ctx, u.Username, g.Topic, g.Permission); err != nil {
+			return err
 		}
 	}
 	recorded := grants
-	if !cfg.EnrollAccessReconcile {
+	if !s.Config().EnrollAccessReconcile {
 		// Keep remembering grants dropped from config so a later reconcile or reset can see them.
 		recorded = mergeGrants(grants, u.Grants)
 	} else {
 		for _, old := range u.Grants {
 			if !hasTopic(grants, old.Topic) {
-				if err := s.Ntfy.ResetAccess(ctx, username, old.Topic); err != nil {
-					return nil, err
+				if err := s.Ntfy.ResetAccess(ctx, u.Username, old.Topic); err != nil {
+					return err
 				}
 			}
 		}
 	}
 	if err := s.Store.SetUserGrants(ctx, u.ID, recorded); err != nil {
-		return nil, err
+		return err
 	}
 	u.Grants = recorded
-	s.Store.Audit(ctx, username, "provision", map[string]any{"grants": grants})
-	return u, nil
+	return nil
 }
 
 func (s *Service) ensureNtfyUser(ctx context.Context, username string) error {
@@ -235,21 +250,10 @@ func (s *Service) clearPush(c *store.Challenge) {
 	}
 }
 
-// Purge expires challenges, removes devices never verified, and finishes revocations and ntfy user
-// resets whose ntfy calls failed earlier.
+// Purge expires challenges and old records, removes devices never verified, and reconciles
+// unfinished revocations. Each step runs even if an earlier one fails.
 func (s *Service) Purge(ctx context.Context) {
 	now := time.Now()
-	resets, err := s.Store.PendingNtfyResets(ctx)
-	if err != nil {
-		s.Log.Error("purge", "err", err)
-		return
-	}
-	for _, u := range resets {
-		// Forced: the foreign-grant check passed (or was overridden) when the reset was asked for.
-		if err := s.ResetNtfyUser(ctx, u, true); err != nil {
-			s.Log.Warn("purge: reset ntfy user", "user", u, "err", err)
-		}
-	}
 	// Times out challenges whose auth call is gone (the process restarted mid-push); deciding them
 	// clears their pushes from the phone.
 	if err := s.decidePending(ctx, store.ChallengeFilter{ExpiredBy: now}, store.StateTimeout); err != nil {
@@ -257,29 +261,15 @@ func (s *Service) Purge(ctx context.Context) {
 	}
 	if err := s.Store.Purge(ctx, now, UnverifiedTTL, challengeRetention); err != nil {
 		s.Log.Error("purge", "err", err)
-		return
 	}
-	stale, err := s.Store.StaleDevices(ctx, now, UnverifiedTTL)
-	if err != nil {
-		s.Log.Error("purge", "err", err)
-		return
+	if unverified, err := s.Store.ExpiredUnverifiedDevices(ctx, now, UnverifiedTTL); err != nil {
+		s.Log.Error("purge: unverified devices", "err", err)
+	} else if err := s.removeDevices(ctx, unverified); err != nil {
+		s.Log.Warn("purge: unverified devices", "err", err)
 	}
-	for _, d := range stale {
-		if err := s.removeDevice(ctx, &d); err != nil {
-			s.Log.Warn("purge: remove device", "device", d.ID, "err", err)
-			continue
-		}
-		s.Store.Audit(ctx, d.Username, "device_purged", map[string]any{"device": d.ID, "revoked": d.RevokedAt != nil})
+	if err := s.Reconcile(ctx); err != nil {
+		s.Log.Warn("purge: reconcile revocations", "err", err)
 	}
-}
-
-// removeDevice drops the device's topic grant, then its row. The row goes last so a failed ntfy
-// call leaves something to retry from.
-func (s *Service) removeDevice(ctx context.Context, d *store.Device) error {
-	if err := s.Ntfy.ResetAccess(ctx, d.Username, d.NtfyTopic); err != nil {
-		return err
-	}
-	return s.Store.DeleteDevice(ctx, d.ID)
 }
 
 // SetNtfyPassword gives the ntfy user a fresh random password and returns it, for apps that cannot
