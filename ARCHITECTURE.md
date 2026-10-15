@@ -33,7 +33,7 @@ internal/config/     YAML + NTFY_IDP_PUSH_* env + <key>-file secrets; validation
 internal/duoapi/     Duo Auth API: signature verification (v2/v5), replay guard, preauth/auth/enroll
 internal/core/       provisioning, enrollment, login, revocation, purge, startup checks
 internal/challenge/  pending logins: create, wait, decide
-internal/webauthn/   registration/assertion (go-webauthn) and the synced-passkey (BE flag) policy
+internal/webauthn/   passkey registration/assertion over stored passkeys (wraps go-webauthn); synced-passkey (BE flag) policy
 internal/web/        enrollment, approval, provisioning and device pages; identity (forward auth / OIDC)
 internal/oidc/       OIDC client (code + PKCE), session cookie
 internal/ntfy/       ntfy admin, publish and token client
