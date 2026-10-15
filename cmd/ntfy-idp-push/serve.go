@@ -68,7 +68,7 @@ func serve(cfg *config.Config, cfgPath string) error {
 	var servers []*http.Server
 	errc := make(chan error, 2)
 	if cfg.ListenHTTPS != "" {
-		tc, err := tlsconfig.New(ctx, cfg)
+		tc, err := tlsconfig.New(cfg.TLSCertFile, cfg.TLSKeyFile)
 		if err != nil {
 			return err
 		}

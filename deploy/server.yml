@@ -13,16 +13,8 @@ push-timeout: "60s"
 push-disabled: false                    # kill switch: every preauth/auth answers deny
 duo-key-grace: "1h"                     # previous key accepted this long after keygen --rotate
 
-# IdPs pin Duo's CA bundle; the certificate must chain to one of those roots.
-tls-mode: "acme"                        # acme | file
-acme-ca: "https://dv.acme-v02.api.pki.goog/directory"
-acme-eab-kid: "…"                       # gcloud publicca external-account-keys create
-acme-eab-hmac: "…"
-acme-email: "admin@example.com"
-acme-key-type: "p256"
-acme-storage: "/var/lib/ntfy-idp-push/acme"
-# tls-cert-file: "/etc/ntfy-idp-push/tls.crt"   # tls-mode: file
-# tls-key-file: "/etc/ntfy-idp-push/tls.key"
+tls-cert-file: "/etc/ntfy-idp-push/tls.crt"   # reloaded when it changes
+tls-key-file: "/etc/ntfy-idp-push/tls.key"
 
 auth-mode: "forward"                    # forward: Remote-User from trusted-proxies | oidc
 trusted-proxies: ["10.0.0.0/8"]

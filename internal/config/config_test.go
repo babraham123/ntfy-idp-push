@@ -13,7 +13,7 @@ func valid() *Config {
 	c.DuoHostname = "push.example.com"
 	c.DuoIntegrationKey = "DIAAAAAAAAAAAAAAAAAA"
 	c.DuoSecretKey = strings.Repeat("s", 40)
-	c.ACMEEABKID, c.ACMEEABHMAC, c.ACMEEmail = "kid", "hmac", "a@example.com"
+	c.TLSCertFile, c.TLSKeyFile = "/etc/tls.crt", "/etc/tls.key"
 	c.TrustedProxies = []string{"10.0.0.0/8"}
 	c.NtfyBaseURL = "https://ntfy.example.com"
 	c.NtfyAdminToken = "tk_x"
@@ -77,8 +77,8 @@ func TestValidateFailsClosed(t *testing.T) {
 		"short secret":       func(c *Config) { c.DuoSecretKey = "short" },
 		"no trusted proxies": func(c *Config) { c.TrustedProxies = nil },
 		"oidc incomplete":    func(c *Config) { c.AuthMode = "oidc" },
-		"acme without eab":   func(c *Config) { c.ACMEEABKID = "" },
-		"bad tls mode":       func(c *Config) { c.TLSMode = "none" },
+		"https without cert": func(c *Config) { c.TLSCertFile = "" },
+		"no listener":        func(c *Config) { c.ListenHTTPS = "" },
 	} {
 		c := valid()
 		mutate(c)
@@ -115,9 +115,8 @@ func TestLoadAndRotate(t *testing.T) {
 duo-hostname: push.example.com
 duo-integration-key: DIAAAAAAAAAAAAAAAAAA
 duo-secret-key: "` + strings.Repeat("o", 40) + `"  # from keygen
-acme-eab-kid: kid
-acme-eab-hmac: hmac
-acme-email: a@example.com
+tls-cert-file: /etc/tls.crt
+tls-key-file: /etc/tls.key
 trusted-proxies: ["10.0.0.0/8"]
 ntfy-base-url: https://ntfy.example.com
 ntfy-admin-token: tk_x
