@@ -69,6 +69,9 @@ func approve(t *testing.T, h *testutil.Harness, a *testutil.Authenticator, click
 	return resp.StatusCode
 }
 
+// phone is an ntfy client without credentials, as the app is before it redeems a code.
+func phone(h *testutil.Harness) *ntfy.Client { return ntfy.New(h.Cfg.NtfyBaseURL, "") }
+
 func pushAction(m ntfy.Message, label string) ntfy.Action {
 	for _, a := range m.Actions {
 		if a.Label == label {
@@ -95,7 +98,7 @@ func TestAutheliaLoginApprovedWithPasskey(t *testing.T) {
 		t.Fatalf("ntfy link %q", dev.NtfyLink)
 	}
 	link, _ := url.Parse(dev.NtfyLink)
-	if tok, err := h.Svc.Ntfy.RedeemEnrollCode(context.Background(), link.Query().Get("code"), "Pixel"); err != nil || tok.Username != "alice" {
+	if tok, err := phone(h).RedeemEnrollCode(context.Background(), link.Query().Get("code"), "Pixel"); err != nil || tok.Username != "alice" {
 		t.Fatalf("enrollment link code: %+v %v", tok, err)
 	}
 
@@ -391,6 +394,40 @@ func TestRevokeDevice(t *testing.T) {
 	}
 }
 
+// The device list shows every device a user has; the user list counts only those that can
+// receive logins.
+func TestUsersAndDevicesOf(t *testing.T) {
+	ctx := context.Background()
+	h := testutil.NewHarness(t, nil)
+	active := h.Enroll(t, "alice", testutil.NewAuthenticator(t, testutil.PublicURL))
+	unverified, st, b := h.FinishEnroll(t, "alice", "", testutil.NewAuthenticator(t, testutil.PublicURL))
+	if st != 200 {
+		t.Fatalf("enroll finish: %d %s", st, b)
+	}
+	if err := h.Svc.SetUserDisabled(ctx, "alice", true); err != nil {
+		t.Fatal(err)
+	}
+
+	u, devs, err := h.Svc.DevicesOf(ctx, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := map[string]bool{}
+	for _, d := range devs {
+		ids[d.ID] = true
+	}
+	if u.DisabledAt == nil || len(devs) != 2 || !ids[active.DeviceID] || !ids[unverified.DeviceID] {
+		t.Fatalf("DevicesOf: %+v %+v", u, devs)
+	}
+	if _, _, err := h.Svc.DevicesOf(ctx, "nobody"); !errors.Is(err, core.ErrUnknownUser) {
+		t.Fatalf("DevicesOf unknown user: %v", err)
+	}
+	users, err := h.Svc.Users(ctx)
+	if err != nil || len(users) != 1 || users[0].Username != "alice" || users[0].ActiveDevices != 1 {
+		t.Fatalf("Users: %+v %v", users, err)
+	}
+}
+
 func TestRevokeWithNtfyReset(t *testing.T) {
 	h := testutil.NewHarness(t, nil)
 	ctx := context.Background()
@@ -519,14 +556,14 @@ func TestProvision(t *testing.T) {
 	}
 	// Reloading superseded the first page's code; the new one redeems once, as dana.
 	ctx := context.Background()
-	if _, err := h.Svc.Ntfy.RedeemEnrollCode(ctx, androidCode, "Pixel"); err == nil {
+	if _, err := phone(h).RedeemEnrollCode(ctx, androidCode, "Pixel"); err == nil {
 		t.Fatal("superseded code still redeemable")
 	}
-	tok, err := h.Svc.Ntfy.RedeemEnrollCode(ctx, frag.Get("code"), "Laptop")
+	tok, err := phone(h).RedeemEnrollCode(ctx, frag.Get("code"), "Laptop")
 	if err != nil || tok.Username != "dana" {
 		t.Fatalf("redeem: %+v %v", tok, err)
 	}
-	if _, err := h.Svc.Ntfy.RedeemEnrollCode(ctx, frag.Get("code"), "Laptop"); err == nil {
+	if _, err := phone(h).RedeemEnrollCode(ctx, frag.Get("code"), "Laptop"); err == nil {
 		t.Fatal("code redeemed twice")
 	}
 	// Provisioning creates no push device.
@@ -1017,7 +1054,7 @@ func TestFailedEnrollmentKeepsCodeUsable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if devs, _ := h.Svc.Store.Devices(ctx, u.ID, false); len(devs) != 0 {
+	if devs, _ := h.Svc.Store.Devices(ctx, u.ID); len(devs) != 0 {
 		t.Fatalf("half-built device left: %+v", devs)
 	}
 	for _, g := range h.Ntfy.User("erin").Grants {

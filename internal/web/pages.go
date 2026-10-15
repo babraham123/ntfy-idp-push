@@ -100,12 +100,14 @@ func (s *Server) devicesPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	data := map[string]any{"User": user}
-	if u, err := s.svc.Store.UserByName(r.Context(), user); err == nil {
-		devs, err := s.svc.Store.Devices(r.Context(), u.ID, false)
-		if err != nil {
-			s.message(w, http.StatusInternalServerError, "Error", "Could not load devices.")
-			return
-		}
+	u, devs, err := s.svc.DevicesOf(r.Context(), user)
+	switch {
+	case errors.Is(err, core.ErrUnknownUser):
+	case err != nil:
+		s.log.Error("devices", "user", user, "err", err)
+		s.message(w, http.StatusInternalServerError, "Error", "Could not load devices.")
+		return
+	default:
 		data["Devices"] = devs
 		data["Disabled"] = u.DisabledAt != nil
 	}
@@ -117,18 +119,18 @@ func (s *Server) revoke(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	d, err := s.svc.Store.Device(r.Context(), r.PathValue("id"))
-	if err != nil || d.Username != user {
+	id := r.PathValue("id")
+	err := s.svc.RevokeOwned(r.Context(), user, id, r.FormValue("reset_ntfy") == "1")
+	switch {
+	case errors.Is(err, core.ErrUnknownDevice):
 		s.message(w, http.StatusNotFound, "Not found", "No such device.")
 		return
-	}
-	reset := r.FormValue("reset_ntfy") == "1"
-	if err := s.svc.RevokeDevice(r.Context(), d.ID, reset, false, user); errors.Is(err, core.ErrForeignGrants) {
+	case errors.Is(err, core.ErrForeignGrants):
 		s.message(w, http.StatusConflict, "Ask an administrator",
 			"Your ntfy account has permissions this service did not set up, so it cannot sign out your ntfy apps for you. The phone was not revoked.")
 		return
-	} else if err != nil {
-		s.log.Error("revoke", "device", d.ID, "err", err)
+	case err != nil:
+		s.log.Error("revoke", "device", id, "err", err)
 		s.message(w, http.StatusInternalServerError, "Error", "The phone can no longer approve sign-ins, but cleaning up its ntfy access failed. Try again.")
 		return
 	}

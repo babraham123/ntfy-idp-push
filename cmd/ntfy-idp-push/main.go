@@ -233,22 +233,18 @@ func userCmd(ctx context.Context, svc *core.Service, args []string) error {
 	}
 	sub := pos[0]
 	if sub == "list" {
-		users, err := svc.Store.Users(ctx)
+		users, err := svc.Users(ctx)
 		if err != nil {
 			return err
 		}
 		tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 		fmt.Fprintln(tw, "USERNAME\tID\tDEVICES\tSTATUS")
 		for _, u := range users {
-			devs, err := svc.Store.Devices(ctx, u.ID, true)
-			if err != nil {
-				return err
-			}
 			st := "active"
 			if u.DisabledAt != nil {
 				st = "disabled"
 			}
-			fmt.Fprintf(tw, "%s\t%s\t%d\t%s\n", u.Username, u.ID, len(devs), st)
+			fmt.Fprintf(tw, "%s\t%s\t%d\t%s\n", u.Username, u.ID, u.ActiveDevices, st)
 		}
 		return tw.Flush()
 	}
@@ -295,11 +291,7 @@ func deviceCmd(ctx context.Context, svc *core.Service, args []string) error {
 	}
 	switch pos[0] {
 	case "list":
-		u, err := svc.Store.UserByName(ctx, pos[1])
-		if err != nil {
-			return err
-		}
-		devs, err := svc.Store.Devices(ctx, u.ID, false)
+		_, devs, err := svc.DevicesOf(ctx, pos[1])
 		if err != nil {
 			return err
 		}

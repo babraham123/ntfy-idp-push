@@ -46,11 +46,13 @@ const (
 var usernameRe = regexp.MustCompile(`^[-_.+@a-zA-Z0-9]{1,128}$`)
 
 type Service struct {
-	cfg   atomic.Pointer[config.Config]
+	cfg atomic.Pointer[config.Config]
+	// Store stays exported for what is store-level by nature: OIDC sessions, backup and the audit
+	// log.
 	Store *store.Store
-	Ntfy  *ntfy.Client
-	RP    *webauthn.RP
 	Log   *slog.Logger
+	ntfy  *ntfy.Client
+	rp    *webauthn.RP
 
 	waitMu sync.Mutex
 	// waiters holds a channel per challenge an auth call in this process waits on, closed when it
@@ -71,8 +73,8 @@ func New(cfg *config.Config, st *store.Store, log *slog.Logger) (*Service, error
 	}
 	s := &Service{
 		Store:   st,
-		Ntfy:    ntfy.New(cfg.NtfyBaseURL, cfg.NtfyAdminToken),
-		RP:      rp,
+		ntfy:    ntfy.New(cfg.NtfyBaseURL, cfg.NtfyAdminToken),
+		rp:      rp,
 		Log:     log,
 		waiters: map[string]chan struct{}{},
 	}
@@ -139,7 +141,7 @@ func (s *Service) applyNtfyAccount(ctx context.Context, u *store.User, grants []
 		return err
 	}
 	for _, g := range grants {
-		if err := s.Ntfy.AllowAccess(ctx, u.Username, g.Topic, g.Permission); err != nil {
+		if err := s.ntfy.AllowAccess(ctx, u.Username, g.Topic, g.Permission); err != nil {
 			return err
 		}
 	}
@@ -150,7 +152,7 @@ func (s *Service) applyNtfyAccount(ctx context.Context, u *store.User, grants []
 	} else {
 		for _, old := range u.Grants {
 			if !hasTopic(grants, old.Topic) {
-				if err := s.Ntfy.ResetAccess(ctx, u.Username, old.Topic); err != nil {
+				if err := s.ntfy.ResetAccess(ctx, u.Username, old.Topic); err != nil {
 					return err
 				}
 			}
@@ -164,7 +166,7 @@ func (s *Service) applyNtfyAccount(ctx context.Context, u *store.User, grants []
 }
 
 func (s *Service) ensureNtfyUser(ctx context.Context, username string) error {
-	nu, err := s.Ntfy.User(ctx, username)
+	nu, err := s.ntfy.User(ctx, username)
 	if err != nil {
 		return err
 	}
@@ -175,7 +177,7 @@ func (s *Service) ensureNtfyUser(ctx context.Context, username string) error {
 		return nil
 	}
 	// Nobody needs the password: the apps sign in with enrollment codes.
-	return s.Ntfy.AddUser(ctx, username, token.Random(32))
+	return s.ntfy.AddUser(ctx, username, token.Random(32))
 }
 
 func mergeGrants(a, b []config.Grant) []config.Grant {
@@ -220,7 +222,7 @@ func (s *Service) NtfyLink(topic, username, code string) string {
 // MintNtfyCode returns an ntfy#597 enrollment code, or nil when the server does not support it.
 // ntfy keeps one pending code per user, so minting supersedes any code handed out earlier.
 func (s *Service) MintNtfyCode(ctx context.Context, username string) (*ntfy.EnrollCode, error) {
-	ec, err := s.Ntfy.MintEnrollCode(ctx, username)
+	ec, err := s.ntfy.MintEnrollCode(ctx, username)
 	if errors.Is(err, ntfy.ErrNotSupported) {
 		return nil, nil
 	}
@@ -256,7 +258,7 @@ func (s *Service) SetNtfyPassword(ctx context.Context, username string) (string,
 		return "", err
 	}
 	password := token.Random(18)
-	if err := s.Ntfy.ChangePassword(ctx, username, password); err != nil {
+	if err := s.ntfy.ChangePassword(ctx, username, password); err != nil {
 		return "", err
 	}
 	s.Store.Audit(ctx, username, "ntfy_password_set", nil)
@@ -266,25 +268,25 @@ func (s *Service) SetNtfyPassword(ctx context.Context, username string) (string,
 // StartupChecks fails closed on an ntfy setup that would let anyone but the phone read pushes.
 func (s *Service) StartupChecks(ctx context.Context) error {
 	cfg := s.Config()
-	acct, err := s.Ntfy.Account(ctx)
+	acct, err := s.ntfy.Account(ctx)
 	if err != nil {
 		return fmt.Errorf("ntfy admin token: %w", err)
 	}
 	if acct.Role != "admin" {
 		return fmt.Errorf("ntfy token belongs to %q with role %q; admin required", acct.Username, acct.Role)
 	}
-	if _, err := s.Ntfy.Users(ctx); err != nil {
+	if _, err := s.ntfy.Users(ctx); err != nil {
 		return fmt.Errorf("ntfy GET /v1/users: %w", err)
 	}
 	probe := cfg.NtfyTopicPrefix + "probe"
-	status, err := s.Ntfy.AnonymousReadStatus(ctx, probe)
+	status, err := s.ntfy.AnonymousReadStatus(ctx, probe)
 	if err != nil {
 		return fmt.Errorf("ntfy anonymous probe: %w", err)
 	}
 	if status != 401 && status != 403 {
 		return fmt.Errorf("anonymous read of %q returned %d; set ntfy auth-default-access: deny-all", probe, status)
 	}
-	if err := s.Ntfy.Publish(ctx, &ntfy.Message{Topic: probe, Message: "probe", Cache: "no", Firebase: "no"}); err != nil {
+	if err := s.ntfy.Publish(ctx, &ntfy.Message{Topic: probe, Message: "probe", Cache: "no", Firebase: "no"}); err != nil {
 		return fmt.Errorf("publish to %q: %w", probe, err)
 	}
 	return nil

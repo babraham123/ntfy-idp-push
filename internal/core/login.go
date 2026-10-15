@@ -59,7 +59,7 @@ func eligible(cfg *config.Config, u *store.User, d *store.Device) error {
 // activeDevices lists u's active devices, most recently used first: store.Devices orders them so,
 // and device=auto takes the first.
 func (s *Service) activeDevices(ctx context.Context, u *store.User) ([]store.Device, error) {
-	devs, err := s.Store.Devices(ctx, u.ID, false)
+	devs, err := s.Store.Devices(ctx, u.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -181,7 +181,7 @@ func (s *Service) Authenticate(ctx context.Context, r AuthRequest) (store.Challe
 		return store.StateDeny, err
 	}
 	approveURL := cfg.PublicURL + "/challenge/" + c.ID
-	if err := s.Ntfy.Publish(ctx, &ntfy.Message{
+	if err := s.ntfy.Publish(ctx, &ntfy.Message{
 		Topic:      d.NtfyTopic,
 		SequenceID: c.ID,
 		Title:      "Sign-in request",
@@ -258,7 +258,7 @@ func (s *Service) AssertionOptions(ctx context.Context, id string) (json.RawMess
 	if err != nil {
 		return nil, err
 	}
-	return s.RP.BeginLogin(d.UserID, pks, c.Nonce)
+	return s.rp.BeginLogin(d.UserID, pks, c.Nonce)
 }
 
 // Approve allows the challenge if assertion is a valid signature over its nonce by its device.
@@ -271,7 +271,7 @@ func (s *Service) Approve(ctx context.Context, id string, assertion io.Reader) e
 	if err != nil {
 		return err
 	}
-	pk, regressed, err := s.RP.FinishLogin(d.UserID, pks, c.Nonce, assertion)
+	pk, regressed, err := s.rp.FinishLogin(d.UserID, pks, c.Nonce, assertion)
 	if err != nil {
 		s.Store.Audit(ctx, c.Username, "assertion_failed", map[string]any{"challenge": id, "err": err.Error()})
 		return err

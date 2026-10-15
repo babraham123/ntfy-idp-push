@@ -37,6 +37,22 @@ func (s *Service) RevokeDevice(ctx context.Context, deviceID string, resetNtfyUs
 	if err != nil {
 		return err
 	}
+	return s.revoke(ctx, d, resetNtfyUser, force, actor)
+}
+
+// RevokeOwned is RevokeDevice on behalf of the device's owner, who may not force a reset. Another
+// user's device is ErrUnknownDevice, the same as one that does not exist.
+func (s *Service) RevokeOwned(ctx context.Context, username, deviceID string, resetNtfyUser bool) error {
+	d, err := s.Store.Device(ctx, deviceID)
+	if errors.Is(err, store.ErrNotFound) || (err == nil && d.Username != username) {
+		return ErrUnknownDevice
+	} else if err != nil {
+		return err
+	}
+	return s.revoke(ctx, d, resetNtfyUser, false, username)
+}
+
+func (s *Service) revoke(ctx context.Context, d *store.Device, resetNtfyUser, force bool, actor string) error {
 	if resetNtfyUser {
 		// Before revoking anything, so a refusal leaves the device intact.
 		if err := s.requestReset(ctx, d.Username, force); err != nil {
@@ -52,7 +68,7 @@ func (s *Service) RevokeDevice(ctx context.Context, deviceID string, resetNtfyUs
 	if err := s.denyPending(ctx, store.ChallengeFilter{DeviceID: d.ID}); err != nil {
 		return err
 	}
-	if err := s.Ntfy.ResetAccess(ctx, d.Username, d.NtfyTopic); err != nil {
+	if err := s.ntfy.ResetAccess(ctx, d.Username, d.NtfyTopic); err != nil {
 		return fmt.Errorf("device revoked but its ntfy grant was not removed; re-run to retry: %w", err)
 	}
 	if resetNtfyUser {
@@ -92,7 +108,7 @@ func (s *Service) checkResettable(ctx context.Context, u *store.User) error {
 	if err != nil {
 		return err
 	}
-	nu, err := s.Ntfy.User(ctx, u.Username)
+	nu, err := s.ntfy.User(ctx, u.Username)
 	if err != nil || nu == nil {
 		return err
 	}
@@ -109,7 +125,7 @@ func (s *Service) knownGrants(ctx context.Context, u *store.User) (map[string]st
 	for _, g := range u.Grants {
 		known[g.Topic] = g.Permission
 	}
-	devs, err := s.Store.Devices(ctx, u.ID, false)
+	devs, err := s.Store.Devices(ctx, u.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -129,13 +145,13 @@ func (s *Service) finishReset(ctx context.Context, username string) error {
 	if err != nil {
 		return err
 	}
-	if err := s.Ntfy.DeleteUser(ctx, username); err != nil {
+	if err := s.ntfy.DeleteUser(ctx, username); err != nil {
 		return err
 	}
 	if err := s.applyNtfyAccount(ctx, u, grants); err != nil {
 		return err
 	}
-	devs, err := s.Store.Devices(ctx, u.ID, false)
+	devs, err := s.Store.Devices(ctx, u.ID)
 	if err != nil {
 		return err
 	}
@@ -144,7 +160,7 @@ func (s *Service) finishReset(ctx context.Context, username string) error {
 		if d.RevokedAt != nil {
 			continue
 		}
-		if err := s.Ntfy.AllowAccess(ctx, username, d.NtfyTopic, config.PermReadOnly); err != nil {
+		if err := s.ntfy.AllowAccess(ctx, username, d.NtfyTopic, config.PermReadOnly); err != nil {
 			return err
 		}
 		granted++
@@ -183,7 +199,7 @@ func (s *Service) DeleteUser(ctx context.Context, username string, keepNtfy bool
 	if err != nil {
 		return err
 	}
-	devs, err := s.Store.Devices(ctx, u.ID, false)
+	devs, err := s.Store.Devices(ctx, u.ID)
 	if err != nil {
 		return err
 	}
@@ -193,7 +209,7 @@ func (s *Service) DeleteUser(ctx context.Context, username string, keepNtfy bool
 		}
 	}
 	if !keepNtfy {
-		if err := s.Ntfy.DeleteUser(ctx, username); err != nil {
+		if err := s.ntfy.DeleteUser(ctx, username); err != nil {
 			return err
 		}
 	}
@@ -240,7 +256,7 @@ func (s *Service) removeDevices(ctx context.Context, devs []store.Device) error 
 
 // removeDevice drops the device's topic grant, then its row.
 func (s *Service) removeDevice(ctx context.Context, d *store.Device) error {
-	if err := s.Ntfy.ResetAccess(ctx, d.Username, d.NtfyTopic); err != nil {
+	if err := s.ntfy.ResetAccess(ctx, d.Username, d.NtfyTopic); err != nil {
 		return err
 	}
 	return s.Store.DeleteDevice(ctx, d.ID)

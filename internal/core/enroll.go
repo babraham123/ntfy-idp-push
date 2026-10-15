@@ -59,7 +59,7 @@ func (s *Service) BeginEnrollment(ctx context.Context, username, deviceName stri
 	if u.DisabledAt != nil {
 		return nil, webauthn.Session{}, ErrUserDisabled
 	}
-	return s.RP.BeginRegistration(u, deviceName)
+	return s.rp.BeginRegistration(u, deviceName)
 }
 
 type Enrollment struct {
@@ -88,7 +88,7 @@ func (s *Service) CompleteEnrollment(ctx context.Context, username, deviceName s
 	if u.DisabledAt != nil {
 		return nil, ErrUserDisabled
 	}
-	pk, attestationFormat, err := s.RP.FinishRegistration(u, session, attestation)
+	pk, attestationFormat, err := s.rp.FinishRegistration(u, session, attestation)
 	if err != nil {
 		return nil, err
 	}
@@ -136,7 +136,7 @@ func (s *Service) connectDevice(ctx context.Context, dev *store.Device, verifyTo
 	if _, err := s.Provision(ctx, dev.Username); err != nil {
 		return nil, err
 	}
-	if err := s.Ntfy.AllowAccess(ctx, dev.Username, dev.NtfyTopic, config.PermReadOnly); err != nil {
+	if err := s.ntfy.AllowAccess(ctx, dev.Username, dev.NtfyTopic, config.PermReadOnly); err != nil {
 		return nil, err
 	}
 	code, err := s.MintNtfyCode(ctx, dev.Username)
@@ -155,7 +155,7 @@ func (s *Service) connectDevice(ctx context.Context, dev *store.Device, verifyTo
 
 func (s *Service) publishSetup(ctx context.Context, dev *store.Device, verifyToken string) error {
 	verifyURL := fmt.Sprintf("%s/enroll/verify/%s?t=%s", s.Config().PublicURL, dev.ID, url.QueryEscape(verifyToken))
-	return s.Ntfy.Publish(ctx, &ntfy.Message{
+	return s.ntfy.Publish(ctx, &ntfy.Message{
 		Topic:    dev.NtfyTopic,
 		Title:    "Finish setup",
 		Message:  "Tap to finish enrolling " + dev.Name + " for sign-in approvals.",

@@ -211,14 +211,9 @@ func (s *Store) Device(ctx context.Context, id string) (*Device, error) {
 	return &ds[0], nil
 }
 
-// Devices lists a user's devices, most recently used first. activeOnly keeps only devices that can
-// receive logins: verified and not revoked.
-func (s *Store) Devices(ctx context.Context, userID string, activeOnly bool) ([]Device, error) {
-	where := `WHERE d.user_id = ?`
-	if activeOnly {
-		where += ` AND d.verified_at IS NOT NULL AND d.revoked_at IS NULL`
-	}
-	return s.queryDevices(ctx, where+` ORDER BY COALESCE(d.last_used_at, d.verified_at, d.created_at) DESC, d.created_at DESC`, userID)
+// Devices lists a user's devices in every state, most recently used first.
+func (s *Store) Devices(ctx context.Context, userID string) ([]Device, error) {
+	return s.queryDevices(ctx, `WHERE d.user_id = ? ORDER BY COALESCE(d.last_used_at, d.verified_at, d.created_at) DESC, d.created_at DESC`, userID)
 }
 
 var ErrCodeUnavailable = errors.New("enrollment code used or expired")
