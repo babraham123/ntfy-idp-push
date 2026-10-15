@@ -19,9 +19,9 @@ import (
 	"github.com/skip2/go-qrcode"
 	"golang.org/x/time/rate"
 
-	"github.com/babraham123/ntfy-idp-push/internal/challenge"
 	"github.com/babraham123/ntfy-idp-push/internal/core"
 	"github.com/babraham123/ntfy-idp-push/internal/store"
+	"github.com/babraham123/ntfy-idp-push/internal/token"
 	"github.com/babraham123/ntfy-idp-push/internal/webauthn"
 )
 
@@ -237,7 +237,7 @@ func (s *Server) enrollBegin(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	token := challenge.RandomToken(24)
+	regToken := token.Random(24)
 	now := time.Now()
 	s.mu.Lock()
 	for k, v := range s.regs {
@@ -245,9 +245,9 @@ func (s *Server) enrollBegin(w http.ResponseWriter, r *http.Request) {
 			delete(s.regs, k)
 		}
 	}
-	s.regs[token] = &registration{username: user, name: in.Name, code: in.Code, session: session, expires: now.Add(5 * time.Minute)}
+	s.regs[regToken] = &registration{username: user, name: in.Name, code: in.Code, session: session, expires: now.Add(5 * time.Minute)}
 	s.mu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]any{"token": token, "options": opts})
+	writeJSON(w, http.StatusOK, map[string]any{"token": regToken, "options": opts})
 }
 
 func (s *Server) enrollFinish(w http.ResponseWriter, r *http.Request) {
@@ -364,7 +364,7 @@ func (s *Server) verifyDevice(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) approvePage(w http.ResponseWriter, r *http.Request) {
 	c, err := s.svc.PendingChallenge(r.Context(), r.PathValue("id"))
-	if errors.Is(err, challenge.ErrGone) {
+	if errors.Is(err, core.ErrGone) {
 		s.message(w, http.StatusGone, "Request closed", "This sign-in request was already answered or has expired.")
 		return
 	} else if err != nil {
@@ -379,7 +379,7 @@ func (s *Server) approvePage(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) assertionOptions(w http.ResponseWriter, r *http.Request) {
 	opts, err := s.svc.AssertionOptions(r.Context(), r.PathValue("id"))
-	if errors.Is(err, challenge.ErrGone) {
+	if errors.Is(err, core.ErrGone) {
 		jsonError(w, http.StatusGone, err.Error())
 		return
 	} else if errors.Is(err, webauthn.ErrNoUsableCredential) {
@@ -395,7 +395,7 @@ func (s *Server) assertionOptions(w http.ResponseWriter, r *http.Request) {
 func (s *Server) assert(w http.ResponseWriter, r *http.Request) {
 	err := s.svc.Approve(r.Context(), r.PathValue("id"), io.LimitReader(r.Body, maxBody))
 	switch {
-	case errors.Is(err, challenge.ErrGone):
+	case errors.Is(err, core.ErrGone):
 		jsonError(w, http.StatusGone, err.Error())
 	case errors.Is(err, core.ErrUserDisabled), errors.Is(err, core.ErrPushDisabled), errors.Is(err, core.ErrDeviceRevoked),
 		errors.Is(err, webauthn.ErrSynced), errors.Is(err, webauthn.ErrNoUsableCredential):
@@ -410,12 +410,12 @@ func (s *Server) assert(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deny(w http.ResponseWriter, r *http.Request) {
-	token, _ := io.ReadAll(io.LimitReader(r.Body, 1024))
-	err := s.svc.Challenges.Deny(r.Context(), r.PathValue("id"), strings.TrimSpace(string(token)))
+	denyToken, _ := io.ReadAll(io.LimitReader(r.Body, 1024))
+	err := s.svc.Deny(r.Context(), r.PathValue("id"), strings.TrimSpace(string(denyToken)))
 	switch {
-	case errors.Is(err, challenge.ErrGone):
+	case errors.Is(err, core.ErrGone):
 		http.Error(w, "gone", http.StatusGone)
-	case errors.Is(err, challenge.ErrBadToken):
+	case errors.Is(err, core.ErrBadToken):
 		http.Error(w, "forbidden", http.StatusForbidden)
 	case err != nil:
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -427,16 +427,10 @@ func (s *Server) deny(w http.ResponseWriter, r *http.Request) {
 // fraud lets whoever holds the push report it. Anyone able to reach this can only deny a login,
 // never approve one.
 func (s *Server) fraud(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	c, err := s.svc.PendingChallenge(r.Context(), id)
-	if err == nil {
-		err = s.svc.Challenges.Decide(r.Context(), id, store.StateFraud)
-	}
-	if err != nil {
+	if err := s.svc.ReportFraud(r.Context(), r.PathValue("id"), s.clientIP(r)); err != nil {
 		jsonError(w, http.StatusGone, "request already closed")
 		return
 	}
-	s.svc.Store.Audit(r.Context(), c.Username, "fraud_reported", map[string]any{"challenge": id, "ip": s.clientIP(r)})
 	writeJSON(w, http.StatusOK, map[string]string{"result": "fraud"})
 }
 

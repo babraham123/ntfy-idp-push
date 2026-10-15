@@ -6,10 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/url"
 	"time"
 
-	"github.com/babraham123/ntfy-idp-push/internal/challenge"
 	"github.com/babraham123/ntfy-idp-push/internal/config"
 	"github.com/babraham123/ntfy-idp-push/internal/ntfy"
 	"github.com/babraham123/ntfy-idp-push/internal/store"
@@ -178,10 +176,7 @@ func (s *Service) Authenticate(ctx context.Context, r AuthRequest) (store.Challe
 	if r.Timeout == 0 {
 		r.Timeout = cfg.PushTimeout.D()
 	}
-	c, denyToken, err := s.Challenges.Create(ctx, challenge.Params{
-		Username: u.Username, DeviceID: d.ID, IPAddr: r.IPAddr, TargetURL: r.TargetURL,
-		DisplayUsername: r.DisplayUsername, TTL: r.Timeout,
-	})
+	c, denyToken, err := s.createChallenge(ctx, d, r)
 	if err != nil {
 		return store.StateDeny, err
 	}
@@ -199,12 +194,12 @@ func (s *Service) Authenticate(ctx context.Context, r AuthRequest) (store.Challe
 			{Action: "http", Label: "Deny", URL: approveURL + "/deny", Method: "POST", Body: denyToken, Clear: true},
 		},
 	}); err != nil {
-		_ = s.Challenges.Decide(context.WithoutCancel(ctx), c.ID, store.StateDeny)
+		_ = s.decide(context.WithoutCancel(ctx), c.ID, store.StateDeny)
 		return store.StateDeny, fmt.Errorf("publish: %w", err)
 	}
 	s.Store.Audit(ctx, u.Username, "push_sent", map[string]any{"challenge": c.ID, "device": d.ID, "ipaddr": r.IPAddr})
 	bg := context.WithoutCancel(ctx)
-	state, err := s.Challenges.Wait(ctx, c)
+	state, err := s.wait(ctx, c)
 	if state == store.StateAllow {
 		// The user, device or kill switch may have changed while the push was on the phone.
 		if err = s.checkEligible(bg, d.ID); err != nil {
@@ -238,33 +233,7 @@ func (s *Service) allow(ctx context.Context, c *store.Challenge) error {
 	}
 	// The store re-checks device and user in the same statement, closing the race with a
 	// concurrent revoke or disable.
-	return s.Challenges.Decide(ctx, c.ID, store.StateAllow)
-}
-
-// Describe is the human summary shown in the push and on the approve page.
-func Describe(c *store.Challenge) string {
-	msg := c.DisplayUsername
-	if c.IPAddr != "" {
-		msg += " from " + c.IPAddr
-	}
-	if u, err := url.Parse(c.TargetURL); err == nil && u.Host != "" {
-		msg += " to " + u.Host
-	}
-	return msg
-}
-
-// PendingChallenge returns the challenge if it can still be decided.
-func (s *Service) PendingChallenge(ctx context.Context, id string) (*store.Challenge, error) {
-	c, err := s.Store.Challenge(ctx, id)
-	if errors.Is(err, store.ErrNotFound) {
-		return nil, challenge.ErrGone
-	} else if err != nil {
-		return nil, err
-	}
-	if c.State != store.StatePending || !time.Now().Before(c.ExpiresAt) {
-		return nil, challenge.ErrGone
-	}
-	return c, nil
+	return s.decide(ctx, c.ID, store.StateAllow)
 }
 
 // devicePasskeys returns the device c was pushed to and its passkeys, the only ones that may

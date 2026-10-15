@@ -14,12 +14,12 @@ import (
 
 	"github.com/duosecurity/duo_api_golang/authapi"
 
-	"github.com/babraham123/ntfy-idp-push/internal/challenge"
 	"github.com/babraham123/ntfy-idp-push/internal/config"
 	"github.com/babraham123/ntfy-idp-push/internal/core"
 	"github.com/babraham123/ntfy-idp-push/internal/ntfy"
 	"github.com/babraham123/ntfy-idp-push/internal/store"
 	"github.com/babraham123/ntfy-idp-push/internal/testutil"
+	"github.com/babraham123/ntfy-idp-push/internal/token"
 )
 
 var callSeq atomic.Int32
@@ -704,9 +704,12 @@ func TestPurgeTimesOutOrphanedPush(t *testing.T) {
 	ctx := context.Background()
 	h := testutil.NewHarness(t, nil)
 	dev := h.Enroll(t, "alice", testutil.NewAuthenticator(t, testutil.PublicURL))
+	// Stored directly: no auth call in this process waits on them.
 	orphan := func(ttl time.Duration) *store.Challenge {
-		c, _, err := h.Svc.Challenges.Create(ctx, challenge.Params{Username: "alice", DeviceID: dev.DeviceID, TTL: ttl})
-		if err != nil {
+		now := time.Now()
+		c := &store.Challenge{ID: token.Random(16), Username: "alice", DeviceID: dev.DeviceID, Nonce: []byte("n"),
+			DenyTokenHash: token.Hash("deny"), CreatedAt: now, ExpiresAt: now.Add(ttl)}
+		if err := h.Store.CreateChallenge(ctx, c); err != nil {
 			t.Fatal(err)
 		}
 		return c

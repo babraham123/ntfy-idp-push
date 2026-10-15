@@ -17,10 +17,10 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/babraham123/ntfy-idp-push/internal/challenge"
 	"github.com/babraham123/ntfy-idp-push/internal/config"
 	"github.com/babraham123/ntfy-idp-push/internal/core"
 	"github.com/babraham123/ntfy-idp-push/internal/store"
+	"github.com/babraham123/ntfy-idp-push/internal/token"
 )
 
 const usage = `Usage: ntfy-idp-push [-c config.yml] <command> [args]
@@ -187,7 +187,7 @@ func backup(ctx context.Context, st *store.Store, dir, path string) error {
 	if path != "-" {
 		return st.Backup(ctx, path)
 	}
-	tmp := filepath.Join(dir, ".backup-"+challenge.RandomToken(8)+".sqlite")
+	tmp := filepath.Join(dir, ".backup-"+token.Random(8)+".sqlite")
 	if err := st.Backup(ctx, tmp); err != nil {
 		return err
 	}

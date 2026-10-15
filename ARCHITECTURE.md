@@ -31,14 +31,14 @@ so it doubles as a self-service ntfy onboarding tool behind an IdP.
 cmd/ntfy-idp-push/   CLI: serve, keygen, user, device, enroll-link, audit, healthcheck
 internal/config/     YAML + NTFY_IDP_PUSH_* env + <key>-file secrets; validation; enroll-access rules
 internal/duoapi/     Duo Auth API: signature verification (v2/v5), replay guard, preauth/auth/enroll
-internal/core/       provisioning, enrollment, login, revocation, purge, startup checks
-internal/challenge/  pending logins: create, wait, decide
+internal/core/       provisioning, enrollment, login (eligibility, challenges), revocation, purge, startup checks
 internal/webauthn/   passkey registration/assertion over stored passkeys (wraps go-webauthn); synced-passkey (BE flag) policy
 internal/web/        enrollment, approval, provisioning and device pages; identity (forward auth / OIDC)
 internal/oidc/       OIDC client (code + PKCE), session cookie
 internal/ntfy/       ntfy admin, publish and token client
 internal/store/      SQLite (modernc.org/sqlite, pure Go), migrations
 internal/tlsconfig/  certificate/key from files, reloaded on change
+internal/token/      random secrets and the hashes stored in their place
 internal/testutil/   integration harness: fake ntfy, fake OIDC provider, software authenticator
 ```
 

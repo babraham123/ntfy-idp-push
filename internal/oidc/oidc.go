@@ -15,8 +15,8 @@ import (
 	gooidc "github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
 
-	"github.com/babraham123/ntfy-idp-push/internal/challenge"
 	"github.com/babraham123/ntfy-idp-push/internal/store"
+	"github.com/babraham123/ntfy-idp-push/internal/token"
 )
 
 const (
@@ -88,7 +88,7 @@ func LocalPath(next string) string {
 // Login redirects to the provider, then back to next.
 func (a *Auth) Login(w http.ResponseWriter, r *http.Request) {
 	next := LocalPath(r.URL.Query().Get("next"))
-	state, verifier := challenge.RandomToken(16), oauth2.GenerateVerifier()
+	state, verifier := token.Random(16), oauth2.GenerateVerifier()
 	val := state + "." + verifier + "." + base64.RawURLEncoding.EncodeToString([]byte(next))
 	http.SetCookie(w, a.cookie(flowCookie, val, 10*time.Minute))
 	http.Redirect(w, r, a.oauth.AuthCodeURL(state, oauth2.S256ChallengeOption(verifier)), http.StatusFound)
@@ -132,7 +132,7 @@ func (a *Auth) callback(w http.ResponseWriter, r *http.Request) (string, error) 
 	if err := idt.Claims(&claims); err != nil || claims.PreferredUsername == "" {
 		return "", errors.New("id_token lacks preferred_username")
 	}
-	id := challenge.RandomToken(32)
+	id := token.Random(32)
 	if err := a.store.CreateSession(r.Context(), id, claims.PreferredUsername, time.Now().Add(sessionTTL)); err != nil {
 		return "", err
 	}

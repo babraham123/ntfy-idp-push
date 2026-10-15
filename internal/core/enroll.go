@@ -12,10 +12,10 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/babraham123/ntfy-idp-push/internal/challenge"
 	"github.com/babraham123/ntfy-idp-push/internal/config"
 	"github.com/babraham123/ntfy-idp-push/internal/ntfy"
 	"github.com/babraham123/ntfy-idp-push/internal/store"
+	"github.com/babraham123/ntfy-idp-push/internal/token"
 	"github.com/babraham123/ntfy-idp-push/internal/webauthn"
 )
 
@@ -25,8 +25,8 @@ func (s *Service) CreateEnrollCode(ctx context.Context, username string, ttl tim
 	if err := ValidUsername(username); err != nil {
 		return "", "", err
 	}
-	code = challenge.RandomToken(24)
-	err = s.Store.CreateEnrollCode(ctx, challenge.Hash(code), store.EnrollCode{Username: username, ExpiresAt: time.Now().Add(ttl)})
+	code = token.Random(24)
+	err = s.Store.CreateEnrollCode(ctx, token.Hash(code), store.EnrollCode{Username: username, ExpiresAt: time.Now().Add(ttl)})
 	if err != nil {
 		return "", "", err
 	}
@@ -40,7 +40,7 @@ func (s *Service) EnrollURL(code string) string {
 
 // ResolveEnrollCode returns the username an unused, unexpired code was issued for.
 func (s *Service) ResolveEnrollCode(ctx context.Context, code string) (*store.EnrollCode, error) {
-	ec, err := s.Store.EnrollCode(ctx, challenge.Hash(code))
+	ec, err := s.Store.EnrollCode(ctx, token.Hash(code))
 	if errors.Is(err, store.ErrNotFound) || (err == nil && (ec.UsedAt != nil || !time.Now().Before(ec.ExpiresAt))) {
 		return nil, ErrInvalidCode
 	}
@@ -101,10 +101,10 @@ func (s *Service) CompleteEnrollment(ctx context.Context, username, deviceName s
 	pk.DeviceID = dev.ID
 	var codeHash []byte
 	if enrollCode != "" {
-		codeHash = challenge.Hash(enrollCode)
+		codeHash = token.Hash(enrollCode)
 	}
-	verifyToken, resultToken := challenge.RandomToken(24), challenge.RandomToken(24)
-	err = s.Store.CreateEnrollment(ctx, dev, challenge.Hash(verifyToken), challenge.Hash(resultToken), &pk, codeHash)
+	verifyToken, resultToken := token.Random(24), token.Random(24)
+	err = s.Store.CreateEnrollment(ctx, dev, token.Hash(verifyToken), token.Hash(resultToken), &pk, codeHash)
 	if errors.Is(err, store.ErrCodeUnavailable) {
 		return nil, ErrInvalidCode
 	} else if err != nil {
@@ -124,7 +124,7 @@ func (s *Service) CompleteEnrollment(ctx context.Context, username, deviceName s
 // EnrolledDevice resolves the token the enrollment result page holds, which stands in for the
 // user's identity once a single-use enrollment code is spent.
 func (s *Service) EnrolledDevice(ctx context.Context, resultToken string) (*store.Device, error) {
-	d, err := s.Store.DeviceByResultToken(ctx, challenge.Hash(resultToken), time.Now(), EnrollResultTTL)
+	d, err := s.Store.DeviceByResultToken(ctx, token.Hash(resultToken), time.Now(), EnrollResultTTL)
 	if errors.Is(err, store.ErrNotFound) {
 		return nil, ErrInvalidCode
 	}
@@ -188,8 +188,8 @@ func (s *Service) ResendSetupPush(ctx context.Context, deviceID, username string
 	} else if err != nil {
 		return err
 	}
-	verifyToken := challenge.RandomToken(24)
-	ok, err := s.Store.SetVerifyToken(ctx, d.ID, challenge.Hash(verifyToken))
+	verifyToken := token.Random(24)
+	ok, err := s.Store.SetVerifyToken(ctx, d.ID, token.Hash(verifyToken))
 	if err != nil {
 		return err
 	}
@@ -207,8 +207,8 @@ func uuidString(b []byte) string {
 }
 
 // VerifyDevice activates a device once its owner opened the test push.
-func (s *Service) VerifyDevice(ctx context.Context, deviceID, token string) error {
-	ok, err := s.Store.VerifyDevice(ctx, deviceID, challenge.Hash(token))
+func (s *Service) VerifyDevice(ctx context.Context, deviceID, verifyToken string) error {
+	ok, err := s.Store.VerifyDevice(ctx, deviceID, token.Hash(verifyToken))
 	if err != nil {
 		return err
 	}
@@ -223,7 +223,7 @@ func (s *Service) VerifyDevice(ctx context.Context, deviceID, token string) erro
 
 // EnrollStatus reports IdP-driven enrollment progress: waiting, success or invalid.
 func (s *Service) EnrollStatus(ctx context.Context, userID, code string) string {
-	ec, err := s.Store.EnrollCode(ctx, challenge.Hash(code))
+	ec, err := s.Store.EnrollCode(ctx, token.Hash(code))
 	if err != nil {
 		return "invalid"
 	}

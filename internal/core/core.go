@@ -9,15 +9,16 @@ import (
 	"log/slog"
 	"net/url"
 	"regexp"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
 
-	"github.com/babraham123/ntfy-idp-push/internal/challenge"
 	"github.com/babraham123/ntfy-idp-push/internal/config"
 	"github.com/babraham123/ntfy-idp-push/internal/ntfy"
 	"github.com/babraham123/ntfy-idp-push/internal/store"
+	"github.com/babraham123/ntfy-idp-push/internal/token"
 	"github.com/babraham123/ntfy-idp-push/internal/webauthn"
 )
 
@@ -45,12 +46,16 @@ const (
 var usernameRe = regexp.MustCompile(`^[-_.+@a-zA-Z0-9]{1,128}$`)
 
 type Service struct {
-	cfg        atomic.Pointer[config.Config]
-	Store      *store.Store
-	Ntfy       *ntfy.Client
-	RP         *webauthn.RP
-	Challenges *challenge.Manager
-	Log        *slog.Logger
+	cfg   atomic.Pointer[config.Config]
+	Store *store.Store
+	Ntfy  *ntfy.Client
+	RP    *webauthn.RP
+	Log   *slog.Logger
+
+	waitMu sync.Mutex
+	// waiters holds a channel per challenge an auth call in this process waits on, closed when it
+	// is decided.
+	waiters map[string]chan struct{}
 }
 
 func New(cfg *config.Config, st *store.Store, log *slog.Logger) (*Service, error) {
@@ -65,14 +70,13 @@ func New(cfg *config.Config, st *store.Store, log *slog.Logger) (*Service, error
 		return nil, err
 	}
 	s := &Service{
-		Store:      st,
-		Ntfy:       ntfy.New(cfg.NtfyBaseURL, cfg.NtfyAdminToken),
-		RP:         rp,
-		Challenges: challenge.New(st),
-		Log:        log,
+		Store:   st,
+		Ntfy:    ntfy.New(cfg.NtfyBaseURL, cfg.NtfyAdminToken),
+		RP:      rp,
+		Log:     log,
+		waiters: map[string]chan struct{}{},
 	}
 	s.cfg.Store(cfg)
-	s.Challenges.OnDecided = s.clearPush
 	return s, nil
 }
 
@@ -88,24 +92,6 @@ func (s *Service) Reload(cfg *config.Config) {
 			s.Log.Error("reload: deny pending logins", "err", err)
 		}
 	}
-}
-
-// denyPending denies the pending challenges matching f, waking their blocked auth calls.
-func (s *Service) denyPending(ctx context.Context, f store.ChallengeFilter) error {
-	return s.decidePending(ctx, f, store.StateDeny)
-}
-
-func (s *Service) decidePending(ctx context.Context, f store.ChallengeFilter, state store.ChallengeState) error {
-	ids, err := s.Store.PendingChallengeIDs(ctx, f)
-	if err != nil {
-		return err
-	}
-	for _, id := range ids {
-		if err := s.Challenges.Decide(ctx, id, state); err != nil && !errors.Is(err, challenge.ErrGone) {
-			return err
-		}
-	}
-	return nil
 }
 
 func ValidUsername(u string) error {
@@ -189,7 +175,7 @@ func (s *Service) ensureNtfyUser(ctx context.Context, username string) error {
 		return nil
 	}
 	// Nobody needs the password: the apps sign in with enrollment codes.
-	return s.Ntfy.AddUser(ctx, username, challenge.RandomToken(32))
+	return s.Ntfy.AddUser(ctx, username, token.Random(32))
 }
 
 func mergeGrants(a, b []config.Grant) []config.Grant {
@@ -241,19 +227,6 @@ func (s *Service) MintNtfyCode(ctx context.Context, username string) (*ntfy.Enro
 	return ec, err
 }
 
-// clearPush deletes the login push once its challenge is decided, so stale requests vanish.
-func (s *Service) clearPush(c *store.Challenge) {
-	d, err := s.Store.Device(context.Background(), c.DeviceID)
-	if err != nil {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := s.Ntfy.DeleteMessage(ctx, d.NtfyTopic, c.ID); err != nil {
-		s.Log.Debug("clear push", "challenge", c.ID, "err", err)
-	}
-}
-
 // Purge expires challenges and old records, removes devices never verified, and reconciles
 // unfinished revocations. Each step runs even if an earlier one fails.
 func (s *Service) Purge(ctx context.Context) {
@@ -282,7 +255,7 @@ func (s *Service) SetNtfyPassword(ctx context.Context, username string) (string,
 	if _, err := s.Provision(ctx, username); err != nil {
 		return "", err
 	}
-	password := challenge.RandomToken(18)
+	password := token.Random(18)
 	if err := s.Ntfy.ChangePassword(ctx, username, password); err != nil {
 		return "", err
 	}
