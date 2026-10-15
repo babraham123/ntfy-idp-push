@@ -16,6 +16,7 @@ require (
 )
 
 require (
+	github.com/BurntSushi/toml v1.4.1-0.20240526193622-a339e1f7089c // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
@@ -29,8 +30,20 @@ require (
 	github.com/tinylib/msgp v1.6.4 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	golang.org/x/crypto v0.57.0 // indirect
-	golang.org/x/sys v0.48.0 // indirect
+	golang.org/x/exp/typeparams v0.0.0-20231108232855-2478ac86f678 // indirect
+	golang.org/x/mod v0.42.0 // indirect
+	golang.org/x/sync v0.24.0 // indirect
+	golang.org/x/sys v0.49.0 // indirect
+	golang.org/x/telemetry v0.0.0-20261010193011-f71dc92da45e // indirect
+	golang.org/x/tools v0.52.0 // indirect
+	golang.org/x/vuln v1.9.0 // indirect
+	honnef.co/go/tools v0.8.2 // indirect
 	modernc.org/libc v1.77.1 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect
+)
+
+tool (
+	golang.org/x/vuln/cmd/govulncheck
+	honnef.co/go/tools/cmd/staticcheck
 )
