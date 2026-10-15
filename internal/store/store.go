@@ -116,6 +116,21 @@ func Open(path string) (*Store, error) {
 
 func (s *Store) Close() error { return s.db.Close() }
 
+// Backup writes a consistent copy of the database to path, which must not exist. It is safe while
+// the server runs. The copy is created 0600, as the database holds passkeys and session IDs.
+func (s *Store) Backup(ctx context.Context, path string) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	f.Close()
+	if _, err := s.db.ExecContext(ctx, `VACUUM INTO ?`, path); err != nil {
+		os.Remove(path)
+		return err
+	}
+	return nil
+}
+
 func (s *Store) migrate() error {
 	var v int
 	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
