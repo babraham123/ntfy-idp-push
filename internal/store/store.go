@@ -192,7 +192,7 @@ func (s *Store) AuditLog(ctx context.Context, username string, limit int) ([]Aud
 	return out, rows.Err()
 }
 
-// Purge expires challenges and removes old challenges, codes and sessions. A used enrollment code
+// Purge removes old challenges, codes and sessions. A used enrollment code
 // is kept as long as its device may still be awaiting setup, because an IdP keeps polling
 // enroll_status past the code's expiry.
 func (s *Store) Purge(ctx context.Context, now time.Time, unverifiedTTL, challengeTTL time.Duration) error {
@@ -200,7 +200,6 @@ func (s *Store) Purge(ctx context.Context, now time.Time, unverifiedTTL, challen
 		sql  string
 		args []any
 	}{
-		{`UPDATE challenges SET state='timeout', decided_at=? WHERE state='pending' AND expires_at <= ?`, []any{unix(now), unix(now)}},
 		{`DELETE FROM challenges WHERE created_at < ?`, []any{unix(now.Add(-challengeTTL))}},
 		{`DELETE FROM enroll_codes WHERE (used_at IS NULL AND expires_at < ?) OR used_at < ?`, []any{unix(now), unix(now.Add(-unverifiedTTL))}},
 		{`DELETE FROM oidc_sessions WHERE expires_at < ?`, []any{unix(now)}},

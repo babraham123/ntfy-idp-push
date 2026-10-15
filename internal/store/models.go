@@ -366,13 +366,17 @@ func (s *Store) DecideChallenge(ctx context.Context, id string, state ChallengeS
 	return n == 1, nil
 }
 
-// ChallengeFilter selects pending challenges by device or username; the zero value selects all.
+// ChallengeFilter selects pending challenges by device, username or expiry; the zero value selects
+// all.
 type ChallengeFilter struct {
 	DeviceID string
 	Username string
+	// ExpiredBy, when set, keeps challenges that expired at or before it.
+	ExpiredBy time.Time
 }
 
-// PendingChallengeIDs lists undecided challenges matching f, used when revoking or disabling.
+// PendingChallengeIDs lists undecided challenges matching f, used when revoking, disabling or
+// purging.
 func (s *Store) PendingChallengeIDs(ctx context.Context, f ChallengeFilter) ([]string, error) {
 	q, args := `SELECT id FROM challenges WHERE state = 'pending'`, []any{}
 	if f.DeviceID != "" {
@@ -380,6 +384,9 @@ func (s *Store) PendingChallengeIDs(ctx context.Context, f ChallengeFilter) ([]s
 	}
 	if f.Username != "" {
 		q, args = q+` AND username = ?`, append(args, f.Username)
+	}
+	if !f.ExpiredBy.IsZero() {
+		q, args = q+` AND expires_at <= ?`, append(args, unix(f.ExpiredBy))
 	}
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
