@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -9,8 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-webauthn/webauthn/protocol"
-	gowebauthn "github.com/go-webauthn/webauthn/webauthn"
 	"github.com/google/uuid"
 
 	"github.com/babraham123/ntfy-idp-push/internal/challenge"
@@ -48,23 +47,19 @@ func (s *Service) ResolveEnrollCode(ctx context.Context, code string) (*store.En
 	return ec, err
 }
 
-func (s *Service) owner(u *store.User, deviceName string, creds []gowebauthn.Credential) webauthn.Owner {
-	return webauthn.Owner{UserID: u.ID, Username: u.Username, DisplayName: u.Username + " (" + deviceName + ")", Credentials: creds}
-}
-
 // BeginEnrollment starts passkey registration for a new device of username.
-func (s *Service) BeginEnrollment(ctx context.Context, username, deviceName string) (*protocol.CredentialCreation, *gowebauthn.SessionData, error) {
+func (s *Service) BeginEnrollment(ctx context.Context, username, deviceName string) (json.RawMessage, webauthn.Session, error) {
 	if err := ValidUsername(username); err != nil {
-		return nil, nil, err
+		return nil, webauthn.Session{}, err
 	}
 	u, err := s.Store.EnsureUser(ctx, username, uuid.NewString())
 	if err != nil {
-		return nil, nil, err
+		return nil, webauthn.Session{}, err
 	}
 	if u.DisabledAt != nil {
-		return nil, nil, ErrUserDisabled
+		return nil, webauthn.Session{}, ErrUserDisabled
 	}
-	return s.RP.BeginRegistration(s.owner(u, deviceName, nil))
+	return s.RP.BeginRegistration(u, deviceName)
 }
 
 type Enrollment struct {
@@ -84,7 +79,7 @@ const EnrollResultTTL = time.Hour
 // CompleteEnrollment verifies the passkey, creates the device and its ntfy topic grant, and sends
 // the test push whose action verifies the device. enrollCode, when set, is claimed together with
 // the device; a failure anywhere undoes the enrollment and releases the code for a retry.
-func (s *Service) CompleteEnrollment(ctx context.Context, username, deviceName string, session gowebauthn.SessionData, attestation io.Reader, enrollCode string) (*Enrollment, error) {
+func (s *Service) CompleteEnrollment(ctx context.Context, username, deviceName string, session webauthn.Session, attestation io.Reader, enrollCode string) (*Enrollment, error) {
 	cfg := s.Config()
 	u, err := s.Store.UserByName(ctx, username)
 	if err != nil {
@@ -93,7 +88,7 @@ func (s *Service) CompleteEnrollment(ctx context.Context, username, deviceName s
 	if u.DisabledAt != nil {
 		return nil, ErrUserDisabled
 	}
-	cred, err := s.RP.FinishRegistration(s.owner(u, deviceName, nil), session, attestation)
+	pk, attestationFormat, err := s.RP.FinishRegistration(u, session, attestation)
 	if err != nil {
 		return nil, err
 	}
@@ -103,17 +98,13 @@ func (s *Service) CompleteEnrollment(ctx context.Context, username, deviceName s
 	}
 	dev := &store.Device{ID: uuid.NewString(), UserID: u.ID, Username: username, Name: deviceName}
 	dev.NtfyTopic = cfg.NtfyTopicPrefix + dev.ID
-	credJSON, err := webauthn.MarshalCredential(cred)
-	if err != nil {
-		return nil, err
-	}
+	pk.DeviceID = dev.ID
 	var codeHash []byte
 	if enrollCode != "" {
 		codeHash = challenge.Hash(enrollCode)
 	}
 	verifyToken, resultToken := challenge.RandomToken(24), challenge.RandomToken(24)
-	err = s.Store.CreateEnrollment(ctx, dev, challenge.Hash(verifyToken), challenge.Hash(resultToken), &store.Passkey{CredID: cred.ID, DeviceID: dev.ID,
-		CredentialJSON: credJSON, AAGUID: cred.Authenticator.AAGUID, SignCount: cred.Authenticator.SignCount}, codeHash)
+	err = s.Store.CreateEnrollment(ctx, dev, challenge.Hash(verifyToken), challenge.Hash(resultToken), &pk, codeHash)
 	if errors.Is(err, store.ErrCodeUnavailable) {
 		return nil, ErrInvalidCode
 	} else if err != nil {
@@ -125,7 +116,7 @@ func (s *Service) CompleteEnrollment(ctx context.Context, username, deviceName s
 		return nil, err
 	}
 	s.Store.Audit(ctx, username, "device_enrolled", map[string]any{"device": dev.ID, "name": deviceName,
-		"aaguid": uuidString(cred.Authenticator.AAGUID), "attestation": cred.AttestationFormat})
+		"aaguid": uuidString(pk.AAGUID), "attestation": attestationFormat})
 	res.ResultToken = resultToken
 	return res, nil
 }

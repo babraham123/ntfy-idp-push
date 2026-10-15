@@ -16,7 +16,6 @@ import (
 	"sync"
 	"time"
 
-	gowebauthn "github.com/go-webauthn/webauthn/webauthn"
 	"github.com/skip2/go-qrcode"
 	"golang.org/x/time/rate"
 
@@ -48,7 +47,7 @@ type Server struct {
 // registration is a passkey ceremony in progress between /enroll/begin and /enroll/finish.
 type registration struct {
 	username, name, code string
-	session              gowebauthn.SessionData
+	session              webauthn.Session
 	expires              time.Time
 }
 
@@ -246,7 +245,7 @@ func (s *Server) enrollBegin(w http.ResponseWriter, r *http.Request) {
 			delete(s.regs, k)
 		}
 	}
-	s.regs[token] = &registration{username: user, name: in.Name, code: in.Code, session: *session, expires: now.Add(5 * time.Minute)}
+	s.regs[token] = &registration{username: user, name: in.Name, code: in.Code, session: session, expires: now.Add(5 * time.Minute)}
 	s.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]any{"token": token, "options": opts})
 }

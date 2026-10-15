@@ -1,4 +1,6 @@
-// Package webauthn binds approvals to a device-bound passkey on the enrolled phone.
+// Package webauthn binds approvals to a device-bound passkey on the enrolled phone. Callers deal
+// only in store passkeys, browser options as JSON and an opaque registration Session, so
+// go-webauthn's types and credential bookkeeping stay here.
 package webauthn
 
 import (
@@ -11,6 +13,8 @@ import (
 
 	"github.com/go-webauthn/webauthn/protocol"
 	gowebauthn "github.com/go-webauthn/webauthn/webauthn"
+
+	"github.com/babraham123/ntfy-idp-push/internal/store"
 )
 
 var (
@@ -33,19 +37,21 @@ type RP struct {
 	cfg Config
 }
 
-// Owner is the WebAuthn user entity for a device: the user handle is the shim's user ID, and
-// credentials are only those of the one device being registered or asserted against.
-type Owner struct {
-	UserID      string
-	Username    string
-	DisplayName string
-	Credentials []gowebauthn.Credential
+// Session is a registration in progress, held by the caller between BeginRegistration and
+// FinishRegistration.
+type Session struct{ data gowebauthn.SessionData }
+
+// owner is the WebAuthn user entity: the user handle is the shim's user ID, and credentials are
+// only those of the one device being registered or asserted against.
+type owner struct {
+	id, name, displayName string
+	creds                 []gowebauthn.Credential
 }
 
-func (o Owner) WebAuthnID() []byte                           { return []byte(o.UserID) }
-func (o Owner) WebAuthnName() string                         { return o.Username }
-func (o Owner) WebAuthnDisplayName() string                  { return o.DisplayName }
-func (o Owner) WebAuthnCredentials() []gowebauthn.Credential { return o.Credentials }
+func (o owner) WebAuthnID() []byte                           { return []byte(o.id) }
+func (o owner) WebAuthnName() string                         { return o.name }
+func (o owner) WebAuthnDisplayName() string                  { return o.displayName }
+func (o owner) WebAuthnCredentials() []gowebauthn.Credential { return o.creds }
 
 func New(cfg Config) (*RP, error) {
 	wa, err := gowebauthn.New(&gowebauthn.Config{
@@ -70,86 +76,131 @@ func New(cfg Config) (*RP, error) {
 	return &RP{wa: wa, cfg: cfg}, nil
 }
 
-func (rp *RP) BeginRegistration(o Owner) (*protocol.CredentialCreation, *gowebauthn.SessionData, error) {
-	return rp.wa.BeginRegistration(o, gowebauthn.WithExclusions(gowebauthn.Credentials(o.Credentials).CredentialDescriptors()))
+func registrant(u *store.User, deviceName string) owner {
+	return owner{id: u.ID, name: u.Username, displayName: u.Username + " (" + deviceName + ")"}
 }
 
-// FinishRegistration verifies an attestation response and applies the device-binding policy.
-func (rp *RP) FinishRegistration(o Owner, session gowebauthn.SessionData, body io.Reader) (*gowebauthn.Credential, error) {
-	parsed, err := protocol.ParseCredentialCreationResponseBody(body)
+// BeginRegistration returns the navigator.credentials.create() options for a new device of u.
+func (rp *RP) BeginRegistration(u *store.User, deviceName string) (json.RawMessage, Session, error) {
+	opts, session, err := rp.wa.BeginRegistration(registrant(u, deviceName))
 	if err != nil {
-		return nil, describe(err)
+		return nil, Session{}, err
+	}
+	b, err := json.Marshal(opts)
+	return b, Session{*session}, err
+}
+
+// FinishRegistration verifies an attestation response under the device-binding policy and returns
+// the passkey to store (without its DeviceID) and the attestation format.
+func (rp *RP) FinishRegistration(u *store.User, session Session, attestation io.Reader) (_ store.Passkey, attestationFormat string, _ error) {
+	parsed, err := protocol.ParseCredentialCreationResponseBody(attestation)
+	if err != nil {
+		return store.Passkey{}, "", describe(err)
 	}
 	if !rp.cfg.AllowSynced && parsed.Response.AttestationObject.AuthData.Flags.HasBackupEligible() {
-		return nil, ErrSynced
+		return store.Passkey{}, "", ErrSynced
 	}
-	cred, err := rp.wa.CreateCredential(o, session, parsed)
+	cred, err := rp.wa.CreateCredential(registrant(u, ""), session.data, parsed)
 	if err != nil {
-		return nil, describe(err)
+		return store.Passkey{}, "", describe(err)
 	}
 	if !cred.Flags.UserVerified {
-		return nil, ErrNotUserVerified
+		return store.Passkey{}, "", ErrNotUserVerified
 	}
 	if rp.cfg.RequireAttestation && (cred.AttestationFormat == "" || cred.AttestationFormat == "none") {
-		return nil, ErrNoAttestation
+		return store.Passkey{}, "", ErrNoAttestation
 	}
-	return cred, nil
+	b, err := json.Marshal(cred)
+	if err != nil {
+		return store.Passkey{}, "", err
+	}
+	return store.Passkey{CredID: cred.ID, CredentialJSON: b, AAGUID: cred.Authenticator.AAGUID, SignCount: cred.Authenticator.SignCount},
+		cred.AttestationFormat, nil
 }
 
-// assertionSession is derived from the stored challenge, so nothing about a pending login needs
-// to be kept outside the challenge row.
-func (rp *RP) assertionSession(o Owner, nonce []byte) (*protocol.CredentialAssertion, *gowebauthn.SessionData, error) {
-	return rp.wa.BeginLogin(o, gowebauthn.WithChallenge(nonce), gowebauthn.WithUserVerification(protocol.VerificationRequired))
+// asserter is the WebAuthn user for a login, holding only the passkeys the device-binding policy
+// still allows. go-webauthn applies its Filtering only at registration, so login filters here.
+func (rp *RP) asserter(userID string, passkeys []store.Passkey) (owner, error) {
+	o := owner{id: userID}
+	for _, p := range passkeys {
+		cred, err := unmarshal(p.CredentialJSON)
+		if err != nil {
+			return owner{}, err
+		}
+		if rp.cfg.AllowSynced || !cred.Flags.BackupEligible {
+			o.creds = append(o.creds, cred)
+		}
+	}
+	if len(o.creds) == 0 {
+		return owner{}, ErrNoUsableCredential
+	}
+	return o, nil
 }
 
-func (rp *RP) BeginAssertion(o Owner, nonce []byte) (*protocol.CredentialAssertion, error) {
-	a, _, err := rp.assertionSession(o, nonce)
-	return a, err
+// loginSession is derived from the nonce, so nothing about a pending login needs to be kept
+// outside the challenge row.
+func (rp *RP) loginSession(userID string, passkeys []store.Passkey, nonce []byte) (owner, *protocol.CredentialAssertion, *gowebauthn.SessionData, error) {
+	o, err := rp.asserter(userID, passkeys)
+	if err != nil {
+		return owner{}, nil, nil, err
+	}
+	opts, session, err := rp.wa.BeginLogin(o, gowebauthn.WithChallenge(nonce), gowebauthn.WithUserVerification(protocol.VerificationRequired))
+	return o, opts, session, err
 }
 
-// Allowed reports whether a stored credential may still be used under the device-binding policy.
-// go-webauthn applies its Filtering only at registration, so login checks it here.
-func (rp *RP) Allowed(c *gowebauthn.Credential) bool {
-	return rp.cfg.AllowSynced || !c.Flags.BackupEligible
-}
-
-// FinishAssertion verifies an assertion over nonce by one of o's credentials (UP and UV required,
-// BE refused unless synced passkeys are allowed).
-func (rp *RP) FinishAssertion(o Owner, nonce []byte, body io.Reader) (*gowebauthn.Credential, error) {
-	_, session, err := rp.assertionSession(o, nonce)
+// BeginLogin returns the navigator.credentials.get() options for an assertion over nonce by one
+// of passkeys.
+func (rp *RP) BeginLogin(userID string, passkeys []store.Passkey, nonce []byte) (json.RawMessage, error) {
+	_, opts, _, err := rp.loginSession(userID, passkeys, nonce)
 	if err != nil {
 		return nil, err
 	}
-	parsed, err := protocol.ParseCredentialRequestResponseBody(body)
+	return json.Marshal(opts)
+}
+
+// FinishLogin verifies an assertion over nonce by one of passkeys (UP and UV required, BE refused
+// unless synced passkeys are allowed) and returns that passkey with its new sign count.
+// signCountRegressed reports a counter that did not advance; passkeys commonly report zero, so
+// that is for the caller to log rather than a refusal.
+func (rp *RP) FinishLogin(userID string, passkeys []store.Passkey, nonce []byte, assertion io.Reader) (_ store.Passkey, signCountRegressed bool, _ error) {
+	o, _, session, err := rp.loginSession(userID, passkeys, nonce)
 	if err != nil {
-		return nil, describe(err)
+		return store.Passkey{}, false, err
+	}
+	parsed, err := protocol.ParseCredentialRequestResponseBody(assertion)
+	if err != nil {
+		return store.Passkey{}, false, describe(err)
 	}
 	cred, err := rp.wa.ValidateLogin(o, *session, parsed)
 	if err != nil {
-		return nil, describe(err)
+		return store.Passkey{}, false, describe(err)
 	}
 	if !parsed.Response.AuthenticatorData.Flags.HasUserVerified() {
-		return nil, ErrNotUserVerified
+		return store.Passkey{}, false, ErrNotUserVerified
 	}
 	if !rp.cfg.AllowSynced && parsed.Response.AuthenticatorData.Flags.HasBackupEligible() {
-		return nil, ErrSynced
+		return store.Passkey{}, false, ErrSynced
 	}
-	return cred, nil
-}
-
-// FindCredential returns the stored credential matching id.
-func FindCredential(creds []gowebauthn.Credential, id []byte) *gowebauthn.Credential {
-	for i := range creds {
-		if bytes.Equal(creds[i].ID, id) {
-			return &creds[i]
+	for _, p := range passkeys {
+		if !bytes.Equal(p.CredID, cred.ID) {
+			continue
 		}
+		// Only the counter moves; the rest of the record stays as registered.
+		stored, err := unmarshal(p.CredentialJSON)
+		if err != nil {
+			return store.Passkey{}, false, err
+		}
+		stored.Authenticator.SignCount = cred.Authenticator.SignCount
+		if p.CredentialJSON, err = json.Marshal(stored); err != nil {
+			return store.Passkey{}, false, err
+		}
+		p.SignCount = cred.Authenticator.SignCount
+		return p, cred.Authenticator.CloneWarning, nil
 	}
-	return nil
+	return store.Passkey{}, false, errors.New("asserted credential is not among the device's passkeys")
 }
 
-func MarshalCredential(c *gowebauthn.Credential) ([]byte, error) { return json.Marshal(c) }
-
-func UnmarshalCredential(b []byte) (gowebauthn.Credential, error) {
+func unmarshal(b []byte) (gowebauthn.Credential, error) {
 	var c gowebauthn.Credential
 	return c, json.Unmarshal(b, &c)
 }

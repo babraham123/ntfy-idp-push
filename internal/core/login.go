@@ -2,19 +2,16 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/url"
 	"time"
 
-	"github.com/go-webauthn/webauthn/protocol"
-	gowebauthn "github.com/go-webauthn/webauthn/webauthn"
-
 	"github.com/babraham123/ntfy-idp-push/internal/challenge"
 	"github.com/babraham123/ntfy-idp-push/internal/ntfy"
 	"github.com/babraham123/ntfy-idp-push/internal/store"
-	"github.com/babraham123/ntfy-idp-push/internal/webauthn"
 )
 
 type AuthRequest struct {
@@ -145,43 +142,29 @@ func (s *Service) PendingChallenge(ctx context.Context, id string) (*store.Chall
 	return c, nil
 }
 
-func (s *Service) deviceOwner(ctx context.Context, c *store.Challenge) (webauthn.Owner, error) {
+// devicePasskeys returns the device c was pushed to and its passkeys, the only ones that may
+// approve c.
+func (s *Service) devicePasskeys(ctx context.Context, c *store.Challenge) (*store.Device, []store.Passkey, error) {
 	d, err := s.Store.Device(ctx, c.DeviceID)
 	if err != nil {
-		return webauthn.Owner{}, err
+		return nil, nil, err
 	}
 	pks, err := s.Store.Passkeys(ctx, d.ID)
-	if err != nil {
-		return webauthn.Owner{}, err
-	}
-	creds := make([]gowebauthn.Credential, 0, len(pks))
-	for _, p := range pks {
-		cred, err := webauthn.UnmarshalCredential(p.CredentialJSON)
-		if err != nil {
-			return webauthn.Owner{}, err
-		}
-		if s.RP.Allowed(&cred) {
-			creds = append(creds, cred)
-		}
-	}
-	if len(creds) == 0 {
-		return webauthn.Owner{}, webauthn.ErrNoUsableCredential
-	}
-	return webauthn.Owner{UserID: d.UserID, Username: d.Username, DisplayName: d.Username, Credentials: creds}, nil
+	return d, pks, err
 }
 
 // AssertionOptions returns the navigator.credentials.get() options for a pending challenge: its
 // nonce, restricted to the passkeys of the device the push went to.
-func (s *Service) AssertionOptions(ctx context.Context, id string) (*protocol.CredentialAssertion, error) {
+func (s *Service) AssertionOptions(ctx context.Context, id string) (json.RawMessage, error) {
 	c, err := s.PendingChallenge(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	o, err := s.deviceOwner(ctx, c)
+	d, pks, err := s.devicePasskeys(ctx, c)
 	if err != nil {
 		return nil, err
 	}
-	return s.RP.BeginAssertion(o, c.Nonce)
+	return s.RP.BeginLogin(d.UserID, pks, c.Nonce)
 }
 
 // Approve allows the challenge if assertion is a valid signature over its nonce by its device.
@@ -190,11 +173,11 @@ func (s *Service) Approve(ctx context.Context, id string, assertion io.Reader) e
 	if err != nil {
 		return err
 	}
-	o, err := s.deviceOwner(ctx, c)
+	d, pks, err := s.devicePasskeys(ctx, c)
 	if err != nil {
 		return err
 	}
-	cred, err := s.RP.FinishAssertion(o, c.Nonce, assertion)
+	pk, regressed, err := s.RP.FinishLogin(d.UserID, pks, c.Nonce, assertion)
 	if err != nil {
 		s.Store.Audit(ctx, c.Username, "assertion_failed", map[string]any{"challenge": id, "err": err.Error()})
 		return err
@@ -202,17 +185,11 @@ func (s *Service) Approve(ctx context.Context, id string, assertion io.Reader) e
 	if err := s.allow(ctx, c); err != nil {
 		return err
 	}
-	if cred.Authenticator.CloneWarning {
-		// Passkeys commonly report a zero counter, so a regression is logged, not refused.
+	if regressed {
 		s.Log.Warn("passkey sign count regressed", "user", c.Username, "device", c.DeviceID)
 		s.Store.Audit(ctx, c.Username, "sign_count_regressed", map[string]any{"device": c.DeviceID})
 	}
-	if stored := webauthn.FindCredential(o.Credentials, cred.ID); stored != nil {
-		stored.Authenticator.SignCount = cred.Authenticator.SignCount
-		if b, err := webauthn.MarshalCredential(stored); err == nil {
-			_ = s.Store.UpdatePasskey(ctx, cred.ID, b, cred.Authenticator.SignCount)
-		}
-	}
+	_ = s.Store.UpdatePasskey(ctx, pk.CredID, pk.CredentialJSON, pk.SignCount)
 	_ = s.Store.TouchDevice(ctx, c.DeviceID)
 	return nil
 }
