@@ -633,6 +633,25 @@ func TestCleanupWhenNtfyUserAlreadyGone(t *testing.T) {
 	}
 }
 
+func TestAuthOutlastsWriteTimeoutAfterReload(t *testing.T) {
+	h := testutil.NewHarness(t, nil)
+	dev := h.Enroll(t, "alice", testutil.NewAuthenticator(t, testutil.PublicURL))
+	next := *h.Cfg
+	next.PushTimeout = config.Duration(20 * time.Second)
+	h.Svc.Reload(&next)
+
+	res := authCall(h, "alice", dev.DeviceID)
+	m := h.Ntfy.NextPublish(t)
+	// Answer after the server's write timeout but within push-timeout.
+	time.Sleep(h.Server.Config.WriteTimeout + time.Second)
+	if st := approve(t, h, dev.Auth, m.Click); st != 200 {
+		t.Fatalf("approve: %d", st)
+	}
+	if r := wait(t, res); r.Response.Result != "allow" {
+		t.Fatalf("auth: %+v", r.Response)
+	}
+}
+
 func TestPendingLoginBlockedByLaterDisable(t *testing.T) {
 	ctx := context.Background()
 	t.Run("user disable", func(t *testing.T) {
