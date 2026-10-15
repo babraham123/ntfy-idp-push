@@ -117,6 +117,13 @@ device list <u> | revoke <id> [--reset-ntfy-user] [--force]
 | `/enroll/qr` | IdP | QR for an issued enrollment URL |
 | `/oidc/login`, `/oidc/callback` | browser (`auth-mode: oidc`) | sign in to the pages above |
 
+## Releases
+
+Pushing a `vX.Y.Z` tag runs the tests, then publishes Linux and macOS binaries (amd64, arm64) with
+checksums to the GitHub release, and pushes `ghcr.io/babraham123/ntfy-idp-push:X.Y.Z`, `:X.Y` and
+`:latest` for amd64 and arm64 with an SBOM and build provenance. Or install from source:
+`go install github.com/babraham123/ntfy-idp-push/cmd/ntfy-idp-push@latest`.
+
 ## Develop
 
 ```sh
