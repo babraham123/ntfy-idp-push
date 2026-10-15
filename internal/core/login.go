@@ -23,6 +23,9 @@ type AuthRequest struct {
 	IPAddr          string
 	TargetURL       string
 	DisplayUsername string
+	// Timeout is how long the push stays open; zero means push-timeout. The caller's response
+	// deadline must outlast it.
+	Timeout time.Duration
 }
 
 // Authenticate pushes a sign-in request to the device and blocks until it is approved, denied or
@@ -41,9 +44,12 @@ func (s *Service) Authenticate(ctx context.Context, r AuthRequest) (store.Challe
 	if r.DisplayUsername == "" {
 		r.DisplayUsername = r.User.Username
 	}
+	if r.Timeout == 0 {
+		r.Timeout = cfg.PushTimeout.D()
+	}
 	c, denyToken, err := s.Challenges.Create(ctx, challenge.Params{
 		Username: r.User.Username, DeviceID: r.Device.ID, IPAddr: r.IPAddr, TargetURL: r.TargetURL,
-		DisplayUsername: r.DisplayUsername, TTL: cfg.PushTimeout.D(),
+		DisplayUsername: r.DisplayUsername, TTL: r.Timeout,
 	})
 	if err != nil {
 		return store.StateDeny, err

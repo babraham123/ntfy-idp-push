@@ -89,6 +89,9 @@ func NewHarness(t *testing.T, mutate func(*config.Config)) *Harness {
 	}
 	h := &Harness{Cfg: cfg, Ntfy: fn, Server: srv, Host: host, Store: st, log: log}
 	h.serve(t)
+	// Shorter than push-timeout, as serve's write timeout is, so a blocking auth must extend its own
+	// deadline.
+	srv.Config.WriteTimeout = 3 * time.Second
 	srv.StartTLS()
 	t.Cleanup(srv.Close)
 	client := &http.Client{

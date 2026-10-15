@@ -289,9 +289,16 @@ func (h *Handler) auth(w http.ResponseWriter, r *http.Request, p params) {
 		writeOK(w, deny("Unknown device"))
 		return
 	}
+	// The response blocks until the push is answered, so it must outlast push-timeout. The deadline
+	// is set here rather than on the server so a reloaded push-timeout takes effect.
+	timeout := h.svc.Config().PushTimeout.D()
+	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(timeout + 30*time.Second)); err != nil {
+		h.internal(w, err)
+		return
+	}
 	state, err := h.svc.Authenticate(ctx, core.AuthRequest{
 		User: u, Device: dev, IPAddr: p.get("ipaddr"), TargetURL: pushInfo(p.get("pushinfo"), "target url"),
-		DisplayUsername: p.get("display_username"),
+		DisplayUsername: p.get("display_username"), Timeout: timeout,
 	})
 	if err != nil {
 		h.log.Info("duo api: auth not approved", "user", u.Username, "state", state, "err", err)

@@ -53,16 +53,16 @@ func serve(cfg *config.Config, cfgPath string) error {
 	duoapi.New(svc, log).Register(mux)
 	web.New(svc, identity, log).Register(mux)
 
-	// auth blocks for up to push-timeout, so writes must be allowed to outlast it.
 	newServer := func(addr string) *http.Server {
 		return &http.Server{
 			Addr:              addr,
 			Handler:           mux,
 			ReadHeaderTimeout: 10 * time.Second,
 			ReadTimeout:       30 * time.Second,
-			WriteTimeout:      cfg.PushTimeout.D() + 30*time.Second,
-			IdleTimeout:       2 * time.Minute,
-			ErrorLog:          slog.NewLogLogger(log.Handler(), slog.LevelWarn),
+			// /auth/v2/auth extends its own deadline past push-timeout.
+			WriteTimeout: 30 * time.Second,
+			IdleTimeout:  2 * time.Minute,
+			ErrorLog:     slog.NewLogLogger(log.Handler(), slog.LevelWarn),
 		}
 	}
 	var servers []*http.Server
