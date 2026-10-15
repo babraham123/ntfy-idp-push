@@ -371,7 +371,9 @@ func (s *Store) Challenge(ctx context.Context, id string) (*Challenge, error) {
 
 // DecideChallenge moves a pending, unexpired challenge to state. It reports whether this call
 // made the decision; a challenge is decided at most once. Allow additionally requires, in the same
-// statement, that the device is active and its user enabled.
+// statement, that the device is active and its user enabled: core's eligibility rule (less the kill
+// switch, which lives in config), repeated here so a concurrent revoke or disable cannot slip
+// between core's check and the update.
 func (s *Store) DecideChallenge(ctx context.Context, id string, state ChallengeState, now time.Time) (bool, error) {
 	cond := ` AND expires_at > ?`
 	args := []any{string(state), unix(now), id, unix(now)}

@@ -3,7 +3,6 @@
 package duoapi
 
 import (
-	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -148,19 +147,8 @@ func deny(msg string) map[string]any {
 	return map[string]any{"result": "deny", "status": "deny", "status_msg": msg}
 }
 
-// lookupUser resolves username or user_id; a nil user with nil error means unknown.
-func (h *Handler) lookupUser(ctx context.Context, p params) (*store.User, error) {
-	var u *store.User
-	var err error
-	if id := p.get("user_id"); id != "" {
-		u, err = h.svc.Store.UserByID(ctx, id)
-	} else {
-		u, err = h.svc.Store.UserByName(ctx, p.get("username"))
-	}
-	if errors.Is(err, store.ErrNotFound) {
-		return nil, nil
-	}
-	return u, err
+func userRef(p params) core.UserRef {
+	return core.UserRef{ID: p.get("user_id"), Username: p.get("username")}
 }
 
 type device struct {
@@ -173,74 +161,41 @@ type device struct {
 }
 
 func (h *Handler) preauth(w http.ResponseWriter, r *http.Request, p params) {
-	ctx := r.Context()
-	cfg := h.svc.Config()
 	if p.get("username") == "" && p.get("user_id") == "" {
 		writeFail(w, http.StatusBadRequest, 40001, "Missing required request parameters", "username")
 		return
 	}
-	if cfg.PushDisabled {
-		writeOK(w, deny("Push authentication is disabled"))
-		return
-	}
-	u, err := h.lookupUser(ctx, p)
+	res, err := h.svc.Preauth(r.Context(), userRef(p))
 	if err != nil {
 		h.internal(w, err)
 		return
 	}
-	var devs []store.Device
-	if u != nil {
-		if u.DisabledAt != nil {
-			writeOK(w, deny("user disabled"))
-			return
-		}
-		if devs, err = h.svc.Store.Devices(ctx, u.ID, true); err != nil {
-			h.internal(w, err)
-			return
-		}
-	}
-	if len(devs) == 0 {
-		if cfg.EnrollPortalURL == "" {
-			writeOK(w, deny("Enrollment required"))
-			return
-		}
+	switch {
+	case errors.Is(res.Deny, core.ErrPushDisabled):
+		writeOK(w, deny("Push authentication is disabled"))
+	case errors.Is(res.Deny, core.ErrUserDisabled):
+		writeOK(w, deny("user disabled"))
+	case res.Deny != nil:
+		writeOK(w, deny("Enrollment required"))
+	case res.EnrollURL != "":
 		writeOK(w, map[string]any{"result": "enroll", "status_msg": "Enroll an authentication device to proceed",
-			"enroll_portal_url": cfg.EnrollPortalURL})
-		return
+			"enroll_portal_url": res.EnrollURL})
+	default:
+		out := make([]device, 0, len(res.Devices))
+		for _, d := range res.Devices {
+			out = append(out, device{Device: d.ID, Type: "phone", Name: d.Name, DisplayName: d.Name, Capabilities: []string{"push"}})
+		}
+		writeOK(w, map[string]any{"result": "auth", "status_msg": "Account is active", "devices": out})
 	}
-	out := make([]device, 0, len(devs))
-	for _, d := range devs {
-		out = append(out, device{Device: d.ID, Type: "phone", Name: d.Name, DisplayName: d.Name, Capabilities: []string{"push"}})
-	}
-	writeOK(w, map[string]any{"result": "auth", "status_msg": "Account is active", "devices": out})
 }
 
 func (h *Handler) auth(w http.ResponseWriter, r *http.Request, p params) {
-	ctx := r.Context()
 	if p.get("username") == "" && p.get("user_id") == "" {
 		writeFail(w, http.StatusBadRequest, 40001, "Missing required request parameters", "username")
 		return
 	}
 	if f := p.get("factor"); f != "push" && f != "auto" {
 		writeOK(w, deny("Only push is supported"))
-		return
-	}
-	u, err := h.lookupUser(ctx, p)
-	if err != nil {
-		h.internal(w, err)
-		return
-	}
-	if u == nil {
-		writeOK(w, deny("Unknown user"))
-		return
-	}
-	dev, err := h.pickDevice(ctx, u, p.get("device"))
-	if err != nil {
-		h.internal(w, err)
-		return
-	}
-	if dev == nil {
-		writeOK(w, deny("Unknown device"))
 		return
 	}
 	// The response blocks until the push is answered, so it must outlast push-timeout. The deadline
@@ -250,12 +205,17 @@ func (h *Handler) auth(w http.ResponseWriter, r *http.Request, p params) {
 		h.internal(w, err)
 		return
 	}
-	state, err := h.svc.Authenticate(ctx, core.AuthRequest{
-		User: u, Device: dev, IPAddr: p.get("ipaddr"), TargetURL: pushInfo(p.get("pushinfo"), "target url"),
+	ref := userRef(p)
+	state, err := h.svc.Authenticate(r.Context(), core.AuthRequest{
+		User: ref, Device: p.get("device"), IPAddr: p.get("ipaddr"), TargetURL: pushInfo(p.get("pushinfo"), "target url"),
 		DisplayUsername: p.get("display_username"), Timeout: timeout,
 	})
+	if state == "" {
+		h.internal(w, err)
+		return
+	}
 	if err != nil {
-		h.log.Info("duo api: auth not approved", "user", u.Username, "state", state, "err", err)
+		h.log.Info("duo api: auth not approved", "user", ref, "state", state, "err", err)
 	}
 	switch state {
 	case store.StateAllow:
@@ -266,32 +226,16 @@ func (h *Handler) auth(w http.ResponseWriter, r *http.Request, p params) {
 		writeOK(w, map[string]any{"result": "deny", "status": "timeout", "status_msg": "Login timed out."})
 	default:
 		msg := "Login request denied."
-		if errors.Is(err, core.ErrUserDisabled) {
+		switch {
+		case errors.Is(err, core.ErrUnknownUser):
+			msg = "Unknown user"
+		case errors.Is(err, core.ErrUnknownDevice), errors.Is(err, core.ErrNotOwner):
+			msg = "Unknown device"
+		case errors.Is(err, core.ErrUserDisabled):
 			msg = "user disabled"
 		}
 		writeOK(w, deny(msg))
 	}
-}
-
-// pickDevice resolves the device param; "auto" (or empty) means the most recently used device.
-// A device that is not the user's verified device resolves to nil.
-func (h *Handler) pickDevice(ctx context.Context, u *store.User, id string) (*store.Device, error) {
-	devs, err := h.svc.Store.Devices(ctx, u.ID, true)
-	if err != nil {
-		return nil, err
-	}
-	if id == "" || id == "auto" {
-		if len(devs) == 0 {
-			return nil, nil
-		}
-		return &devs[0], nil
-	}
-	for i := range devs {
-		if devs[i].ID == id {
-			return &devs[i], nil
-		}
-	}
-	return nil, nil
 }
 
 // pushInfo reads key from Duo's url-encoded pushinfo parameter.

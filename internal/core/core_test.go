@@ -246,18 +246,20 @@ func TestAuthRefusals(t *testing.T) {
 		name   string
 		factor string
 		opts   []func(*url.Values)
+		msg    string
 	}{
-		{"another user's device", "push", []func(*url.Values){authapi.AuthUsername("bob"), authapi.AuthDevice(alice.DeviceID)}},
-		{"unknown user", "push", []func(*url.Values){authapi.AuthUsername("mallory"), authapi.AuthDevice("auto")}},
-		{"sms factor", "sms", []func(*url.Values){authapi.AuthUsername("alice"), authapi.AuthDevice(alice.DeviceID)}},
-		{"passcode factor", "passcode", []func(*url.Values){authapi.AuthUsername("alice"), authapi.AuthPasscode("123456")}},
+		{"another user's device", "push", []func(*url.Values){authapi.AuthUsername("bob"), authapi.AuthDevice(alice.DeviceID)}, "Unknown device"},
+		{"nonexistent device", "push", []func(*url.Values){authapi.AuthUsername("alice"), authapi.AuthDevice("nope")}, "Unknown device"},
+		{"unknown user", "push", []func(*url.Values){authapi.AuthUsername("mallory"), authapi.AuthDevice("auto")}, "Unknown user"},
+		{"sms factor", "sms", []func(*url.Values){authapi.AuthUsername("alice"), authapi.AuthDevice(alice.DeviceID)}, "Only push is supported"},
+		{"passcode factor", "passcode", []func(*url.Values){authapi.AuthUsername("alice"), authapi.AuthPasscode("123456")}, "Only push is supported"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			r, err := duo.Auth(c.factor, c.opts...)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if r.Stat != "OK" || r.Response.Result != "deny" {
+			if r.Stat != "OK" || r.Response.Result != "deny" || r.Response.Status_Msg != c.msg {
 				t.Fatalf("got %+v", r)
 			}
 		})
@@ -293,6 +295,66 @@ func TestDisableAndKillSwitch(t *testing.T) {
 	}
 	if r, _ := duo.Auth("push", authapi.AuthUsername("alice"), authapi.AuthDevice(dev.DeviceID), authapi.AuthIpAddr("198.51.100.1")); r.Response.Result != "deny" {
 		t.Fatalf("auth with push disabled: %+v", r.Response)
+	}
+}
+
+// Preauth: an unknown user, or one with no active device, enrolls (or is denied without
+// enroll-portal-url); a disabled user or the kill switch denies; otherwise the active devices are
+// listed most recently used first, and device=auto pushes to the first.
+func TestPreauth(t *testing.T) {
+	ctx := context.Background()
+	h := testutil.NewHarness(t, func(c *config.Config) { c.PushTimeout = config.Duration(5 * time.Second) })
+	preauth := func(ref core.UserRef) core.PreauthResult {
+		t.Helper()
+		res, err := h.Svc.Preauth(ctx, ref)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res
+	}
+	if res := preauth(core.UserRef{Username: "nobody"}); res.EnrollURL != testutil.PublicURL+"/enroll" || res.Deny != nil {
+		t.Fatalf("unknown user: %+v", res)
+	}
+
+	older := h.Enroll(t, "alice", testutil.NewAuthenticator(t, testutil.PublicURL))
+	newer := h.Enroll(t, "alice", testutil.NewAuthenticator(t, testutil.PublicURL))
+	// Device times have one-second resolution; using older afterwards makes it the most recent.
+	time.Sleep(1100 * time.Millisecond)
+	if err := h.Store.TouchDevice(ctx, older.DeviceID); err != nil {
+		t.Fatal(err)
+	}
+	u, _ := h.Store.UserByName(ctx, "alice")
+	for _, ref := range []core.UserRef{{Username: "alice"}, {ID: u.ID}} {
+		res := preauth(ref)
+		if len(res.Devices) != 2 || res.Devices[0].ID != older.DeviceID || res.Devices[1].ID != newer.DeviceID {
+			t.Fatalf("devices for %+v: %+v", ref, res)
+		}
+	}
+	pending := authCall(h, "alice", "auto")
+	if m := h.Ntfy.NextPublish(t); m.Topic != older.Topic {
+		t.Fatalf("device=auto pushed to %s, want %s", m.Topic, older.Topic)
+	}
+
+	if err := h.Svc.SetUserDisabled(ctx, "alice", true); err != nil {
+		t.Fatal(err)
+	}
+	if r := wait(t, pending); r.Response.Result != "deny" {
+		t.Fatalf("pending auth after disable: %+v", r.Response)
+	}
+	if res := preauth(core.UserRef{Username: "alice"}); !errors.Is(res.Deny, core.ErrUserDisabled) {
+		t.Fatalf("disabled user: %+v", res)
+	}
+
+	next := *h.Cfg
+	next.EnrollPortalURL = ""
+	h.Svc.Reload(&next)
+	if res := preauth(core.UserRef{Username: "nobody"}); !errors.Is(res.Deny, core.ErrEnrollmentRequired) {
+		t.Fatalf("unknown user without enroll-portal-url: %+v", res)
+	}
+	next.PushDisabled = true
+	h.Svc.Reload(&next)
+	if res := preauth(core.UserRef{Username: "nobody"}); !errors.Is(res.Deny, core.ErrPushDisabled) {
+		t.Fatalf("kill switch: %+v", res)
 	}
 }
 

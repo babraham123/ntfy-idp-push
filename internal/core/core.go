@@ -29,6 +29,10 @@ var (
 	ErrInvalidCode   = errors.New("invalid or expired enrollment code")
 	ErrPushDisabled  = errors.New("push disabled")
 	ErrDeviceRevoked = errors.New("device revoked or not active")
+
+	ErrUnknownUser        = errors.New("unknown user")
+	ErrUnknownDevice      = errors.New("unknown device")
+	ErrEnrollmentRequired = errors.New("enrollment required")
 )
 
 const (

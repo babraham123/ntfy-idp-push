@@ -10,13 +10,138 @@ import (
 	"time"
 
 	"github.com/babraham123/ntfy-idp-push/internal/challenge"
+	"github.com/babraham123/ntfy-idp-push/internal/config"
 	"github.com/babraham123/ntfy-idp-push/internal/ntfy"
 	"github.com/babraham123/ntfy-idp-push/internal/store"
 )
 
+// UserRef names a user by ID or, when ID is empty, by username, as the Duo API's user_id and
+// username parameters do.
+type UserRef struct{ ID, Username string }
+
+func (s *Service) resolveUser(ctx context.Context, ref UserRef) (*store.User, error) {
+	var u *store.User
+	var err error
+	if ref.ID != "" {
+		u, err = s.Store.UserByID(ctx, ref.ID)
+	} else {
+		u, err = s.Store.UserByName(ctx, ref.Username)
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, ErrUnknownUser
+	}
+	return u, err
+}
+
+// active reports whether d can receive logins: set up on the phone and not revoked.
+func active(d *store.Device) bool { return d.VerifiedAt != nil && d.RevokedAt == nil }
+
+// eligible is the one rule for whether device d of user u may receive or approve a push now. A nil
+// u or d skips the checks that need it, so preauth can ask before it has either. The store's
+// DecideChallenge repeats the user and device part in SQL to close the race with a concurrent
+// revoke or disable.
+func eligible(cfg *config.Config, u *store.User, d *store.Device) error {
+	switch {
+	case cfg.PushDisabled:
+		return ErrPushDisabled
+	case u == nil:
+		return nil
+	case u.DisabledAt != nil:
+		return ErrUserDisabled
+	case d == nil:
+		return nil
+	case d.UserID != u.ID:
+		return ErrNotOwner
+	case !active(d):
+		return ErrDeviceRevoked
+	}
+	return nil
+}
+
+// activeDevices lists u's active devices, most recently used first: store.Devices orders them so,
+// and device=auto takes the first.
+func (s *Service) activeDevices(ctx context.Context, u *store.User) ([]store.Device, error) {
+	devs, err := s.Store.Devices(ctx, u.ID, false)
+	if err != nil {
+		return nil, err
+	}
+	out := devs[:0]
+	for _, d := range devs {
+		if active(&d) {
+			out = append(out, d)
+		}
+	}
+	return out, nil
+}
+
+// loginDevice resolves the Duo device parameter among u's active devices; "auto" or empty is the
+// most recently used one.
+func (s *Service) loginDevice(ctx context.Context, u *store.User, selector string) (*store.Device, error) {
+	devs, err := s.activeDevices(ctx, u)
+	if err != nil {
+		return nil, err
+	}
+	if selector == "" || selector == "auto" {
+		if len(devs) == 0 {
+			return nil, ErrUnknownDevice
+		}
+		return &devs[0], nil
+	}
+	for i := range devs {
+		if devs[i].ID == selector {
+			return &devs[i], nil
+		}
+	}
+	if d, err := s.Store.Device(ctx, selector); err == nil && d.UserID != u.ID {
+		return nil, ErrNotOwner
+	}
+	return nil, ErrUnknownDevice
+}
+
+// PreauthResult is one of: Deny, why the user may not sign in with push; EnrollURL, where the user
+// enrolls a first device; or Devices, the active devices, most recently used first.
+type PreauthResult struct {
+	Deny      error
+	EnrollURL string
+	Devices   []store.Device
+}
+
+// Preauth reports whether ref can sign in with push, and on which devices. An unknown user is sent
+// to enroll, like a known one with no active device.
+func (s *Service) Preauth(ctx context.Context, ref UserRef) (PreauthResult, error) {
+	cfg := s.Config()
+	// Before the lookup, so the kill switch answers the same for every username.
+	if err := eligible(cfg, nil, nil); err != nil {
+		return PreauthResult{Deny: err}, nil
+	}
+	u, err := s.resolveUser(ctx, ref)
+	var devs []store.Device
+	switch {
+	case errors.Is(err, ErrUnknownUser):
+	case err != nil:
+		return PreauthResult{}, err
+	default:
+		if err := eligible(cfg, u, nil); err != nil {
+			return PreauthResult{Deny: err}, nil
+		}
+		if devs, err = s.activeDevices(ctx, u); err != nil {
+			return PreauthResult{}, err
+		}
+	}
+	switch {
+	case len(devs) > 0:
+		return PreauthResult{Devices: devs}, nil
+	case cfg.EnrollPortalURL == "":
+		return PreauthResult{Deny: ErrEnrollmentRequired}, nil
+	default:
+		return PreauthResult{EnrollURL: cfg.EnrollPortalURL}, nil
+	}
+}
+
 type AuthRequest struct {
-	User            *store.User
-	Device          *store.Device
+	User UserRef
+	// Device is a device ID, or "auto" or empty for the most recently used device.
+	Device          string
 	IPAddr          string
 	TargetURL       string
 	DisplayUsername string
@@ -26,26 +151,35 @@ type AuthRequest struct {
 }
 
 // Authenticate pushes a sign-in request to the device and blocks until it is approved, denied or
-// times out. Any failure resolves to a non-allow state.
+// times out. Any failure resolves to a non-allow state; the error says why: ErrUnknownUser,
+// ErrUnknownDevice or ErrNotOwner when the request names nothing the user may use, an eligibility
+// error, or a failure to push. The state is empty only when the user or device could not be looked
+// up (a store failure), before anything was pushed.
 func (s *Service) Authenticate(ctx context.Context, r AuthRequest) (store.ChallengeState, error) {
 	cfg := s.Config()
-	if cfg.PushDisabled {
-		return store.StateDeny, ErrPushDisabled
+	u, err := s.resolveUser(ctx, r.User)
+	if errors.Is(err, ErrUnknownUser) {
+		return store.StateDeny, err
+	} else if err != nil {
+		return "", err
 	}
-	if r.User.DisabledAt != nil {
-		return store.StateDeny, ErrUserDisabled
+	d, err := s.loginDevice(ctx, u, r.Device)
+	if errors.Is(err, ErrUnknownDevice) || errors.Is(err, ErrNotOwner) {
+		return store.StateDeny, err
+	} else if err != nil {
+		return "", err
 	}
-	if r.Device.UserID != r.User.ID || r.Device.VerifiedAt == nil {
-		return store.StateDeny, ErrNotOwner
+	if err := eligible(cfg, u, d); err != nil {
+		return store.StateDeny, err
 	}
 	if r.DisplayUsername == "" {
-		r.DisplayUsername = r.User.Username
+		r.DisplayUsername = u.Username
 	}
 	if r.Timeout == 0 {
 		r.Timeout = cfg.PushTimeout.D()
 	}
 	c, denyToken, err := s.Challenges.Create(ctx, challenge.Params{
-		Username: r.User.Username, DeviceID: r.Device.ID, IPAddr: r.IPAddr, TargetURL: r.TargetURL,
+		Username: u.Username, DeviceID: d.ID, IPAddr: r.IPAddr, TargetURL: r.TargetURL,
 		DisplayUsername: r.DisplayUsername, TTL: r.Timeout,
 	})
 	if err != nil {
@@ -53,7 +187,7 @@ func (s *Service) Authenticate(ctx context.Context, r AuthRequest) (store.Challe
 	}
 	approveURL := cfg.PublicURL + "/challenge/" + c.ID
 	if err := s.Ntfy.Publish(ctx, &ntfy.Message{
-		Topic:      r.Device.NtfyTopic,
+		Topic:      d.NtfyTopic,
 		SequenceID: c.ID,
 		Title:      "Sign-in request",
 		Message:    Describe(c),
@@ -68,42 +202,33 @@ func (s *Service) Authenticate(ctx context.Context, r AuthRequest) (store.Challe
 		_ = s.Challenges.Decide(context.WithoutCancel(ctx), c.ID, store.StateDeny)
 		return store.StateDeny, fmt.Errorf("publish: %w", err)
 	}
-	s.Store.Audit(ctx, r.User.Username, "push_sent", map[string]any{"challenge": c.ID, "device": r.Device.ID, "ipaddr": r.IPAddr})
+	s.Store.Audit(ctx, u.Username, "push_sent", map[string]any{"challenge": c.ID, "device": d.ID, "ipaddr": r.IPAddr})
 	bg := context.WithoutCancel(ctx)
 	state, err := s.Challenges.Wait(ctx, c)
 	if state == store.StateAllow {
 		// The user, device or kill switch may have changed while the push was on the phone.
-		if err = s.checkEligible(bg, r.Device.ID); err != nil {
+		if err = s.checkEligible(bg, d.ID); err != nil {
 			state = store.StateDeny
 		}
 	}
-	s.Store.Audit(bg, r.User.Username, "auth_"+string(state), map[string]any{"challenge": c.ID, "device": r.Device.ID})
+	s.Store.Audit(bg, u.Username, "auth_"+string(state), map[string]any{"challenge": c.ID, "device": d.ID})
 	return state, err
 }
 
 // checkEligible re-reads what can change while a push is pending and reports why a login on
 // deviceID may not be allowed now.
 func (s *Service) checkEligible(ctx context.Context, deviceID string) error {
-	if s.Config().PushDisabled {
-		return ErrPushDisabled
-	}
 	d, err := s.Store.Device(ctx, deviceID)
 	if errors.Is(err, store.ErrNotFound) {
 		return ErrDeviceRevoked
 	} else if err != nil {
 		return err
 	}
-	if d.RevokedAt != nil || d.VerifiedAt == nil {
-		return ErrDeviceRevoked
-	}
 	u, err := s.Store.UserByID(ctx, d.UserID)
 	if err != nil {
 		return err
 	}
-	if u.DisabledAt != nil {
-		return ErrUserDisabled
-	}
-	return nil
+	return eligible(s.Config(), u, d)
 }
 
 // allow decides a pending challenge as allowed if its login is still eligible.
