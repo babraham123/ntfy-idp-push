@@ -61,8 +61,6 @@ func NewHarness(t *testing.T, mutate func(*config.Config)) *Harness {
 		DuoMaxSkew:        config.Duration(300 * time.Second),
 		DuoKeyGrace:       config.Duration(time.Hour),
 		PushTimeout:       config.Duration(10 * time.Second),
-		TLSMode:           "file",
-		ACMEKeyType:       "p256",
 		AuthMode:          "forward",
 		TrustedProxies:    []string{"127.0.0.1/32", "::1/128"},
 		EnrollPortalURL:   PublicURL + "/enroll",

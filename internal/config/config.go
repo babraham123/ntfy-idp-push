@@ -50,13 +50,6 @@ type Config struct {
 	PushTimeout           Duration `yaml:"push-timeout"`
 	PushDisabled          bool     `yaml:"push-disabled"`
 
-	TLSMode     string `yaml:"tls-mode"`
-	ACMECA      string `yaml:"acme-ca"`
-	ACMEEABKID  string `yaml:"acme-eab-kid"`
-	ACMEEABHMAC string `yaml:"acme-eab-hmac"`
-	ACMEEmail   string `yaml:"acme-email"`
-	ACMEKeyType string `yaml:"acme-key-type"`
-	ACMEStorage string `yaml:"acme-storage"`
 	TLSCertFile string `yaml:"tls-cert-file"`
 	TLSKeyFile  string `yaml:"tls-key-file"`
 
@@ -94,10 +87,6 @@ func defaults() *Config {
 		DuoMaxSkew:      Duration(300 * time.Second),
 		PushTimeout:     Duration(60 * time.Second),
 		DuoKeyGrace:     Duration(time.Hour),
-		TLSMode:         "acme",
-		ACMECA:          "https://dv.acme-v02.api.pki.goog/directory",
-		ACMEKeyType:     "p256",
-		ACMEStorage:     "/var/lib/ntfy-idp-push/acme",
 		AuthMode:        "forward",
 		NtfyTopicPrefix: "push-",
 		EnrollRole:      "user",
@@ -208,26 +197,12 @@ func (c *Config) Validate() error {
 	}
 	c.NtfyBaseURL = strings.TrimRight(c.NtfyBaseURL, "/")
 
-	switch c.TLSMode {
-	case "acme":
-		if c.ListenHTTPS != "" {
-			req("acme-eab-kid", c.ACMEEABKID)
-			req("acme-eab-hmac", c.ACMEEABHMAC)
-			req("acme-email", c.ACMEEmail)
-		}
-	case "file":
-		if c.ListenHTTPS != "" {
-			req("tls-cert-file", c.TLSCertFile)
-			req("tls-key-file", c.TLSKeyFile)
-		}
-	default:
-		errs = append(errs, fmt.Errorf("tls-mode must be acme or file, got %q", c.TLSMode))
+	if c.ListenHTTPS != "" {
+		req("tls-cert-file", c.TLSCertFile)
+		req("tls-key-file", c.TLSKeyFile)
 	}
 	if c.ListenHTTPS == "" && c.ListenHTTP == "" {
 		errs = append(errs, errors.New("one of listen-https or listen-http is required"))
-	}
-	if c.ACMEKeyType != "p256" && c.ACMEKeyType != "p384" && c.ACMEKeyType != "rsa2048" {
-		errs = append(errs, fmt.Errorf("acme-key-type must be p256, p384 or rsa2048, got %q", c.ACMEKeyType))
 	}
 
 	switch c.AuthMode {
