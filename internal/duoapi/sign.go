@@ -1,14 +1,18 @@
 package duoapi
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/sha1"
 	"crypto/sha512"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"hash"
+	"mime"
 	"net/http"
 	"net/url"
 	"sort"
@@ -79,16 +83,6 @@ func SignatureHeader(ikey, skey, canon string) string {
 	return "Basic " + base64.StdEncoding.EncodeToString([]byte(ikey+":"+hmacHex(sha512.New, skey, canon)))
 }
 
-// signedRequest is the parsed, verified-for-shape part of an incoming signed request.
-type signedRequest struct {
-	date   string
-	ikey   string
-	sig    string
-	params url.Values
-	body   []byte
-	json   bool
-}
-
 func parseAuthorization(r *http.Request) (ikey, sig string, err error) {
 	h := r.Header.Get("Authorization")
 	if !strings.HasPrefix(h, "Basic ") {
@@ -114,41 +108,107 @@ func parseDate(s string) (time.Time, error) {
 	return time.Time{}, errSkew
 }
 
-// verify checks the signature against each accepted secret key. Only a body identifies the
-// signing variant: a JSON body is v5, a form body v2. A bodyless request (GET/DELETE) carries no
+// SignedRequest is the raw material of a signed Duo API call, before its body is interpreted.
+type SignedRequest struct {
+	Method string
+	Host   string // the configured Duo hostname, which the client signs
+	Path   string
+	Query  url.Values
+	Header http.Header // Content-Type identifies the body kind; x-duo-* headers enter v5
+	Body   []byte
+	Date   string
+	Sig    string // lower-case hex HMAC from the Authorization header
+}
+
+// Verify checks req's signature against each accepted secret key and returns the request's
+// parameters (for a JSON body, its fields overlaid with the query string).
+//
+// Only the body identifies the signing variant: a JSON body (Content-Type application/json) is
+// verified as v5 only, a form body as v2 only. A bodyless request (GET/DELETE) carries no
 // Content-Type in either client, so it may be v2 or v5 and both are tried. SHA-1 (older
 // duo_client_python configurations) exists only for v2.
-func verify(req *signedRequest, r *http.Request, host string, skeys []string) error {
-	v2 := CanonV2(req.date, r.Method, host, r.URL.Path, req.params)
-	v5 := CanonV5(req.date, r.Method, host, r.URL.Path, req.params, req.body, r.Header)
-	var canons []string
-	switch {
-	case req.json:
-		canons = []string{v5}
-	case len(req.body) == 0:
-		canons = []string{v2, v5}
-	default:
-		canons = []string{v2}
+func Verify(req SignedRequest, skeys []string) (url.Values, error) {
+	ct, _, _ := mime.ParseMediaType(req.Header.Get("Content-Type"))
+	jsonBody := ct == "application/json"
+	signed, values, err := req.params(jsonBody)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", errBadSignature, err)
 	}
-	newHash := sha512.New
-	switch len(req.sig) {
+	v2 := CanonV2(req.Date, req.Method, req.Host, req.Path, signed)
+	v5 := CanonV5(req.Date, req.Method, req.Host, req.Path, signed, req.Body, req.Header)
+	var newHash func() hash.Hash
+	var canons []string
+	switch len(req.Sig) {
 	case 2 * sha512.Size:
+		newHash = sha512.New
+		switch {
+		case jsonBody:
+			canons = []string{v5}
+		case len(req.Body) == 0:
+			canons = []string{v2, v5}
+		default:
+			canons = []string{v2}
+		}
 	case 2 * sha1.Size:
-		if req.json {
-			return errBadSignature
+		if jsonBody {
+			return nil, errBadSignature
 		}
 		newHash, canons = sha1.New, []string{v2}
 	default:
-		return errBadSignature
+		return nil, errBadSignature
 	}
 	for _, k := range skeys {
 		for _, canon := range canons {
-			if subtle.ConstantTimeCompare([]byte(hmacHex(newHash, k, canon)), []byte(req.sig)) == 1 {
-				return nil
+			if subtle.ConstantTimeCompare([]byte(hmacHex(newHash, k, canon)), []byte(req.Sig)) == 1 {
+				return values, nil
 			}
 		}
 	}
-	return errBadSignature
+	return nil, errBadSignature
+}
+
+// params returns the parameters the client signed and those the handler sees. JSON clients sign
+// only the query string: POST params travel in the body, which v5 covers by its hash.
+func (req SignedRequest) params(jsonBody bool) (signed, values url.Values, err error) {
+	switch {
+	case jsonBody:
+		if values, err = jsonValues(req.Body); err != nil {
+			return nil, nil, err
+		}
+		for k, v := range req.Query {
+			values[k] = v
+		}
+		return req.Query, values, nil
+	case req.Method == http.MethodGet:
+		return req.Query, req.Query, nil
+	default:
+		if signed, err = url.ParseQuery(string(req.Body)); err != nil {
+			return nil, nil, err
+		}
+		return signed, signed, nil
+	}
+}
+
+func jsonValues(body []byte) (url.Values, error) {
+	v := url.Values{}
+	if len(bytes.TrimSpace(body)) == 0 {
+		return v, nil
+	}
+	var m map[string]any
+	if err := json.Unmarshal(body, &m); err != nil {
+		return nil, err
+	}
+	for k, val := range m {
+		switch x := val.(type) {
+		case string:
+			v.Set(k, x)
+		case nil:
+		default:
+			b, _ := json.Marshal(x)
+			v.Set(k, string(b))
+		}
+	}
+	return v, nil
 }
 
 // replayCache remembers signatures for the skew window; a signature seen twice is refused.

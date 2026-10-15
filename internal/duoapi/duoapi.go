@@ -3,7 +3,6 @@
 package duoapi
 
 import (
-	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
@@ -11,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"mime"
 	"net/http"
 	"net/url"
 	"strings"
@@ -119,37 +117,15 @@ func (h *Handler) authenticate(r *http.Request, noReplay bool) (params, error) {
 	if subtle.ConstantTimeCompare([]byte(ikey), []byte(cfg.DuoIntegrationKey)) != 1 {
 		return nil, errBadIKey
 	}
-	req := &signedRequest{date: date, ikey: ikey, sig: sig, params: url.Values{}}
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBody))
 	if err != nil {
 		return nil, err
 	}
-	req.body = body
-	ct, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
-	var values url.Values
-	switch {
-	case ct == "application/json":
-		req.json = true
-		// JSON clients put GET params in the query string and POST params in the (hashed) body.
-		req.params = r.URL.Query()
-		values, err = jsonValues(body)
-		if err != nil {
-			return nil, fmt.Errorf("%w: %v", errBadSignature, err)
-		}
-		for k, v := range req.params {
-			values[k] = v
-		}
-	case r.Method == http.MethodGet:
-		req.params = r.URL.Query()
-		values = req.params
-	default:
-		req.params, err = url.ParseQuery(string(body))
-		if err != nil {
-			return nil, fmt.Errorf("%w: %v", errBadSignature, err)
-		}
-		values = req.params
-	}
-	if err := verify(req, r, cfg.DuoHostname, cfg.SecretKeys(now)); err != nil {
+	values, err := Verify(SignedRequest{
+		Method: r.Method, Host: cfg.DuoHostname, Path: r.URL.Path, Query: r.URL.Query(),
+		Header: r.Header, Body: body, Date: date, Sig: sig,
+	}, cfg.SecretKeys(now))
+	if err != nil {
 		return nil, err
 	}
 	if noReplay {
@@ -158,28 +134,6 @@ func (h *Handler) authenticate(r *http.Request, noReplay bool) (params, error) {
 		}
 	}
 	return params(values), nil
-}
-
-func jsonValues(body []byte) (url.Values, error) {
-	v := url.Values{}
-	if len(bytes.TrimSpace(body)) == 0 {
-		return v, nil
-	}
-	var m map[string]any
-	if err := json.Unmarshal(body, &m); err != nil {
-		return nil, err
-	}
-	for k, val := range m {
-		switch x := val.(type) {
-		case string:
-			v.Set(k, x)
-		case nil:
-		default:
-			b, _ := json.Marshal(x)
-			v.Set(k, string(b))
-		}
-	}
-	return v, nil
 }
 
 func (h *Handler) ping(w http.ResponseWriter, r *http.Request) {

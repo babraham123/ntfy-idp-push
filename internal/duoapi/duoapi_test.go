@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha1"
+	"crypto/sha512"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"hash"
 	"io"
 	"net/http"
 	"net/url"
@@ -202,6 +204,66 @@ func TestSHA1SignatureAccepted(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Fatalf("got %d", resp.StatusCode)
+	}
+}
+
+func TestVerifyBodyKind(t *testing.T) {
+	// ARCHITECTURE.md: a JSON body is verified as v5 only, a form body as v2 only, a bodyless
+	// request against both; SHA-1 is accepted only for v2.
+	const host, path, skey = "api-test.example", "/auth/v2/preauth", "verify-body-kind-secret-key-0123456789ab"
+	date := time.Now().UTC().Format(time.RFC1123Z)
+	alice := url.Values{"username": {"alice"}}
+	type kind struct {
+		method, contentType, body string
+		query, signed             url.Values
+	}
+	kinds := map[string]kind{
+		"json":     {method: "POST", contentType: "application/json", body: `{"username":"alice"}`},
+		"form":     {method: "POST", contentType: "application/x-www-form-urlencoded", body: alice.Encode(), signed: alice},
+		"bodyless": {method: "GET", query: alice, signed: alice},
+	}
+	hashes := map[string]func() hash.Hash{"sha512": sha512.New, "sha1": sha1.New}
+	cases := []struct {
+		kind, canon, hash string
+		ok                bool
+	}{
+		{"json", "v5", "sha512", true},
+		{"json", "v2", "sha512", false},
+		{"json", "v5", "sha1", false},
+		{"json", "v2", "sha1", false},
+		{"form", "v2", "sha512", true},
+		{"form", "v5", "sha512", false},
+		{"form", "v2", "sha1", true},
+		{"form", "v5", "sha1", false},
+		{"bodyless", "v2", "sha512", true},
+		{"bodyless", "v5", "sha512", true},
+		{"bodyless", "v2", "sha1", true},
+		{"bodyless", "v5", "sha1", false},
+	}
+	for _, c := range cases {
+		k := kinds[c.kind]
+		t.Run(c.kind+"/"+c.canon+"/"+c.hash, func(t *testing.T) {
+			header := http.Header{}
+			if k.contentType != "" {
+				header.Set("Content-Type", k.contentType)
+			}
+			canon := duoapi.CanonV2(date, k.method, host, path, k.signed)
+			if c.canon == "v5" {
+				canon = duoapi.CanonV5(date, k.method, host, path, k.signed, []byte(k.body), header)
+			}
+			m := hmac.New(hashes[c.hash], []byte(skey))
+			m.Write([]byte(canon))
+			got, err := duoapi.Verify(duoapi.SignedRequest{
+				Method: k.method, Host: host, Path: path, Query: k.query, Header: header,
+				Body: []byte(k.body), Date: date, Sig: hex.EncodeToString(m.Sum(nil)),
+			}, []string{skey})
+			if (err == nil) != c.ok {
+				t.Fatalf("err %v, want accepted=%v", err, c.ok)
+			}
+			if c.ok && got.Get("username") != "alice" {
+				t.Fatalf("params %v, want username=alice", got)
+			}
+		})
 	}
 }
 
