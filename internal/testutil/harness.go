@@ -74,6 +74,8 @@ func NewHarness(t *testing.T, mutate func(*config.Config)) *Harness {
 		EnrollRole:        "user",
 		EnrollAccess:      []string{"${user}-*:rw", "alerts:ro"},
 		Database:          ":memory:",
+		// The software authenticator attests "none"; the opt-in default has its own config test.
+		WebAuthnRequireAttestation: false,
 	}
 	if mutate != nil {
 		mutate(cfg)

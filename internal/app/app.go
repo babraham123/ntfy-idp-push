@@ -61,6 +61,7 @@ func (a *App) Server() *http.Server {
 		Addr:              a.Cfg.ListenHTTP,
 		Handler:           a.Handler,
 		ReadHeaderTimeout: 10 * time.Second,
+		MaxHeaderBytes:    16 << 10,
 		ReadTimeout:       30 * time.Second,
 		// /auth/v2/auth extends its own deadline past push-timeout.
 		WriteTimeout: 30 * time.Second,

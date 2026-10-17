@@ -230,6 +230,16 @@ func (f *FakeNtfy) Grant(user, topic string) string {
 }
 
 // NextPublish waits for the next published message.
+// NoPublish fails if anything is published within d.
+func (f *FakeNtfy) NoPublish(t *testing.T, d time.Duration) {
+	t.Helper()
+	select {
+	case m := <-f.pubCh:
+		t.Fatalf("unexpected publish to %s: %q", m.Topic, m.Title)
+	case <-time.After(d):
+	}
+}
+
 func (f *FakeNtfy) NextPublish(t *testing.T) ntfy.Message {
 	t.Helper()
 	select {

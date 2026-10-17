@@ -11,6 +11,14 @@ services:
     image: ghcr.io/babraham123/ntfy-idp-push:latest
     restart: unless-stopped
     networks: [proxy]
+    # The binary is static and writes only to the state volume, so the rest of the container can be
+    # locked down without losing anything.
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    user: nonroot
+    pids_limit: 64
+    mem_limit: 256m
     volumes:
       - ./config:/etc/ntfy-idp-push:ro
       - state:/var/lib/ntfy-idp-push
@@ -36,7 +44,7 @@ secrets:
 
 networks:
   proxy:
-    external: true   # the reverse proxy's network; its subnet goes in trusted-proxies
+    external: true   # the reverse proxy's network; the proxy's own address on it goes in trusted-proxies
 
 volumes:
   state:

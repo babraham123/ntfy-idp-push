@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/time/rate"
+
 	"github.com/babraham123/ntfy-idp-push/internal/core"
 	"github.com/babraham123/ntfy-idp-push/internal/model"
 	"github.com/babraham123/ntfy-idp-push/internal/routes"
@@ -22,14 +24,15 @@ import (
 const maxBody = 64 << 10
 
 type Handler struct {
-	svc    *core.Service
-	log    *slog.Logger
-	replay *replayCache
-	now    func() time.Time
+	svc       *core.Service
+	log       *slog.Logger
+	replay    *replayCache
+	rejectLog *rate.Limiter
+	now       func() time.Time
 }
 
 func New(svc *core.Service, log *slog.Logger) *Handler {
-	return &Handler{svc: svc, log: log, replay: newReplayCache(), now: time.Now}
+	return &Handler{svc: svc, log: log, replay: newReplayCache(), rejectLog: rate.NewLimiter(1, 20), now: time.Now}
 }
 
 // Register mounts the Duo API routes on mux.
@@ -73,7 +76,11 @@ func (h *Handler) signed(next func(http.ResponseWriter, *http.Request, params), 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p, err := h.authenticate(r, noReplay)
 		if err != nil {
-			h.log.Warn("duo api: rejected", "path", r.URL.Path, "remote", r.RemoteAddr, "err", err)
+			// Sampled: this route is reachable unauthenticated, and a flood of rejections must not
+			// become a flood of log lines. The reason stays here; the client gets only the code.
+			if h.rejectLog.Allow() {
+				h.log.Warn("duo api: rejected", "path", r.URL.Path, "remote", r.RemoteAddr, "err", err)
+			}
 			code := 40101
 			switch {
 			case errors.Is(err, errBadIKey):
@@ -83,7 +90,7 @@ func (h *Handler) signed(next func(http.ResponseWriter, *http.Request, params), 
 			case errors.Is(err, errSkew):
 				code = 40105
 			}
-			writeFail(w, http.StatusUnauthorized, code, "Invalid request credentials", err.Error())
+			writeFail(w, http.StatusUnauthorized, code, "Invalid request credentials", "")
 			return
 		}
 		next(w, r, p)
@@ -159,6 +166,8 @@ func deny(err error) map[string]any {
 		msg = "Unknown device"
 	case errors.Is(err, core.ErrEnrollmentRequired):
 		msg = "Enrollment required"
+	case errors.Is(err, core.ErrTooManyPushes):
+		msg = "Too many sign-in requests"
 	}
 	return map[string]any{"result": "deny", "status": "deny", "status_msg": msg}
 }

@@ -87,6 +87,12 @@ func TestValidateFailsClosed(t *testing.T) {
 	}
 }
 
+func TestAttestationRequiredByDefault(t *testing.T) {
+	if !defaults().WebAuthnRequireAttestation {
+		t.Fatal("webauthn-require-attestation should default to true")
+	}
+}
+
 func TestEnvOverrides(t *testing.T) {
 	c := valid()
 	env := map[string]string{

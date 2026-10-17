@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"golang.org/x/time/rate"
 	"log/slog"
 	"net/url"
 	"regexp"
@@ -55,6 +56,10 @@ type Service struct {
 	enrollMu sync.Mutex
 	// enrolling holds the passkey ceremonies begun in this process, by handle.
 	enrolling map[string]*pendingEnrollment
+
+	pushMu sync.Mutex
+	// pushes is each user's remaining push allowance.
+	pushes map[string]*rate.Limiter
 }
 
 func New(cfg *config.Config, st *store.Store, log *slog.Logger) (*Service, error) {
@@ -74,6 +79,7 @@ func New(cfg *config.Config, st *store.Store, log *slog.Logger) (*Service, error
 		Log:       log,
 		waiters:   map[string]chan struct{}{},
 		enrolling: map[string]*pendingEnrollment{},
+		pushes:    map[string]*rate.Limiter{},
 	}
 	s.cfg.Store(cfg)
 	s.ntfyc.Store(ntfy.New(cfg.NtfyBaseURL, cfg.NtfyAdminToken))

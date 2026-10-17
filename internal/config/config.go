@@ -91,7 +91,10 @@ func defaults() *Config {
 		DuoKeyGrace:     Duration(time.Hour),
 		NtfyTopicPrefix: "push-",
 		EnrollRole:      "user",
-		Database:        "/var/lib/ntfy-idp-push/db.sqlite",
+		// A passkey without an attestation statement could come from any software authenticator;
+		// opting out is a deliberate loosening.
+		WebAuthnRequireAttestation: true,
+		Database:                   "/var/lib/ntfy-idp-push/db.sqlite",
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"golang.org/x/time/rate"
 	"io"
 	"time"
 
@@ -167,6 +168,18 @@ func (s *Service) Authenticate(ctx context.Context, r AuthRequest) (model.Challe
 	if r.Timeout == 0 {
 		r.Timeout = cfg.PushTimeout.D()
 	}
+	bg := context.WithoutCancel(ctx)
+	// A push already on the phone is answered once for every login waiting on it: a retried
+	// login joins it instead of stacking a second request on the screen.
+	if c, err := s.pendingFor(ctx, d.ID); err != nil {
+		return model.StateDeny, err
+	} else if c != nil {
+		s.store.Audit(ctx, u.Username, "push_joined", map[string]any{"challenge": c.ID, "device": d.ID, "ipaddr": r.IPAddr})
+		return s.await(ctx, bg, u, d, c)
+	}
+	if !s.pushAllowed(u.Username) {
+		return model.StateDeny, ErrTooManyPushes
+	}
 	c, denyToken, err := s.createChallenge(ctx, d, r)
 	if err != nil {
 		return model.StateDeny, err
@@ -189,7 +202,11 @@ func (s *Service) Authenticate(ctx context.Context, r AuthRequest) (model.Challe
 		return model.StateDeny, fmt.Errorf("publish: %w", err)
 	}
 	s.store.Audit(ctx, u.Username, "push_sent", map[string]any{"challenge": c.ID, "device": d.ID, "ipaddr": r.IPAddr})
-	bg := context.WithoutCancel(ctx)
+	return s.await(ctx, bg, u, d, c)
+}
+
+// await blocks on c and turns its decision into the login's result.
+func (s *Service) await(ctx, bg context.Context, u *model.User, d *model.Device, c *model.Challenge) (model.ChallengeState, error) {
 	state, err := s.wait(ctx, c)
 	if state == model.StateAllow {
 		// The user, device or kill switch may have changed while the push was on the phone.
@@ -199,6 +216,53 @@ func (s *Service) Authenticate(ctx context.Context, r AuthRequest) (model.Challe
 	}
 	s.store.Audit(bg, u.Username, "auth_"+string(state), map[string]any{"challenge": c.ID, "device": d.ID})
 	return state, err
+}
+
+// pendingFor is the challenge still waiting on device deviceID, or nil.
+func (s *Service) pendingFor(ctx context.Context, deviceID string) (*model.Challenge, error) {
+	ids, err := s.store.PendingChallengeIDs(ctx, store.ChallengeFilter{DeviceID: deviceID})
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	for _, id := range ids {
+		c, err := s.store.Challenge(ctx, id)
+		if errors.Is(err, store.ErrNotFound) {
+			continue
+		} else if err != nil {
+			return nil, err
+		}
+		if c.Decidable(now) {
+			return c, nil
+		}
+	}
+	return nil, nil
+}
+
+// Pushes per user: a burst of pushBurst, then one every pushRefill. Repeated logins join the
+// pending push instead, so this only bites a caller that keeps asking after each one is decided.
+const (
+	pushBurst  = 3
+	pushRefill = 30 * time.Second
+)
+
+// pushAllowed takes one push from username's allowance.
+func (s *Service) pushAllowed(username string) bool {
+	s.pushMu.Lock()
+	defer s.pushMu.Unlock()
+	if len(s.pushes) > 1000 {
+		for k, l := range s.pushes {
+			if l.Tokens() >= pushBurst {
+				delete(s.pushes, k)
+			}
+		}
+	}
+	l := s.pushes[username]
+	if l == nil {
+		l = rate.NewLimiter(rate.Every(pushRefill), pushBurst)
+		s.pushes[username] = l
+	}
+	return l.Allow()
 }
 
 // checkEligible re-verifies push validity, reporting reasons for rejection.

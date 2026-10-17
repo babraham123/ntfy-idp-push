@@ -21,7 +21,7 @@ duo-key-grace: "1h"                     # previous key accepted this long after 
 # which the proxy sets after its forward-auth step. The header is believed only from trusted-proxies,
 # so keep that list to the proxy itself: anyone who can reach the port from a trusted address can
 # sign in as anyone.
-trusted-proxies: ["10.0.0.5/32"]
+trusted-proxies: ["10.0.0.5/32"]   # the proxy's address alone, not its subnet
 identity-header: "Remote-User"         # authentik: X-authentik-username; oauth2-proxy: X-Auth-Request-User
 enroll-portal-url: "https://push.example.com/enroll"   # empty: unenrolled users are denied
 
@@ -38,5 +38,7 @@ enroll-access:
 enroll-access-reconcile: false
 
 webauthn-allow-synced: false
-webauthn-require-attestation: false
+# Default true: a passkey without an attestation statement could come from any software
+# authenticator, and "device-bound" would be only a promise the client makes.
+webauthn-require-attestation: true
 database: "/var/lib/ntfy-idp-push/db.sqlite"

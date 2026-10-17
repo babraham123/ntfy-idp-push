@@ -3,14 +3,19 @@ package web
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"embed"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"html/template"
 	"io"
+	"io/fs"
 	"log/slog"
+	"mime"
 	"net"
 	"net/http"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -53,7 +58,7 @@ func New(svc *core.Service, log *slog.Logger) *Server {
 }
 
 func (s *Server) Register(mux *http.ServeMux) {
-	mux.Handle("GET "+routes.Static, http.FileServerFS(assets))
+	mux.HandleFunc("GET "+routes.Static+"{file}", s.static)
 	mux.HandleFunc("GET "+routes.Health, func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "ok\n") })
 
 	enroll, tok, ch := routes.Enroll, routes.Token, routes.Challenge
@@ -68,7 +73,7 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.Handle("POST "+tok+"/verify/{device}", s.limit(s.sameOrigin(s.verifyDevice)))
 	mux.Handle("POST "+tok+"/resend", s.limit(s.sameOrigin(s.enrollResend)))
 	mux.Handle("POST "+tok+"/password", s.limit(s.sameOrigin(s.enrollPassword)))
-	mux.HandleFunc("GET "+tok+"/qr", s.enrollQR)
+	mux.Handle("GET "+tok+"/qr", s.limit(s.enrollQR))
 
 	mux.Handle("GET "+ch+"/{id}", s.limit(s.approvePage))
 	mux.Handle("GET "+ch+"/{id}/options", s.limit(s.assertionOptions))
@@ -91,6 +96,10 @@ func SecurityHeaders(next http.Handler) http.Handler {
 		h := w.Header()
 		h.Set("Strict-Transport-Security", "max-age=31536000")
 		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		// Approve and enrollment links are secrets; a leaked one must not end up in an index.
+		h.Set("X-Robots-Tag", "noindex, nofollow")
+		h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()")
 		next.ServeHTTP(w, r)
 	})
 }
@@ -107,7 +116,7 @@ func (s *Server) render(w http.ResponseWriter, status int, name string, data any
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	// Pages carry ntfy sign-in codes and passwords, and per-user content.
 	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'")
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
 	// Not no-referrer: with it, browsers send "Origin: null" on form posts and sameOrigin refuses them.
 	w.Header().Set("Referrer-Policy", "same-origin")
 	w.WriteHeader(status)
@@ -185,13 +194,15 @@ func readJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 
 // ---- request identity
 
-// sameOrigin refuses cross-site state changes from browsers.
+// sameOrigin refuses cross-site state changes from browsers, and bounds the body every such
+// handler reads (ParseForm would otherwise accept 10 MiB).
 func (s *Server) sameOrigin(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if o := r.Header.Get("Origin"); o != s.svc.Config().PublicOrigin {
 			http.Error(w, "cross-origin request refused", http.StatusForbidden)
 			return
 		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxBody)
 		next(w, r)
 	}
 }
@@ -242,25 +253,45 @@ func (s *Server) clientIP(r *http.Request) string {
 	return ip.String()
 }
 
-// limit allows a burst of 20 requests and 1/s sustained per client IP on unauthenticated pages.
+// maxLimiters bounds the memory the limiter keeps: past it, idle clients are forgotten first, then
+// arbitrary ones.
+const maxLimiters = 10000
+
+// limiterKey is the client's IPv4 address or IPv6 /64: a v6 client gets a whole /64 to rotate
+// through for free, so one bucket covers it.
+func limiterKey(ip string) string {
+	p := net.ParseIP(ip)
+	if p == nil || p.To4() != nil {
+		return ip
+	}
+	return p.Mask(net.CIDRMask(64, 128)).String()
+}
+
+// limit allows a burst of 20 requests and 1/s sustained per client on unauthenticated pages.
 func (s *Server) limit(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		ip := s.clientIP(r)
+		key := limiterKey(s.clientIP(r))
 		now := time.Now()
 		s.mu.Lock()
-		e := s.limiters[ip]
+		e := s.limiters[key]
 		if e == nil {
-			e = &limiterEntry{l: rate.NewLimiter(1, 20)}
-			s.limiters[ip] = e
-		}
-		e.seen = now
-		if len(s.limiters) > 10000 {
-			for k, v := range s.limiters {
-				if now.Sub(v.seen) > 10*time.Minute {
+			if len(s.limiters) >= maxLimiters {
+				for k, v := range s.limiters {
+					if now.Sub(v.seen) > 10*time.Minute {
+						delete(s.limiters, k)
+					}
+				}
+				for k := range s.limiters {
+					if len(s.limiters) < maxLimiters {
+						break
+					}
 					delete(s.limiters, k)
 				}
 			}
+			e = &limiterEntry{l: rate.NewLimiter(1, 20)}
+			s.limiters[key] = e
 		}
+		e.seen = now
 		ok := e.l.AllowN(now, 1)
 		s.mu.Unlock()
 		if !ok {
@@ -269,6 +300,53 @@ func (s *Server) limit(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r)
 	}
+}
+
+// staticFile is one embedded asset under static/, served by name with a content-based ETag.
+type staticFile struct {
+	body        []byte
+	contentType string
+	etag        string
+}
+
+// staticFiles are the assets under static/, by file name. Only these names answer: there is no
+// directory listing and nothing outside the directory.
+var staticFiles = func() map[string]*staticFile {
+	files := map[string]*staticFile{}
+	entries, err := fs.ReadDir(assets, "static")
+	if err != nil {
+		panic(err)
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		b, err := fs.ReadFile(assets, "static/"+e.Name())
+		if err != nil {
+			panic(err)
+		}
+		sum := sha256.Sum256(b)
+		files[e.Name()] = &staticFile{
+			body:        b,
+			contentType: mime.TypeByExtension(path.Ext(e.Name())),
+			etag:        `"` + hex.EncodeToString(sum[:8]) + `"`,
+		}
+	}
+	return files
+}()
+
+// static serves one embedded asset. Assets are not versioned in their URL, so browsers cache
+// briefly and then revalidate against the ETag.
+func (s *Server) static(w http.ResponseWriter, r *http.Request) {
+	f := staticFiles[r.PathValue("file")]
+	if f == nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", f.contentType)
+	w.Header().Set("Cache-Control", "public, max-age=3600, must-revalidate")
+	w.Header().Set("ETag", f.etag)
+	http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(f.body))
 }
 
 func qrDataURL(content string) (template.URL, error) {

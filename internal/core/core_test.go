@@ -239,6 +239,56 @@ func TestDenyFraudTimeout(t *testing.T) {
 	})
 }
 
+func TestRetriedLoginJoinsPendingPush(t *testing.T) {
+	h := testutil.NewHarness(t, nil)
+	dev := h.Enroll(t, "alice", testutil.NewAuthenticator(t, testutil.PublicURL))
+
+	first := authCall(h, "alice", dev.DeviceID)
+	m := h.Ntfy.NextPublish(t)
+	second := authCall(h, "alice", dev.DeviceID)
+	// The second login waits on the same push: nothing new reaches the phone.
+	h.Ntfy.NoPublish(t, 500*time.Millisecond)
+	if st := approve(t, h, dev.Auth, m.Click); st != 200 {
+		t.Fatalf("approve: %d", st)
+	}
+	for _, res := range []<-chan *authapi.AuthResult{first, second} {
+		if r := wait(t, res); r.Response.Result != "allow" {
+			t.Fatalf("auth %+v", r.Response)
+		}
+	}
+}
+
+func TestPushesPerUserLimited(t *testing.T) {
+	h := testutil.NewHarness(t, nil)
+	dev := h.Enroll(t, "alice", testutil.NewAuthenticator(t, testutil.PublicURL))
+	bob := h.Enroll(t, "bob", testutil.NewAuthenticator(t, testutil.PublicURL))
+
+	// Each decided push frees the phone for the next, up to the burst.
+	for i := 0; i < 3; i++ {
+		res := authCall(h, "alice", dev.DeviceID)
+		m := h.Ntfy.NextPublish(t)
+		deny := pushAction(m, "Deny")
+		h.Do(t, testutil.Request{Method: "POST", Path: testutil.LocalPath(t, deny.URL), Body: []byte(deny.Body),
+			Header: map[string]string{"Origin": "", "Content-Type": "text/plain"}})
+		if r := wait(t, res); r.Response.Status != "deny" {
+			t.Fatalf("push %d: %+v", i, r.Response)
+		}
+	}
+	if r := wait(t, authCall(h, "alice", dev.DeviceID)); r.Response.Result != "deny" || r.Response.Status_Msg != "Too many sign-in requests" {
+		t.Fatalf("fourth push %+v", r.Response)
+	}
+	h.Ntfy.NoPublish(t, 200*time.Millisecond)
+	// The allowance is per user.
+	res := authCall(h, "bob", bob.DeviceID)
+	m := h.Ntfy.NextPublish(t)
+	if st := approve(t, h, bob.Auth, m.Click); st != 200 {
+		t.Fatalf("approve bob: %d", st)
+	}
+	if r := wait(t, res); r.Response.Result != "allow" {
+		t.Fatalf("bob %+v", r.Response)
+	}
+}
+
 func TestAuthRefusals(t *testing.T) {
 	h := testutil.NewHarness(t, nil)
 	alice := h.Enroll(t, "alice", testutil.NewAuthenticator(t, testutil.PublicURL))

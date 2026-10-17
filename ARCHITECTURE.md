@@ -84,6 +84,8 @@ Request validation order:
 
 `/auth/v2/auth` blocks up to `push-timeout`, extending its write deadline. Reloading `push-timeout` applies to subsequent requests.
 
+An `auth` for a device that already has a pending push joins that push instead of sending another: every login waiting on it gets its decision. Beyond that, each user gets a burst of 3 pushes refilled one per 30 s; further `auth` calls answer `deny` (`status_msg: Too many sign-in requests`) without touching the phone, so a stolen password cannot be turned into push bombing.
+
 Disabling a user or enabling the `push-disabled: true` kill switch causes preauth/auth to return `deny`. This affects in-flight logins: pending challenges are denied, and eligibility is re-verified upon approval and immediately before `auth` returns `allow`.
 
 ## Login
@@ -107,13 +109,15 @@ Disabling a user or enabling the `push-disabled: true` kill switch causes preaut
 4. `POST /challenge/<id>/deny` with the deny token yields `deny`; "This wasn't me" yields `fraud`.
 5. The blocked `auth` wakes and responds to the IdP. The push is then deleted from the device (ntfy `DELETE /<topic>/<sequence_id>`).
 
-Challenges are single-use; decisions or expiries return 410 for `/challenge/<id>`. State-changing browser POSTs require an `Origin` matching the shim. The ntfy app's `http` action omits `Origin`, so `/challenge/<id>/deny` relies on the deny token for authorization. Pages enforce `Referrer-Policy: same-origin`, not `no-referrer`: with `no-referrer`, browsers send `Origin: null` on form posts and the Activate and Revoke forms would be refused. HTML pages use `Cache-Control: no-store` to protect ntfy sign-in codes and passwords.
+Challenges are single-use; decisions or expiries return 410 for `/challenge/<id>`. State-changing browser POSTs require an `Origin` matching the shim and are bounded to 64 KiB. The ntfy app's `http` action omits `Origin`, so `/challenge/<id>/deny` relies on the deny token for authorization. Pages enforce `Referrer-Policy: same-origin`, not `no-referrer`: with `no-referrer`, browsers send `Origin: null` on form posts and the Activate and Revoke forms would be refused. HTML pages use `Cache-Control: no-store` to protect ntfy sign-in codes and passwords, and a CSP that allows only same-origin scripts, forms and bases. Every response carries `X-Frame-Options: DENY` and `X-Robots-Tag: noindex` so a leaked approve or enrollment link is never indexed. `/static/` serves only the embedded files by name (no listing), with an ETag and a one-hour cache.
+
+Unauthenticated routes (`/token/`, `/challenge/`) are rate limited per client address (IPv6 per /64), 20 burst and 1/s sustained, with the table of clients capped. Duo API rejections answer with Duo's error code only, the reason going to a sampled log line.
 
 ## Enrollment
 
 Entry points: `enroll-portal-url` (via preauth) to `/enroll` behind the proxy's forward-auth; or `enroll-link <user>`, generating a single-use `/token/<code>` link (valid 5 minutes) to bootstrap users lacking a second factor. Both render the same page; it posts to `/enroll/begin` and `/enroll/finish` (identity routes) or `/token/begin` and `/token/finish` (code routes). A ceremony begun on one family cannot be finished on the other.
 
-1. **Passkey**: `navigator.credentials.create()` requires a platform authenticator, user verification, and direct attestation. Synced passkeys (BE flag) are rejected unless `webauthn-allow-synced`.
+1. **Passkey**: `navigator.credentials.create()` requires a platform authenticator, user verification, and direct attestation. Synced passkeys (BE flag) are rejected unless `webauthn-allow-synced`; a passkey with no attestation statement (`fmt: none`) is rejected unless `webauthn-require-attestation: false`.
 2. **ntfy account**: Provisioned as described below.
 3. **Topic grant**: `PUT /v1/users/access` grants read-only access to the device's topic.
 4. **Link**: Generates an ntfy enrollment code (ntfy#597, `POST /v1/users/token/enroll`) formatted as `ntfy://<host>/<topic>?user=<u>&code=<c>` (tap link and QR). The UI also offers "Set an ntfy password" and "Resend setup push".
@@ -183,7 +187,7 @@ Optional upstream ntfy features utilized (degrades gracefully without):
 
 ## Testing
 
-Integration tests execute `duo_api_golang` (v2 form and v5 JSON signing) against the handler `app` assembles for `serve`, using a fake ntfy (v2.30 error contract) and a software WebAuthn authenticator; the test client connects from the configured trusted proxy address and sets the identity header as forward-auth would. They cover enrollment, push, passkey approval, deny, fraud, timeout, revocation recovery, provisioning, proxy identity (untrusted peers, forged headers on bypassed routes), config reload (token rotation, refused restart-only keys), the CLI, and config loading. Tests read state through core; the harness's store handle only fabricates what another process would have left. Forms simulate browser submissions, matching referrer policy Origins.
+Integration tests execute `duo_api_golang` (v2 form and v5 JSON signing) against the handler `app` assembles for `serve`, using a fake ntfy (v2.30 error contract) and a software WebAuthn authenticator; the test client connects from the configured trusted proxy address and sets the identity header as forward-auth would. They cover enrollment, push, joining a pending push, the per-user push cap, passkey approval, deny, fraud, timeout, revocation recovery, provisioning, proxy identity (untrusted peers, forged headers on bypassed routes), config reload (token rotation, refused restart-only keys), the CLI, and config loading. Tests read state through core; the harness's store handle only fabricates what another process would have left. Forms simulate browser submissions, matching referrer policy Origins.
 Live tests for `internal/ntfy` require a real ntfy server via `NTFY_IDP_PUSH_TEST_NTFY_URL`/`_TOKEN`.
 
 ## Other IdPs
