@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/babraham123/ntfy-idp-push/internal/config"
 	"github.com/babraham123/ntfy-idp-push/internal/store"
 )
 
@@ -52,7 +51,7 @@ func (s *Service) revoke(ctx context.Context, d *store.Device, resetNtfyUser, fo
 	if err := s.denyPending(ctx, store.ChallengeFilter{DeviceID: d.ID}); err != nil {
 		return err
 	}
-	if err := s.ntfy.ResetAccess(ctx, d.Username, d.NtfyTopic); err != nil {
+	if err := s.revokeDeviceGrant(ctx, d); err != nil {
 		return fmt.Errorf("device revoked but its ntfy grant was not removed; re-run to retry: %w", err)
 	}
 	if resetNtfyUser {
@@ -80,74 +79,22 @@ func (s *Service) requestReset(ctx context.Context, username string, force bool)
 		return err
 	}
 	if !force {
-		if err := s.checkResettable(ctx, u); err != nil {
+		if err := s.checkForeignGrants(ctx, u); err != nil {
 			return err
 		}
 	}
 	return s.Store.SetNtfyResetPending(ctx, username, true)
 }
 
-func (s *Service) checkResettable(ctx context.Context, u *store.User) error {
-	known, err := s.knownGrants(ctx, u)
-	if err != nil {
-		return err
-	}
-	nu, err := s.ntfy.User(ctx, u.Username)
-	if err != nil || nu == nil {
-		return err
-	}
-	for _, g := range nu.Grants {
-		if _, ok := known[g.Topic]; !ok {
-			return fmt.Errorf("%w (%s:%s)", ErrForeignGrants, g.Topic, g.Permission)
-		}
-	}
-	return nil
-}
-
-func (s *Service) knownGrants(ctx context.Context, u *store.User) (map[string]string, error) {
-	known := map[string]string{}
-	for _, g := range u.Grants {
-		known[g.Topic] = g.Permission
-	}
-	devs, err := s.Store.Devices(ctx, u.ID)
-	if err != nil {
-		return nil, err
-	}
-	for _, d := range devs {
-		known[d.NtfyTopic] = config.PermReadOnly
-	}
-	return known, nil
-}
-
 // finishReset carries out a requested reset and clears it.
 func (s *Service) finishReset(ctx context.Context, username string) error {
-	grants, err := s.enrollGrants(username)
-	if err != nil {
-		return err
-	}
 	u, err := s.Store.UserByName(ctx, username)
 	if err != nil {
 		return err
 	}
-	if err := s.ntfy.DeleteUser(ctx, username); err != nil {
-		return err
-	}
-	if err := s.applyNtfyAccount(ctx, u, grants); err != nil {
-		return err
-	}
-	devs, err := s.Store.Devices(ctx, u.ID)
+	granted, err := s.convergeNtfyAccount(ctx, u, true)
 	if err != nil {
 		return err
-	}
-	granted := 0
-	for _, d := range devs {
-		if d.RevokedAt != nil {
-			continue
-		}
-		if err := s.ntfy.AllowAccess(ctx, username, d.NtfyTopic, config.PermReadOnly); err != nil {
-			return err
-		}
-		granted++
 	}
 	if err := s.Store.SetNtfyResetPending(ctx, username, false); err != nil {
 		return err
@@ -193,7 +140,7 @@ func (s *Service) DeleteUser(ctx context.Context, username string, keepNtfy bool
 		}
 	}
 	if !keepNtfy {
-		if err := s.ntfy.DeleteUser(ctx, username); err != nil {
+		if err := s.deleteNtfyAccount(ctx, username); err != nil {
 			return err
 		}
 	}
@@ -239,7 +186,7 @@ func (s *Service) removeDevices(ctx context.Context, devs []store.Device) error 
 
 // removeDevice drops the device's topic grant, then its row.
 func (s *Service) removeDevice(ctx context.Context, d *store.Device) error {
-	if err := s.ntfy.ResetAccess(ctx, d.Username, d.NtfyTopic); err != nil {
+	if err := s.revokeDeviceGrant(ctx, d); err != nil {
 		return err
 	}
 	return s.Store.DeleteDevice(ctx, d.ID)

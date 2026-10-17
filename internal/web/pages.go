@@ -19,7 +19,7 @@ type topicLink struct {
 
 // provisionPage creates the ntfy account and hands out one-tap sign-in/subscribe links.
 func (s *Server) provisionPage(w http.ResponseWriter, r *http.Request) {
-	user, ok := s.identity.User(w, r)
+	user, ok := s.signedIn(w, r)
 	if !ok {
 		return
 	}
@@ -81,7 +81,7 @@ func (s *Server) provisionPage(w http.ResponseWriter, r *http.Request) {
 
 // provisionPassword is the manual sign-in path for ntfy apps that cannot redeem sign-in codes.
 func (s *Server) provisionPassword(w http.ResponseWriter, r *http.Request) {
-	user, ok := s.identity.User(w, r)
+	user, ok := s.signedIn(w, r)
 	if !ok {
 		return
 	}
@@ -95,7 +95,7 @@ func (s *Server) provisionPassword(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) devicesPage(w http.ResponseWriter, r *http.Request) {
-	user, ok := s.identity.User(w, r)
+	user, ok := s.signedIn(w, r)
 	if !ok {
 		return
 	}
@@ -115,7 +115,7 @@ func (s *Server) devicesPage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) revoke(w http.ResponseWriter, r *http.Request) {
-	user, ok := s.identity.User(w, r)
+	user, ok := s.signedIn(w, r)
 	if !ok {
 		return
 	}

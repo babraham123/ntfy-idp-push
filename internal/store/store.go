@@ -229,7 +229,7 @@ func (s *Store) Purge(ctx context.Context, now time.Time, unverifiedTTL, challen
 
 // ExpiredUnverifiedDevices lists unrevoked devices never verified within unverifiedTTL.
 func (s *Store) ExpiredUnverifiedDevices(ctx context.Context, now time.Time, unverifiedTTL time.Duration) ([]Device, error) {
-	return s.queryDevices(ctx, `WHERE d.verified_at IS NULL AND d.revoked_at IS NULL AND d.created_at < ?`, unix(now.Add(-unverifiedTTL)))
+	return s.queryDevices(ctx, `WHERE `+pendingDevice+` AND d.created_at < ?`, unix(now.Add(-unverifiedTTL)))
 }
 
 // RevokedDevices lists revoked devices awaiting ntfy cleanup.

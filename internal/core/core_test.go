@@ -1119,3 +1119,50 @@ func TestEnrollmentResultResendAndManualSignIn(t *testing.T) {
 		t.Fatalf("provision password: %d", resp.StatusCode)
 	}
 }
+
+// Enrollment is a core ceremony: the web adapter only carries the handle and attestation.
+func TestEnrollmentThroughCore(t *testing.T) {
+	ctx := context.Background()
+	h := testutil.NewHarness(t, nil)
+	a := testutil.NewAuthenticator(t, testutil.PublicURL)
+
+	handle, opts, err := h.Svc.BeginEnrollment(ctx, core.EnrollRequest{Username: "alice", DeviceName: "  Pixel 9 "})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Without a code, the session finishing the ceremony must belong to the user who began it.
+	if _, err := h.Svc.FinishEnrollment(ctx, handle, "mallory", strings.NewReader("")); !errors.Is(err, core.ErrIdentityChanged) {
+		t.Fatalf("finish as another user: %v", err)
+	}
+	// A handle is single-use: the refused attempt consumed it.
+	if _, err := h.Svc.FinishEnrollment(ctx, handle, "alice", strings.NewReader("")); !errors.Is(err, core.ErrEnrollmentExpired) {
+		t.Fatalf("reused handle: %v", err)
+	}
+
+	handle, opts, err = h.Svc.BeginEnrollment(ctx, core.EnrollRequest{Username: "alice", DeviceName: "  Pixel 9 "})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := h.Svc.FinishEnrollment(ctx, handle, "alice", strings.NewReader(string(a.Create(t, opts))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Device.Name != "Pixel 9" || res.ResultToken == "" || h.Ntfy.Grant("alice", res.Device.NtfyTopic) != config.PermReadOnly {
+		t.Fatalf("enrollment %+v", res)
+	}
+	h.VerifyFromPush(t, h.Ntfy.NextPublish(t))
+	pre, _ := h.Duo(testutil.IKey, testutil.SKey).Preauth(authapi.PreauthUsername("alice"))
+	if pre.Response.Result != "auth" || pre.Response.Devices[0].Device != res.Device.ID {
+		t.Fatalf("preauth: %+v", pre.Response)
+	}
+
+	// An unnamed device gets a default name.
+	handle, opts, err = h.Svc.BeginEnrollment(ctx, core.EnrollRequest{Username: "alice"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err = h.Svc.FinishEnrollment(ctx, handle, "alice", strings.NewReader(string(testutil.NewAuthenticator(t, testutil.PublicURL).Create(t, opts))))
+	if err != nil || res.Device.Name != "Phone" {
+		t.Fatalf("default name: %+v %v", res, err)
+	}
+}

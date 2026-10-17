@@ -12,7 +12,6 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/babraham123/ntfy-idp-push/internal/config"
 	"github.com/babraham123/ntfy-idp-push/internal/ntfy"
 	"github.com/babraham123/ntfy-idp-push/internal/store"
 	"github.com/babraham123/ntfy-idp-push/internal/token"
@@ -38,27 +37,99 @@ func (s *Service) EnrollURL(code string) string {
 }
 
 // ResolveEnrollCode returns the username an unused, unexpired code was issued for.
-func (s *Service) ResolveEnrollCode(ctx context.Context, code string) (*store.EnrollCode, error) {
+func (s *Service) ResolveEnrollCode(ctx context.Context, code string) (string, error) {
 	ec, err := s.Store.EnrollCode(ctx, token.Hash(code))
 	if errors.Is(err, store.ErrNotFound) || (err == nil && (ec.UsedAt != nil || !time.Now().Before(ec.ExpiresAt))) {
-		return nil, ErrInvalidCode
+		return "", ErrInvalidCode
+	} else if err != nil {
+		return "", err
 	}
-	return ec, err
+	return ec.Username, nil
 }
 
-// BeginEnrollment starts passkey registration for a new device of username.
-func (s *Service) BeginEnrollment(ctx context.Context, username, deviceName string) (json.RawMessage, webauthn.Session, error) {
-	if err := ValidUsername(username); err != nil {
-		return nil, webauthn.Session{}, err
+// EnrollRequest says who is enrolling a device. A shim-issued Code identifies the user by itself;
+// otherwise Username is the signed-in user.
+type EnrollRequest struct {
+	Code, Username, DeviceName string
+}
+
+// pendingEnrollment is a passkey ceremony between BeginEnrollment and FinishEnrollment.
+type pendingEnrollment struct {
+	username, name, code string
+	session              webauthn.Session
+	expires              time.Time
+}
+
+// enrollCeremonyTTL bounds how long the browser has between BeginEnrollment and FinishEnrollment,
+// matching the registration timeout the passkey options carry.
+const enrollCeremonyTTL = 5 * time.Minute
+
+var (
+	ErrEnrollmentExpired = errors.New("registration expired; start again")
+	ErrIdentityChanged   = errors.New("identity changed during enrollment")
+)
+
+// deviceName normalizes what the user typed into the device's display name.
+func deviceName(name string) string {
+	name = strings.TrimSpace(name)
+	if len(name) > 64 {
+		name = name[:64]
 	}
+	if name == "" {
+		name = "Phone"
+	}
+	return name
+}
+
+// BeginEnrollment starts passkey registration for a new device and returns the handle the browser
+// finishes it with, plus the navigator.credentials.create() options. The ceremony is held in this
+// process for enrollCeremonyTTL.
+func (s *Service) BeginEnrollment(ctx context.Context, r EnrollRequest) (handle string, options json.RawMessage, err error) {
+	username := r.Username
+	if r.Code != "" {
+		if username, err = s.ResolveEnrollCode(ctx, r.Code); err != nil {
+			return "", nil, err
+		}
+	}
+	if err := ValidUsername(username); err != nil {
+		return "", nil, err
+	}
+	name := deviceName(r.DeviceName)
 	u, err := s.Store.EnsureUser(ctx, username, uuid.NewString())
 	if err != nil {
-		return nil, webauthn.Session{}, err
+		return "", nil, err
 	}
 	if u.DisabledAt != nil {
-		return nil, webauthn.Session{}, ErrUserDisabled
+		return "", nil, ErrUserDisabled
 	}
-	return s.rp.BeginRegistration(u, deviceName)
+	options, session, err := s.rp.BeginRegistration(u, name)
+	if err != nil {
+		return "", nil, err
+	}
+	handle = token.Random(24)
+	now := time.Now()
+	s.enrollMu.Lock()
+	for k, p := range s.enrolling {
+		if now.After(p.expires) {
+			delete(s.enrolling, k)
+		}
+	}
+	s.enrolling[handle] = &pendingEnrollment{username: username, name: name, code: r.Code, session: session, expires: now.Add(enrollCeremonyTTL)}
+	s.enrollMu.Unlock()
+	return handle, options, nil
+}
+
+// takeEnrollment removes and returns the ceremony under handle, or nil when there is none or it
+// has expired.
+func (s *Service) takeEnrollment(handle string) *pendingEnrollment {
+	s.enrollMu.Lock()
+	p := s.enrolling[handle]
+	delete(s.enrolling, handle)
+	s.enrollMu.Unlock()
+	if p == nil || time.Now().After(p.expires) {
+		return nil
+	}
+	return p
 }
 
 type Enrollment struct {
@@ -74,31 +145,36 @@ type Enrollment struct {
 // EnrollResultTTL sets how long the enrollment result page works before requiring re-enrollment.
 const EnrollResultTTL = time.Hour
 
-// CompleteEnrollment verifies passkey, provisions the device/grant, and sends a test push. Failures
-// rollback everything, releasing any enrollCode.
-func (s *Service) CompleteEnrollment(ctx context.Context, username, deviceName string, session webauthn.Session, attestation io.Reader, enrollCode string) (*Enrollment, error) {
+// FinishEnrollment completes the ceremony begun under handle: it verifies the passkey, provisions
+// the device and its grant, and sends the setup push. signedIn is the current session's user; when
+// no code identifies the enrolling user, it must be the one who began. Failures roll everything
+// back and release the code for another try.
+func (s *Service) FinishEnrollment(ctx context.Context, handle, signedIn string, attestation io.Reader) (*Enrollment, error) {
+	p := s.takeEnrollment(handle)
+	if p == nil {
+		return nil, ErrEnrollmentExpired
+	}
+	if p.code == "" && signedIn != p.username {
+		return nil, ErrIdentityChanged
+	}
 	cfg := s.Config()
-	u, err := s.Store.UserByName(ctx, username)
+	u, err := s.Store.UserByName(ctx, p.username)
 	if err != nil {
 		return nil, err
 	}
 	if u.DisabledAt != nil {
 		return nil, ErrUserDisabled
 	}
-	pk, attestationFormat, err := s.rp.FinishRegistration(u, session, attestation)
+	pk, attestationFormat, err := s.rp.FinishRegistration(u, p.session, attestation)
 	if err != nil {
 		return nil, err
 	}
-	deviceName = strings.TrimSpace(deviceName)
-	if deviceName == "" {
-		deviceName = "Phone"
-	}
-	dev := &store.Device{ID: uuid.NewString(), UserID: u.ID, Username: username, Name: deviceName}
+	dev := &store.Device{ID: uuid.NewString(), UserID: u.ID, Username: p.username, Name: p.name}
 	dev.NtfyTopic = cfg.NtfyTopicPrefix + dev.ID
 	pk.DeviceID = dev.ID
 	var codeHash []byte
-	if enrollCode != "" {
-		codeHash = token.Hash(enrollCode)
+	if p.code != "" {
+		codeHash = token.Hash(p.code)
 	}
 	verifyToken, resultToken := token.Random(24), token.Random(24)
 	err = s.Store.CreateEnrollment(ctx, dev, token.Hash(verifyToken), token.Hash(resultToken), &pk, codeHash)
@@ -112,7 +188,7 @@ func (s *Service) CompleteEnrollment(ctx context.Context, username, deviceName s
 		s.undoEnrollment(context.WithoutCancel(ctx), dev, codeHash)
 		return nil, err
 	}
-	s.Store.Audit(ctx, username, "device_enrolled", map[string]any{"device": dev.ID, "name": deviceName,
+	s.Store.Audit(ctx, p.username, "device_enrolled", map[string]any{"device": dev.ID, "name": p.name,
 		"aaguid": uuidString(pk.AAGUID), "attestation": attestationFormat})
 	res.ResultToken = resultToken
 	return res, nil
@@ -132,7 +208,7 @@ func (s *Service) connectDevice(ctx context.Context, dev *store.Device, verifyTo
 	if _, err := s.Provision(ctx, dev.Username); err != nil {
 		return nil, err
 	}
-	if err := s.ntfy.AllowAccess(ctx, dev.Username, dev.NtfyTopic, config.PermReadOnly); err != nil {
+	if err := s.grantDevice(ctx, dev); err != nil {
 		return nil, err
 	}
 	code, err := s.MintNtfyCode(ctx, dev.Username)

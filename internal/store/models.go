@@ -179,6 +179,14 @@ func (s *Store) DeleteUser(ctx context.Context, userID string) error {
 
 const deviceCols = `d.id, d.user_id, u.username, d.name, d.ntfy_topic, d.verified_at, d.created_at, d.last_used_at, d.revoked_at`
 
+// Device states, over a devices row aliased d.
+const (
+	// activeDevice can receive and approve logins: set up on the phone and not revoked.
+	activeDevice = `d.verified_at IS NOT NULL AND d.revoked_at IS NULL`
+	// pendingDevice is still awaiting setup on the phone.
+	pendingDevice = `d.verified_at IS NULL AND d.revoked_at IS NULL`
+)
+
 func (s *Store) queryDevices(ctx context.Context, where string, args ...any) ([]Device, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT `+deviceCols+` FROM devices d JOIN users u ON u.id = d.user_id `+where, args...)
 	if err != nil {
@@ -263,8 +271,8 @@ func (s *Store) DeviceByResultToken(ctx context.Context, tokenHash []byte, now t
 
 // SetVerifyToken replaces the verify token of a device still awaiting setup. It reports whether it did.
 func (s *Store) SetVerifyToken(ctx context.Context, id string, tokenHash []byte) (bool, error) {
-	res, err := s.db.ExecContext(ctx, `UPDATE devices SET verify_token_hash = ?
-		WHERE id = ? AND verified_at IS NULL AND revoked_at IS NULL`, tokenHash, id)
+	res, err := s.db.ExecContext(ctx, `UPDATE devices AS d SET verify_token_hash = ?
+		WHERE d.id = ? AND `+pendingDevice, tokenHash, id)
 	if err != nil {
 		return false, err
 	}
@@ -274,8 +282,8 @@ func (s *Store) SetVerifyToken(ctx context.Context, id string, tokenHash []byte)
 
 // VerifyDevice marks the device active if tokenHash matches. It reports whether it did.
 func (s *Store) VerifyDevice(ctx context.Context, id string, tokenHash []byte) (bool, error) {
-	res, err := s.db.ExecContext(ctx, `UPDATE devices SET verified_at = ?, verify_token_hash = NULL
-		WHERE id = ? AND verified_at IS NULL AND revoked_at IS NULL AND verify_token_hash = ?`, unix(time.Now()), id, tokenHash)
+	res, err := s.db.ExecContext(ctx, `UPDATE devices AS d SET verified_at = ?, verify_token_hash = NULL
+		WHERE d.id = ? AND `+pendingDevice+` AND d.verify_token_hash = ?`, unix(time.Now()), id, tokenHash)
 	if err != nil {
 		return false, err
 	}
@@ -363,8 +371,16 @@ func (s *Store) Challenge(ctx context.Context, id string) (*Challenge, error) {
 	return &c, nil
 }
 
-// DecideChallenge atomically applies a single state transition to pending challenges. Allow
-// mandates the device is active and user enabled, closing race windows with revokes/disables.
+// Reasons the store refuses to decide a challenge as allowed.
+var (
+	ErrDeviceInactive = errors.New("device revoked or not active")
+	ErrUserDisabled   = errors.New("user disabled")
+)
+
+// DecideChallenge moves a pending challenge to state, once, and reports whether it did. An allow
+// additionally requires, in the same statement, that the device is active and the user enabled,
+// closing the race with revokes and disables; a refused allow returns ErrDeviceInactive or
+// ErrUserDisabled, or false alone when the challenge is simply no longer pending.
 func (s *Store) DecideChallenge(ctx context.Context, id string, state ChallengeState, now time.Time) (bool, error) {
 	cond := ` AND expires_at > ?`
 	args := []any{string(state), unix(now), id, unix(now)}
@@ -373,14 +389,42 @@ func (s *Store) DecideChallenge(ctx context.Context, id string, state ChallengeS
 		cond, args = ``, args[:3]
 	case StateAllow:
 		cond += ` AND EXISTS (SELECT 1 FROM devices d JOIN users u ON u.id = d.user_id WHERE d.id = challenges.device_id
-			AND d.verified_at IS NOT NULL AND d.revoked_at IS NULL AND u.disabled_at IS NULL)`
+			AND ` + activeDevice + ` AND u.disabled_at IS NULL)`
 	}
 	res, err := s.db.ExecContext(ctx, `UPDATE challenges SET state = ?, decided_at = ? WHERE id = ? AND state = 'pending'`+cond, args...)
 	if err != nil {
 		return false, err
 	}
-	n, _ := res.RowsAffected()
-	return n == 1, nil
+	if n, _ := res.RowsAffected(); n == 1 {
+		return true, nil
+	}
+	if state != StateAllow {
+		return false, nil
+	}
+	return false, s.allowRefusal(ctx, id, now)
+}
+
+// allowRefusal says why an allow did not apply: nil when the challenge is no longer pending,
+// otherwise which eligibility condition failed. The device is checked first, as a deleted device
+// also leaves no user to judge.
+func (s *Store) allowRefusal(ctx context.Context, id string, now time.Time) error {
+	var pending bool
+	var active, enabled sql.NullBool
+	err := s.db.QueryRowContext(ctx, `SELECT c.state = 'pending' AND c.expires_at > ?, `+activeDevice+`, u.disabled_at IS NULL
+		FROM challenges c LEFT JOIN devices d ON d.id = c.device_id LEFT JOIN users u ON u.id = d.user_id
+		WHERE c.id = ?`, unix(now), id).Scan(&pending, &active, &enabled)
+	switch {
+	case errors.Is(err, sql.ErrNoRows), err == nil && !pending:
+		return nil
+	case err != nil:
+		return err
+	case !active.Valid || !active.Bool:
+		return ErrDeviceInactive
+	case !enabled.Valid || !enabled.Bool:
+		return ErrUserDisabled
+	}
+	// Eligible at this read: the allow lost a race that has since resolved; treat as gone.
+	return nil
 }
 
 // ChallengeFilter selects pending challenges by device, username, or expiry (zero value selects

@@ -11,6 +11,7 @@ import (
 	"github.com/babraham123/ntfy-idp-push/internal/config"
 	"github.com/babraham123/ntfy-idp-push/internal/ntfy"
 	"github.com/babraham123/ntfy-idp-push/internal/store"
+	"github.com/babraham123/ntfy-idp-push/internal/webauthn"
 )
 
 // UserRef names a user by ID (or username if ID is empty), mirroring Duo API's parameters.
@@ -34,7 +35,8 @@ func (s *Service) resolveUser(ctx context.Context, ref UserRef) (*store.User, er
 func active(d *store.Device) bool { return d.VerifiedAt != nil && d.RevokedAt == nil }
 
 // eligible determines if a device can receive/approve a push. Nil u/d skips checks for preauth.
-// DecideChallenge repeats this logic in SQL to prevent race conditions with revokes/disables.
+// It serves preauth, the pre-flight before a push, and the re-check after approval; the decision
+// itself is guarded by the store in the deciding statement (see decide).
 func eligible(cfg *config.Config, u *store.User, d *store.Device) error {
 	switch {
 	case cfg.PushDisabled:
@@ -219,14 +221,21 @@ func (s *Service) checkEligible(ctx context.Context, deviceID string) error {
 	return eligible(s.Config(), u, d)
 }
 
-// allow decides a pending challenge as allowed if its login is still eligible.
+// allow decides a pending challenge as allowed if its login is still eligible. The kill switch is
+// checked here; the device and user conditions are checked by the store as it decides.
 func (s *Service) allow(ctx context.Context, c *store.Challenge) error {
-	if err := s.checkEligible(ctx, c.DeviceID); err != nil {
-		return err
+	if s.Config().PushDisabled {
+		return ErrPushDisabled
 	}
-	// The store safely re-checks device/user in a single statement to prevent races with
-	// revokes/disables.
 	return s.decide(ctx, c.ID, store.StateAllow)
+}
+
+// passkeyPolicy wraps webauthn's policy refusals so callers need not know the webauthn package.
+func passkeyPolicy(err error) error {
+	if errors.Is(err, webauthn.ErrSynced) || errors.Is(err, webauthn.ErrNoUsableCredential) {
+		return fmt.Errorf("%w: %w", ErrPasskeyPolicy, err)
+	}
+	return err
 }
 
 // devicePasskeys returns the target device and its passkeys, which are the only ones allowed to
@@ -251,7 +260,8 @@ func (s *Service) AssertionOptions(ctx context.Context, id string) (json.RawMess
 	if err != nil {
 		return nil, err
 	}
-	return s.rp.BeginLogin(d.UserID, pks, c.Nonce)
+	opts, err := s.rp.BeginLogin(d.UserID, pks, c.Nonce)
+	return opts, passkeyPolicy(err)
 }
 
 // Approve allows the challenge if assertion is a valid signature over its nonce by its device.
@@ -267,7 +277,7 @@ func (s *Service) Approve(ctx context.Context, id string, assertion io.Reader) e
 	pk, regressed, err := s.rp.FinishLogin(d.UserID, pks, c.Nonce, assertion)
 	if err != nil {
 		s.Store.Audit(ctx, c.Username, "assertion_failed", map[string]any{"challenge": id, "err": err.Error()})
-		return err
+		return passkeyPolicy(err)
 	}
 	if err := s.allow(ctx, c); err != nil {
 		return err

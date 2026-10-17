@@ -3,15 +3,18 @@ package web
 
 import (
 	"bytes"
+	"context"
 	"embed"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"html/template"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -20,9 +23,8 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/babraham123/ntfy-idp-push/internal/core"
+	"github.com/babraham123/ntfy-idp-push/internal/oidc"
 	"github.com/babraham123/ntfy-idp-push/internal/store"
-	"github.com/babraham123/ntfy-idp-push/internal/token"
-	"github.com/babraham123/ntfy-idp-push/internal/webauthn"
 )
 
 //go:embed templates/*.html static/*
@@ -35,20 +37,14 @@ var tmpl = template.Must(template.New("").Funcs(template.FuncMap{
 const maxBody = 64 << 10
 
 type Server struct {
-	svc      *core.Service
-	identity Identity
-	log      *slog.Logger
+	svc *core.Service
+	// auth signs users into the self-service pages through the IdP's OIDC provider; there is no
+	// other identity.
+	auth *oidc.Auth
+	log  *slog.Logger
 
 	mu       sync.Mutex
-	regs     map[string]*registration
 	limiters map[string]*limiterEntry
-}
-
-// registration is a passkey ceremony in progress between /enroll/begin and /enroll/finish.
-type registration struct {
-	username, name, code string
-	session              webauthn.Session
-	expires              time.Time
 }
 
 type limiterEntry struct {
@@ -56,11 +52,18 @@ type limiterEntry struct {
 	seen time.Time
 }
 
-func New(svc *core.Service, identity Identity, log *slog.Logger) *Server {
-	return &Server{svc: svc, identity: identity, log: log, regs: map[string]*registration{}, limiters: map[string]*limiterEntry{}}
+func New(ctx context.Context, svc *core.Service, log *slog.Logger) (*Server, error) {
+	cfg := svc.Config()
+	a, err := oidc.New(ctx, cfg.OIDCIssuer, cfg.OIDCClientID, cfg.OIDCClientSecret, cfg.PublicURL, svc.Store)
+	if err != nil {
+		return nil, fmt.Errorf("oidc: %w", err)
+	}
+	return &Server{svc: svc, auth: a, log: log, limiters: map[string]*limiterEntry{}}, nil
 }
 
 func (s *Server) Register(mux *http.ServeMux) {
+	mux.HandleFunc("GET "+oidc.LoginPath, s.auth.Login)
+	mux.HandleFunc("GET "+oidc.CallbackPath, s.auth.Callback)
 	mux.Handle("GET /static/", http.FileServerFS(assets))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "ok\n") })
 
@@ -143,6 +146,37 @@ func (s *Server) sameOrigin(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// signedIn returns the session's user, or "" and false after sending the browser to sign in (a
+// redirect for page loads, 401 for everything else).
+func (s *Server) signedIn(w http.ResponseWriter, r *http.Request) (string, bool) {
+	if u := s.auth.User(r); u != "" {
+		return u, true
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "sign in required", http.StatusUnauthorized)
+		return "", false
+	}
+	http.Redirect(w, r, oidc.LoginPath+"?next="+url.QueryEscape(r.URL.RequestURI()), http.StatusFound)
+	return "", false
+}
+
+func remoteIP(r *http.Request) net.IP {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	return net.ParseIP(host)
+}
+
+func trusted(nets []*net.IPNet, ip net.IP) bool {
+	for _, n := range nets {
+		if ip != nil && n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
 // clientIP is the peer address, or X-Forwarded-For's last hop when the peer is a trusted proxy.
 func (s *Server) clientIP(r *http.Request) string {
 	ip := remoteIP(r)
@@ -196,17 +230,17 @@ func qrDataURL(content string) (template.URL, error) {
 
 // ---- enrollment
 
-// enrollUser resolves the enrolling user from an enrollment code or from the identity provider.
+// enrollUser resolves the enrolling user from an enrollment code or from the signed-in session.
 func (s *Server) enrollUser(w http.ResponseWriter, r *http.Request, code string) (string, bool) {
 	if code != "" {
-		ec, err := s.svc.ResolveEnrollCode(r.Context(), code)
+		user, err := s.svc.ResolveEnrollCode(r.Context(), code)
 		if err != nil {
 			s.message(w, http.StatusGone, "Link expired", "This enrollment link is invalid or has expired. Ask for a new one.")
 			return "", false
 		}
-		return ec.Username, true
+		return user, true
 	}
-	return s.identity.User(w, r)
+	return s.signedIn(w, r)
 }
 
 func (s *Server) enrollPage(w http.ResponseWriter, r *http.Request) {
@@ -224,56 +258,34 @@ func (s *Server) enrollBegin(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusBadRequest, "bad request")
 		return
 	}
-	user, ok := s.enrollUser(w, r, in.Code)
-	if !ok {
-		return
-	}
-	in.Name = strings.TrimSpace(in.Name)
-	if len(in.Name) > 64 {
-		in.Name = in.Name[:64]
-	}
-	opts, session, err := s.svc.BeginEnrollment(r.Context(), user, in.Name)
-	if err != nil {
-		jsonError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	regToken := token.Random(24)
-	now := time.Now()
-	s.mu.Lock()
-	for k, v := range s.regs {
-		if now.After(v.expires) {
-			delete(s.regs, k)
-		}
-	}
-	s.regs[regToken] = &registration{username: user, name: in.Name, code: in.Code, session: session, expires: now.Add(5 * time.Minute)}
-	s.mu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]any{"token": regToken, "options": opts})
-}
-
-func (s *Server) enrollFinish(w http.ResponseWriter, r *http.Request) {
-	token := r.URL.Query().Get("token")
-	s.mu.Lock()
-	reg := s.regs[token]
-	delete(s.regs, token)
-	s.mu.Unlock()
-	if reg == nil || time.Now().After(reg.expires) {
-		jsonError(w, http.StatusBadRequest, "registration expired; start again")
-		return
-	}
-	// Without a code the identity must still be the one that began the ceremony.
-	if reg.code == "" {
-		user, ok := s.identity.User(w, r)
+	req := core.EnrollRequest{Code: in.Code, DeviceName: in.Name}
+	if in.Code == "" {
+		user, ok := s.signedIn(w, r)
 		if !ok {
 			return
 		}
-		if user != reg.username {
-			jsonError(w, http.StatusForbidden, "identity changed during enrollment")
-			return
-		}
+		req.Username = user
 	}
-	res, err := s.svc.CompleteEnrollment(r.Context(), reg.username, reg.name, reg.session, io.LimitReader(r.Body, maxBody), reg.code)
-	if err != nil {
-		s.log.Warn("enroll", "user", reg.username, "err", err)
+	handle, opts, err := s.svc.BeginEnrollment(r.Context(), req)
+	if errors.Is(err, core.ErrInvalidCode) {
+		jsonError(w, http.StatusGone, "This enrollment link is invalid or has expired. Ask for a new one.")
+		return
+	} else if err != nil {
+		jsonError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"token": handle, "options": opts})
+}
+
+func (s *Server) enrollFinish(w http.ResponseWriter, r *http.Request) {
+	handle := r.URL.Query().Get("token")
+	res, err := s.svc.FinishEnrollment(r.Context(), handle, s.auth.User(r), io.LimitReader(r.Body, maxBody))
+	switch {
+	case errors.Is(err, core.ErrIdentityChanged):
+		jsonError(w, http.StatusForbidden, err.Error())
+		return
+	case err != nil:
+		s.log.Warn("enroll", "err", err)
 		jsonError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -289,7 +301,7 @@ func (s *Server) enrollFinish(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"device":       res.Device.ID,
 		"topic":        res.Device.NtfyTopic,
-		"username":     reg.username,
+		"username":     res.Device.Username,
 		"ntfy_link":    res.NtfyLink,
 		"has_code":     res.Code != nil,
 		"code_expires": codeExpires,
@@ -382,7 +394,7 @@ func (s *Server) assertionOptions(w http.ResponseWriter, r *http.Request) {
 	if errors.Is(err, core.ErrGone) {
 		jsonError(w, http.StatusGone, err.Error())
 		return
-	} else if errors.Is(err, webauthn.ErrNoUsableCredential) {
+	} else if errors.Is(err, core.ErrPasskeyPolicy) {
 		jsonError(w, http.StatusForbidden, err.Error())
 		return
 	} else if err != nil {
@@ -398,7 +410,7 @@ func (s *Server) assert(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, core.ErrGone):
 		jsonError(w, http.StatusGone, err.Error())
 	case errors.Is(err, core.ErrUserDisabled), errors.Is(err, core.ErrPushDisabled), errors.Is(err, core.ErrDeviceRevoked),
-		errors.Is(err, webauthn.ErrSynced), errors.Is(err, webauthn.ErrNoUsableCredential):
+		errors.Is(err, core.ErrPasskeyPolicy):
 		s.log.Warn("approve", "challenge", r.PathValue("id"), "err", err)
 		jsonError(w, http.StatusForbidden, err.Error())
 	case err != nil:

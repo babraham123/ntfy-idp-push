@@ -34,13 +34,13 @@ func serve(cfg *config.Config, cfgPath string) error {
 		return fmt.Errorf("startup check: %w", err)
 	}
 
-	mux := http.NewServeMux()
-	identity, err := web.NewIdentity(ctx, svc, mux)
+	pages, err := web.New(ctx, svc, log)
 	if err != nil {
 		return err
 	}
+	mux := http.NewServeMux()
 	duoapi.New(svc, log).Register(mux)
-	web.New(svc, identity, log).Register(mux)
+	pages.Register(mux)
 
 	newServer := func(addr string) *http.Server {
 		return &http.Server{

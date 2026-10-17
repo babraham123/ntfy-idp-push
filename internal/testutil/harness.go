@@ -119,13 +119,13 @@ func (h *Harness) serve(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mux := http.NewServeMux()
-	identity, err := web.NewIdentity(context.Background(), svc, mux)
+	pages, err := web.New(context.Background(), svc, h.log)
 	if err != nil {
 		t.Fatal(err)
 	}
+	mux := http.NewServeMux()
 	duoapi.New(svc, h.log).Register(mux)
-	web.New(svc, identity, h.log).Register(mux)
+	pages.Register(mux)
 	h.Server.Config.Handler = web.SecurityHeaders(mux)
 	h.Svc = svc
 }

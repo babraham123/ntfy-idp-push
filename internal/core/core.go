@@ -30,6 +30,8 @@ var (
 	ErrInvalidCode   = errors.New("invalid or expired enrollment code")
 	ErrPushDisabled  = errors.New("push disabled")
 	ErrDeviceRevoked = errors.New("device revoked or not active")
+	// ErrPasskeyPolicy wraps a webauthn refusal of the device's passkeys (synced, or none usable).
+	ErrPasskeyPolicy = errors.New("passkey refused by policy")
 
 	ErrUnknownUser        = errors.New("unknown user")
 	ErrUnknownDevice      = errors.New("unknown device")
@@ -58,6 +60,10 @@ type Service struct {
 	// waiters holds a channel per pending auth call challenge in this process, closed upon
 	// decision.
 	waiters map[string]chan struct{}
+
+	enrollMu sync.Mutex
+	// enrolling holds the passkey ceremonies begun in this process, by handle.
+	enrolling map[string]*pendingEnrollment
 }
 
 func New(cfg *config.Config, st *store.Store, log *slog.Logger) (*Service, error) {
@@ -72,11 +78,12 @@ func New(cfg *config.Config, st *store.Store, log *slog.Logger) (*Service, error
 		return nil, err
 	}
 	s := &Service{
-		Store:   st,
-		ntfy:    ntfy.New(cfg.NtfyBaseURL, cfg.NtfyAdminToken),
-		rp:      rp,
-		Log:     log,
-		waiters: map[string]chan struct{}{},
+		Store:     st,
+		ntfy:      ntfy.New(cfg.NtfyBaseURL, cfg.NtfyAdminToken),
+		rp:        rp,
+		Log:       log,
+		waiters:   map[string]chan struct{}{},
+		enrolling: map[string]*pendingEnrollment{},
 	}
 	s.cfg.Store(cfg)
 	return s, nil
@@ -125,77 +132,6 @@ func (s *Service) Provision(ctx context.Context, username string) (*store.User, 
 	}
 	s.Store.Audit(ctx, username, "provision", map[string]any{"grants": grants})
 	return u, nil
-}
-
-// enrollGrants is enroll-access expanded for username.
-func (s *Service) enrollGrants(username string) ([]config.Grant, error) {
-	cfg := s.Config()
-	return config.ExpandAccess(cfg.Access, cfg.NtfyTopicPrefix, username)
-}
-
-// applyNtfyAccount ensures the ntfy user exists with grants, ignoring user policy to allow
-// restoring disabled accounts.
-func (s *Service) applyNtfyAccount(ctx context.Context, u *store.User, grants []config.Grant) error {
-	if err := s.ensureNtfyUser(ctx, u.Username); err != nil {
-		return err
-	}
-	for _, g := range grants {
-		if err := s.ntfy.AllowAccess(ctx, u.Username, g.Topic, g.Permission); err != nil {
-			return err
-		}
-	}
-	recorded := grants
-	if !s.Config().EnrollAccessReconcile {
-		// Keep remembering grants dropped from config so a later reconcile or reset can see them.
-		recorded = mergeGrants(grants, u.Grants)
-	} else {
-		for _, old := range u.Grants {
-			if !hasTopic(grants, old.Topic) {
-				if err := s.ntfy.ResetAccess(ctx, u.Username, old.Topic); err != nil {
-					return err
-				}
-			}
-		}
-	}
-	if err := s.Store.SetUserGrants(ctx, u.ID, recorded); err != nil {
-		return err
-	}
-	u.Grants = recorded
-	return nil
-}
-
-func (s *Service) ensureNtfyUser(ctx context.Context, username string) error {
-	nu, err := s.ntfy.User(ctx, username)
-	if err != nil {
-		return err
-	}
-	if nu != nil {
-		if nu.Role == "admin" {
-			return fmt.Errorf("ntfy user %q is an admin; refusing to manage it", username)
-		}
-		return nil
-	}
-	// Nobody needs the password: the apps sign in with enrollment codes.
-	return s.ntfy.AddUser(ctx, username, token.Random(32))
-}
-
-func mergeGrants(a, b []config.Grant) []config.Grant {
-	out := append([]config.Grant{}, a...)
-	for _, g := range b {
-		if !hasTopic(out, g.Topic) {
-			out = append(out, g)
-		}
-	}
-	return out
-}
-
-func hasTopic(gs []config.Grant, topic string) bool {
-	for _, g := range gs {
-		if g.Topic == topic {
-			return true
-		}
-	}
-	return false
 }
 
 // NtfyLink is the deep link the ntfy app opens to sign in (with code) and subscribe to topic.

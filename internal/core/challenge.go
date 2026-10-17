@@ -66,13 +66,19 @@ func (s *Service) release(id string) {
 	s.waitMu.Unlock()
 }
 
-// decide moves a pending challenge to state, once.
+// decide moves a pending challenge to state, once. An allow is refused with ErrUserDisabled or
+// ErrDeviceRevoked when the login is no longer eligible; the store checks that in the deciding
+// statement, so a concurrent revoke or disable cannot slip through.
 func (s *Service) decide(ctx context.Context, id string, state store.ChallengeState) error {
 	ok, err := s.Store.DecideChallenge(ctx, id, state, time.Now())
-	if err != nil {
+	switch {
+	case errors.Is(err, store.ErrUserDisabled):
+		return ErrUserDisabled
+	case errors.Is(err, store.ErrDeviceInactive):
+		return ErrDeviceRevoked
+	case err != nil:
 		return err
-	}
-	if !ok {
+	case !ok:
 		return ErrGone
 	}
 	s.decided(ctx, id)
@@ -131,14 +137,15 @@ func (s *Service) wait(ctx context.Context, c *store.Challenge) (store.Challenge
 			return cur.State, nil
 		}
 		if ctx.Err() != nil || !time.Now().Before(c.ExpiresAt) {
-			if ok, err := s.Store.DecideChallenge(bg, c.ID, store.StateTimeout, time.Now()); err != nil {
-				return store.StateDeny, err
-			} else if ok {
-				s.decided(bg, c.ID)
-				return store.StateTimeout, nil
+			err := s.decide(bg, c.ID, store.StateTimeout)
+			if errors.Is(err, ErrGone) {
+				// Lost a race with a concurrent decision; loop to read it.
+				continue
 			}
-			// Lost a race with a concurrent decision; loop to read it.
-			continue
+			if err != nil {
+				return store.StateDeny, err
+			}
+			return store.StateTimeout, nil
 		}
 	}
 }
