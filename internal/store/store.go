@@ -82,12 +82,12 @@ var migrations = []string{
 	CREATE INDEX audit_ts ON audit(ts);`,
 	// A revoked device keeps its row until its ntfy cleanup succeeds, so a failed cleanup can be retried.
 	`ALTER TABLE devices ADD COLUMN revoked_at INTEGER;`,
-	// Authorizes the enrollment result page after a single-use enrollment code is spent; it must
-	// survive a restart, so it is stored (hashed) rather than kept in memory.
+	// Authorizes the enrollment result page post-code usage. Stored (hashed) to survive
+	// restarts.
 	`ALTER TABLE devices ADD COLUMN result_token_hash BLOB;
 	CREATE UNIQUE INDEX devices_result_token ON devices(result_token_hash);`,
-	// Set while an ntfy user reset is unfinished, so the purge job completes it even after the
-	// revoked device's row, which a manual retry needs, is gone.
+	// Set for pending ntfy resets to ensure completion via purge job (even if device rows are
+	// deleted).
 	`ALTER TABLE users ADD COLUMN ntfy_reset_pending INTEGER NOT NULL DEFAULT 0;`,
 }
 
@@ -116,8 +116,7 @@ func Open(path string) (*Store, error) {
 
 func (s *Store) Close() error { return s.db.Close() }
 
-// Backup writes a consistent copy of the database to path, which must not exist. It is safe while
-// the server runs. The copy is created 0600, as the database holds passkeys and session IDs.
+// Backup writes a consistent DB copy to path (0600, must not exist). Safe during runtime.
 func (s *Store) Backup(ctx context.Context, path string) error {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
@@ -210,9 +209,8 @@ func (s *Store) AuditLog(ctx context.Context, username string, limit int) ([]Aud
 	return out, rows.Err()
 }
 
-// Purge removes old challenges, codes and sessions. A used enrollment code
-// is kept as long as its device may still be awaiting setup, because an IdP keeps polling
-// enroll_status past the code's expiry.
+// Purge clears old data. Used enrollment codes persist if devices pend setup to handle delayed IdP
+// enroll_status polling.
 func (s *Store) Purge(ctx context.Context, now time.Time, unverifiedTTL, challengeTTL time.Duration) error {
 	for _, q := range []struct {
 		sql  string
@@ -234,8 +232,7 @@ func (s *Store) ExpiredUnverifiedDevices(ctx context.Context, now time.Time, unv
 	return s.queryDevices(ctx, `WHERE d.verified_at IS NULL AND d.revoked_at IS NULL AND d.created_at < ?`, unix(now.Add(-unverifiedTTL)))
 }
 
-// RevokedDevices lists revoked devices whose row is still present: their ntfy cleanup has not
-// finished.
+// RevokedDevices lists revoked devices awaiting ntfy cleanup.
 func (s *Store) RevokedDevices(ctx context.Context) ([]Device, error) {
 	return s.queryDevices(ctx, `WHERE d.revoked_at IS NOT NULL`)
 }

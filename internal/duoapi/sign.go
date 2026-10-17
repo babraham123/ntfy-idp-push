@@ -55,8 +55,7 @@ func sha512Hex(b []byte) string {
 	return hex.EncodeToString(h[:])
 }
 
-// canonDuoHeaders joins lower-cased x-duo-* header names and values, sorted by name, with NULs,
-// as duo_client_python does for v5.
+// canonDuoHeaders joins lower-cased, sorted x-duo-* headers with NULs for v5.
 func canonDuoHeaders(h http.Header) string {
 	var names []string
 	for k := range h {
@@ -120,13 +119,8 @@ type SignedRequest struct {
 	Sig    string // lower-case hex HMAC from the Authorization header
 }
 
-// Verify checks req's signature against each accepted secret key and returns the request's
-// parameters (for a JSON body, its fields overlaid with the query string).
-//
-// Only the body identifies the signing variant: a JSON body (Content-Type application/json) is
-// verified as v5 only, a form body as v2 only. A bodyless request (GET/DELETE) carries no
-// Content-Type in either client, so it may be v2 or v5 and both are tried. SHA-1 (older
-// duo_client_python configurations) exists only for v2.
+// Verify checks req's signature and returns parameters. JSON bodies are verified as v5 only; form
+// bodies as v2 only; bodyless requests try both. SHA-1 is supported for v2 only.
 func Verify(req SignedRequest, skeys []string) (url.Values, error) {
 	ct, _, _ := mime.ParseMediaType(req.Header.Get("Content-Type"))
 	jsonBody := ct == "application/json"
@@ -167,8 +161,8 @@ func Verify(req SignedRequest, skeys []string) (url.Values, error) {
 	return nil, errBadSignature
 }
 
-// params returns the parameters the client signed and those the handler sees. JSON clients sign
-// only the query string: POST params travel in the body, which v5 covers by its hash.
+// params returns signed and observed parameters. JSON clients only sign the query string; v5 hash
+// covers POST params.
 func (req SignedRequest) params(jsonBody bool) (signed, values url.Values, err error) {
 	switch {
 	case jsonBody:

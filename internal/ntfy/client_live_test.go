@@ -8,8 +8,8 @@ import (
 	"time"
 )
 
-// TestLiveServer exercises the client against a real ntfy server, which must run with
-// auth-default-access: deny-all. Set NTFY_IDP_PUSH_TEST_NTFY_URL and _TOKEN (an admin token).
+// TestLiveServer exercises the client against a real ntfy server (requires auth-default-access:
+// deny-all, NTFY_IDP_PUSH_TEST_NTFY_URL, and _TOKEN).
 func TestLiveServer(t *testing.T) {
 	base, token := os.Getenv("NTFY_IDP_PUSH_TEST_NTFY_URL"), os.Getenv("NTFY_IDP_PUSH_TEST_NTFY_TOKEN")
 	if base == "" || token == "" {

@@ -18,8 +18,8 @@ type Identity interface {
 	User(w http.ResponseWriter, r *http.Request) (string, bool)
 }
 
-// NewIdentity returns the identity for svc's auth-mode. OIDC also registers its login and callback
-// routes on mux.
+// NewIdentity returns the identity for the auth-mode. OIDC also registers its login/callback
+// routes.
 func NewIdentity(ctx context.Context, svc *core.Service, mux *http.ServeMux) (Identity, error) {
 	cfg := svc.Config()
 	if cfg.AuthMode != "oidc" {

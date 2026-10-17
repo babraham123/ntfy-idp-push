@@ -31,8 +31,8 @@ func NewSecretKey() string {
 	return randomString("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", 40)
 }
 
-// RotateSecretKey rewrites path with a new duo-secret-key, keeping the old one as
-// duo-secret-key-previous (accepted for duo-key-grace). Comments and ordering are preserved.
+// RotateSecretKey rewrites config with a new duo-secret-key, keeping the old as
+// duo-secret-key-previous (preserving comments/ordering).
 func RotateSecretKey(path string, now time.Time) (string, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {

@@ -1,6 +1,5 @@
-// Package webauthn binds approvals to a device-bound passkey on the enrolled phone. Callers deal
-// only in store passkeys, browser options as JSON and an opaque registration Session, so
-// go-webauthn's types and credential bookkeeping stay here.
+// Package webauthn encapsulates go-webauthn, keeping types internal while binding approvals to
+// device-bound passkeys.
 package webauthn
 
 import (
@@ -37,12 +36,10 @@ type RP struct {
 	cfg Config
 }
 
-// Session is a registration in progress, held by the caller between BeginRegistration and
-// FinishRegistration.
+// Session tracks an in-progress registration.
 type Session struct{ data gowebauthn.SessionData }
 
-// owner is the WebAuthn user entity: the user handle is the shim's user ID, and credentials are
-// only those of the one device being registered or asserted against.
+// owner wraps the WebAuthn user entity (user ID and single-device credentials).
 type owner struct {
 	id, name, displayName string
 	creds                 []gowebauthn.Credential
@@ -90,8 +87,8 @@ func (rp *RP) BeginRegistration(u *store.User, deviceName string) (json.RawMessa
 	return b, Session{*session}, err
 }
 
-// FinishRegistration verifies an attestation response under the device-binding policy and returns
-// the passkey to store (without its DeviceID) and the attestation format.
+// FinishRegistration verifies attestation against the device-binding policy and returns the store
+// passkey and format.
 func (rp *RP) FinishRegistration(u *store.User, session Session, attestation io.Reader) (_ store.Passkey, attestationFormat string, _ error) {
 	parsed, err := protocol.ParseCredentialCreationResponseBody(attestation)
 	if err != nil {
@@ -118,8 +115,8 @@ func (rp *RP) FinishRegistration(u *store.User, session Session, attestation io.
 		cred.AttestationFormat, nil
 }
 
-// asserter is the WebAuthn user for a login, holding only the passkeys the device-binding policy
-// still allows. go-webauthn applies its Filtering only at registration, so login filters here.
+// asserter filters login passkeys against the device-binding policy (since go-webauthn only filters
+// at registration).
 func (rp *RP) asserter(userID string, passkeys []store.Passkey) (owner, error) {
 	o := owner{id: userID}
 	for _, p := range passkeys {
@@ -137,8 +134,7 @@ func (rp *RP) asserter(userID string, passkeys []store.Passkey) (owner, error) {
 	return o, nil
 }
 
-// loginSession is derived from the nonce, so nothing about a pending login needs to be kept
-// outside the challenge row.
+// loginSession is derived from the nonce, avoiding state outside the challenge row.
 func (rp *RP) loginSession(userID string, passkeys []store.Passkey, nonce []byte) (owner, *protocol.CredentialAssertion, *gowebauthn.SessionData, error) {
 	o, err := rp.asserter(userID, passkeys)
 	if err != nil {
@@ -148,8 +144,8 @@ func (rp *RP) loginSession(userID string, passkeys []store.Passkey, nonce []byte
 	return o, opts, session, err
 }
 
-// BeginLogin returns the navigator.credentials.get() options for an assertion over nonce by one
-// of passkeys.
+// BeginLogin generates navigator.credentials.get() options for nonce assertion via specified
+// passkeys.
 func (rp *RP) BeginLogin(userID string, passkeys []store.Passkey, nonce []byte) (json.RawMessage, error) {
 	_, opts, _, err := rp.loginSession(userID, passkeys, nonce)
 	if err != nil {
@@ -158,10 +154,8 @@ func (rp *RP) BeginLogin(userID string, passkeys []store.Passkey, nonce []byte) 
 	return json.Marshal(opts)
 }
 
-// FinishLogin verifies an assertion over nonce by one of passkeys (UP and UV required, BE refused
-// unless synced passkeys are allowed) and returns that passkey with its new sign count.
-// signCountRegressed reports a counter that did not advance; passkeys commonly report zero, so
-// that is for the caller to log rather than a refusal.
+// FinishLogin verifies an assertion (UP/UV required, BE refused unless synced allowed) and returns
+// the updated passkey. signCountRegressed flags non-advancing counters (caller logs, not refuses).
 func (rp *RP) FinishLogin(userID string, passkeys []store.Passkey, nonce []byte, assertion io.Reader) (_ store.Passkey, signCountRegressed bool, _ error) {
 	o, _, session, err := rp.loginSession(userID, passkeys, nonce)
 	if err != nil {

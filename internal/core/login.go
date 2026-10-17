@@ -13,8 +13,7 @@ import (
 	"github.com/babraham123/ntfy-idp-push/internal/store"
 )
 
-// UserRef names a user by ID or, when ID is empty, by username, as the Duo API's user_id and
-// username parameters do.
+// UserRef names a user by ID (or username if ID is empty), mirroring Duo API's parameters.
 type UserRef struct{ ID, Username string }
 
 func (s *Service) resolveUser(ctx context.Context, ref UserRef) (*store.User, error) {
@@ -34,10 +33,8 @@ func (s *Service) resolveUser(ctx context.Context, ref UserRef) (*store.User, er
 // active reports whether d can receive logins: set up on the phone and not revoked.
 func active(d *store.Device) bool { return d.VerifiedAt != nil && d.RevokedAt == nil }
 
-// eligible is the one rule for whether device d of user u may receive or approve a push now. A nil
-// u or d skips the checks that need it, so preauth can ask before it has either. The store's
-// DecideChallenge repeats the user and device part in SQL to close the race with a concurrent
-// revoke or disable.
+// eligible determines if a device can receive/approve a push. Nil u/d skips checks for preauth.
+// DecideChallenge repeats this logic in SQL to prevent race conditions with revokes/disables.
 func eligible(cfg *config.Config, u *store.User, d *store.Device) error {
 	switch {
 	case cfg.PushDisabled:
@@ -56,8 +53,7 @@ func eligible(cfg *config.Config, u *store.User, d *store.Device) error {
 	return nil
 }
 
-// activeDevices lists u's active devices, most recently used first: store.Devices orders them so,
-// and device=auto takes the first.
+// activeDevices lists u's active devices (MRU first).
 func (s *Service) activeDevices(ctx context.Context, u *store.User) ([]store.Device, error) {
 	devs, err := s.Store.Devices(ctx, u.ID)
 	if err != nil {
@@ -72,8 +68,7 @@ func (s *Service) activeDevices(ctx context.Context, u *store.User) ([]store.Dev
 	return out, nil
 }
 
-// loginDevice resolves the Duo device parameter among u's active devices; "auto" or empty is the
-// most recently used one.
+// loginDevice maps the Duo device parameter to an active device ("auto" or empty gets the MRU one).
 func (s *Service) loginDevice(ctx context.Context, u *store.User, selector string) (*store.Device, error) {
 	devs, err := s.activeDevices(ctx, u)
 	if err != nil {
@@ -96,16 +91,15 @@ func (s *Service) loginDevice(ctx context.Context, u *store.User, selector strin
 	return nil, ErrUnknownDevice
 }
 
-// PreauthResult is one of: Deny, why the user may not sign in with push; EnrollURL, where the user
-// enrolls a first device; or Devices, the active devices, most recently used first.
+// PreauthResult is either Deny (reason), EnrollURL (for first device), or Devices (MRU list).
 type PreauthResult struct {
 	Deny      error
 	EnrollURL string
 	Devices   []store.Device
 }
 
-// Preauth reports whether ref can sign in with push, and on which devices. An unknown user is sent
-// to enroll, like a known one with no active device.
+// Preauth reports if ref can sign in and via which devices. Unknown users or users without active
+// devices are sent to enroll.
 func (s *Service) Preauth(ctx context.Context, ref UserRef) (PreauthResult, error) {
 	cfg := s.Config()
 	// Before the lookup, so the kill switch answers the same for every username.
@@ -143,8 +137,8 @@ type AuthRequest struct {
 	IPAddr          string
 	TargetURL       string
 	DisplayUsername string
-	// Timeout is how long the push stays open; zero means push-timeout. The caller's response
-	// deadline must outlast it.
+	// Timeout defines push duration (0 = push-timeout). The caller's response deadline must
+	// outlast this.
 	Timeout time.Duration
 }
 
@@ -210,8 +204,7 @@ func (s *Service) Authenticate(ctx context.Context, r AuthRequest) (store.Challe
 	return state, err
 }
 
-// checkEligible re-reads what can change while a push is pending and reports why a login on
-// deviceID may not be allowed now.
+// checkEligible re-verifies push validity, reporting reasons for rejection.
 func (s *Service) checkEligible(ctx context.Context, deviceID string) error {
 	d, err := s.Store.Device(ctx, deviceID)
 	if errors.Is(err, store.ErrNotFound) {
@@ -231,12 +224,12 @@ func (s *Service) allow(ctx context.Context, c *store.Challenge) error {
 	if err := s.checkEligible(ctx, c.DeviceID); err != nil {
 		return err
 	}
-	// The store re-checks device and user in the same statement, closing the race with a
-	// concurrent revoke or disable.
+	// The store safely re-checks device/user in a single statement to prevent races with
+	// revokes/disables.
 	return s.decide(ctx, c.ID, store.StateAllow)
 }
 
-// devicePasskeys returns the device c was pushed to and its passkeys, the only ones that may
+// devicePasskeys returns the target device and its passkeys, which are the only ones allowed to
 // approve c.
 func (s *Service) devicePasskeys(ctx context.Context, c *store.Challenge) (*store.Device, []store.Passkey, error) {
 	d, err := s.Store.Device(ctx, c.DeviceID)
@@ -247,8 +240,8 @@ func (s *Service) devicePasskeys(ctx context.Context, c *store.Challenge) (*stor
 	return d, pks, err
 }
 
-// AssertionOptions returns the navigator.credentials.get() options for a pending challenge: its
-// nonce, restricted to the passkeys of the device the push went to.
+// AssertionOptions restricts navigator.credentials.get() options to the passkeys of the push's
+// target device.
 func (s *Service) AssertionOptions(ctx context.Context, id string) (json.RawMessage, error) {
 	c, err := s.PendingChallenge(ctx, id)
 	if err != nil {

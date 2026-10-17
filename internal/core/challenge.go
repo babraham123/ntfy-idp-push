@@ -1,9 +1,8 @@
 package core
 
-// A challenge is one pending login: created by Authenticate, decided once (allow, deny, fraud or
-// timeout) by whichever comes first of the phone, the CLI, a revoke or disable, or expiry, and
-// waited on by the blocked auth call. Deciding wakes the waiter in this process and clears the push
-// from the phone; a decision made by another process (the CLI) is seen by polling.
+// A challenge is a pending login created by Authenticate and decided exactly once. Decisions wake
+// local blocked auth calls and clear phone pushes; cross-process decisions are detected via
+// polling.
 
 import (
 	"context"
@@ -101,8 +100,8 @@ func (s *Service) clearPush(c *store.Challenge) {
 	}
 }
 
-// wait blocks until the challenge is decided, expires, or ctx ends, and returns the final state.
-// Expiry and cancellation both resolve to timeout.
+// wait blocks until the challenge decides, expires, or ctx ends (returning timeout for
+// expiry/cancellation).
 func (s *Service) wait(ctx context.Context, c *store.Challenge) (store.ChallengeState, error) {
 	s.waitMu.Lock()
 	ch := s.waiters[c.ID]

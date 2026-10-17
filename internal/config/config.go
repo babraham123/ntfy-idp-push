@@ -98,8 +98,7 @@ func defaults() *Config {
 	}
 }
 
-// Load reads path (may be empty), applies NTFY_IDP_PUSH_* env overrides, reads secret files and
-// validates.
+// Load reads config path, applies NTFY_IDP_PUSH_* overrides, reads secret files, and validates.
 func Load(path string) (*Config, error) {
 	c := defaults()
 	if path != "" {
@@ -242,8 +241,7 @@ func (c *Config) Validate() error {
 		c.TrustedNets = append(c.TrustedNets, n)
 	}
 
-	// ntfy's admin API can only create role "user"; refusing anything else keeps enrollment from
-	// ever being a path to ntfy admin.
+	// Refusing roles other than "user" prevents enrollment from escalating to ntfy admin.
 	if c.EnrollRole != "user" {
 		errs = append(errs, fmt.Errorf("enroll-role must be \"user\", got %q", c.EnrollRole))
 	}
@@ -288,8 +286,8 @@ func (c *Config) secretFiles() []secretFile {
 	}
 }
 
-// readSecretFiles loads each <key>-file into <key>, for Docker/Podman secrets and systemd
-// credentials. Setting both would leave which one wins ambiguous, so it is refused.
+// readSecretFiles populates <key> from <key>-file (for Docker/systemd secrets), failing if both are
+// set.
 func (c *Config) readSecretFiles() error {
 	var errs []error
 	for _, s := range c.secretFiles() {
@@ -310,8 +308,7 @@ func (c *Config) readSecretFiles() error {
 	return errors.Join(errs...)
 }
 
-// SecretKeys returns the keys an incoming signature may be made with: the current one, and the
-// previous one while inside duo-key-grace.
+// SecretKeys returns the current key and the previous key (if within duo-key-grace).
 func (c *Config) SecretKeys(now time.Time) []string {
 	keys := []string{c.DuoSecretKey}
 	if c.DuoSecretKeyPrevious != "" && now.Before(c.previousKeyEnd) {

@@ -1,24 +1,8 @@
 package core
 
-// Revocation spans the local database and an ntfy server that may be unreachable, so it is a
-// state machine persisted in the store and finished by whoever runs next: the same command re-run,
-// or Reconcile from the purge job.
-//
-//	device: active ─revoke─▶ revoked_at set, row kept ─grant removed─▶ row deleted
-//	user:   ntfy_reset_pending set ─ntfy user deleted, recreated, re-granted─▶ cleared
-//
-// A revoked row still present means its remote steps are pending; a set ntfy_reset_pending means
-// the reset is. The rules that keep every interruption resumable:
-//
-//   - Local first: revoked_at, passkey deletion and denying pending logins precede any ntfy call,
-//     so a revoked phone approves nothing even while ntfy is down.
-//   - A requested reset is recorded before any step that can fail: Reconcile may delete the
-//     revoked device row a manual retry would resume from.
-//   - The device row is deleted last, so a failed ntfy call leaves something to retry from.
-//   - A user or grant already missing in ntfy counts as removed, so every step is safe to repeat
-//     and an interrupted reset resumes at recreation.
-//   - Recreating the ntfy user ignores disabled_at. Disabling denies logins at preauth and auth;
-//     it must not leave a reset stuck between deleting and recreating the account.
+// Revocation is a resumable state machine since ntfy may be unreachable. Local passes (revoked_at,
+// passkey deletion, login denials) happen first to block approvals. Resets are recorded before
+// failure-prone steps. Device rows are deleted last to allow retrying ntfy calls.
 
 import (
 	"context"
@@ -30,8 +14,8 @@ import (
 	"github.com/babraham123/ntfy-idp-push/internal/store"
 )
 
-// RevokeDevice cuts a phone off: its topic grant and, with resetNtfyUser, every ntfy token of the
-// user. force skips the check that the ntfy user holds only grants the shim made.
+// RevokeDevice cuts off a phone's topic grant and (if resetNtfyUser) all user ntfy tokens. force
+// skips checking for foreign ntfy grants.
 func (s *Service) RevokeDevice(ctx context.Context, deviceID string, resetNtfyUser, force bool, actor string) error {
 	d, err := s.Store.Device(ctx, deviceID)
 	if err != nil {
@@ -79,8 +63,8 @@ func (s *Service) revoke(ctx context.Context, d *store.Device, resetNtfyUser, fo
 	return s.Store.DeleteDevice(ctx, d.ID)
 }
 
-// ResetNtfyUser deletes and recreates the ntfy user, invalidating every token it has. ntfy has no
-// admin endpoint to revoke another user's tokens, so this is the only way to cut a lost phone off.
+// ResetNtfyUser deletes and recreates the ntfy user to invalidate all its tokens (since ntfy lacks
+// targeted token revocation).
 func (s *Service) ResetNtfyUser(ctx context.Context, username string, force bool) error {
 	if err := s.requestReset(ctx, username, force); err != nil {
 		return err
@@ -88,8 +72,8 @@ func (s *Service) ResetNtfyUser(ctx context.Context, username string, force bool
 	return s.finishReset(ctx, username)
 }
 
-// requestReset refuses a reset that would drop grants the shim did not make (unless force), then
-// records it as pending.
+// requestReset validates (unless forced) that no foreign grants exist, then records the reset as
+// pending.
 func (s *Service) requestReset(ctx context.Context, username string, force bool) error {
 	u, err := s.Store.UserByName(ctx, username)
 	if err != nil {
@@ -220,8 +204,7 @@ func (s *Service) DeleteUser(ctx context.Context, username string, keepNtfy bool
 	return nil
 }
 
-// Reconcile finishes every revocation and ntfy user reset a failed or interrupted call left
-// pending. One failure does not stop the others.
+// Reconcile finishes pending revocations and ntfy user resets independently.
 func (s *Service) Reconcile(ctx context.Context) error {
 	revoked, err := s.Store.RevokedDevices(ctx)
 	if err != nil {

@@ -20,8 +20,8 @@ const (
 	OIDCClientSecret = "oidc-secret"
 )
 
-// FakeOIDC is an OpenID provider that signs in whoever it is told to, without a login page: its
-// authorization endpoint redirects straight back with a code.
+// FakeOIDC simulates an OpenID provider, immediately returning an authorization code without a
+// login page.
 type FakeOIDC struct {
 	*httptest.Server
 	key *rsa.PrivateKey

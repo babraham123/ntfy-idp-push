@@ -1,5 +1,5 @@
-// Package testutil provides a fake ntfy server, a virtual WebAuthn authenticator, and a harness
-// that wires the shim together for integration tests.
+// Package testutil provides test fakes (ntfy server, WebAuthn authenticator) and an integration
+// test harness.
 package testutil
 
 import (
@@ -17,8 +17,7 @@ import (
 
 const AdminToken = "tk_admin"
 
-// FakeNtfy implements the slice of ntfy's API the shim uses, with auth-default-access: deny-all.
-// Error statuses and codes follow ntfy v2.30 (server/server_admin.go).
+// FakeNtfy simulates used ntfy API endpoints (with deny-all access). Error codes match ntfy v2.30.
 type FakeNtfy struct {
 	*httptest.Server
 	// EnrollSupported toggles the ntfy#597 POST /v1/users/token/enroll endpoint.

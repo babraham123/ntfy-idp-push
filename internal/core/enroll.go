@@ -19,8 +19,7 @@ import (
 	"github.com/babraham123/ntfy-idp-push/internal/webauthn"
 )
 
-// CreateEnrollCode mints a single-use /enroll?code=… link for username, which stands in for the
-// user's identity on the enrollment page.
+// CreateEnrollCode mints a single-use /enroll?code=... link providing identity for enrollment.
 func (s *Service) CreateEnrollCode(ctx context.Context, username string, ttl time.Duration) (code, link string, err error) {
 	if err := ValidUsername(username); err != nil {
 		return "", "", err
@@ -65,20 +64,18 @@ func (s *Service) BeginEnrollment(ctx context.Context, username, deviceName stri
 type Enrollment struct {
 	Device   *store.Device
 	NtfyLink string
-	// Code is nil when ntfy lacks the enroll endpoint. Stock ntfy apps ignore a code too, so the
-	// manual sign-in path is offered either way.
+	// Code is nil without ntfy enroll endpoint support. The manual sign-in path is always
+	// offered.
 	Code *ntfy.EnrollCode
 	// ResultToken lets the result page act for this device for EnrollResultTTL (see EnrolledDevice).
 	ResultToken string
 }
 
-// EnrollResultTTL bounds how long the enrollment result page keeps working; after that the user
-// re-enrolls.
+// EnrollResultTTL sets how long the enrollment result page works before requiring re-enrollment.
 const EnrollResultTTL = time.Hour
 
-// CompleteEnrollment verifies the passkey, creates the device and its ntfy topic grant, and sends
-// the test push whose action verifies the device. enrollCode, when set, is claimed together with
-// the device; a failure anywhere undoes the enrollment and releases the code for a retry.
+// CompleteEnrollment verifies passkey, provisions the device/grant, and sends a test push. Failures
+// rollback everything, releasing any enrollCode.
 func (s *Service) CompleteEnrollment(ctx context.Context, username, deviceName string, session webauthn.Session, attestation io.Reader, enrollCode string) (*Enrollment, error) {
 	cfg := s.Config()
 	u, err := s.Store.UserByName(ctx, username)
@@ -121,8 +118,7 @@ func (s *Service) CompleteEnrollment(ctx context.Context, username, deviceName s
 	return res, nil
 }
 
-// EnrolledDevice resolves the token the enrollment result page holds, which stands in for the
-// user's identity once a single-use enrollment code is spent.
+// EnrolledDevice maps the result token (identity post-enrollment code consumption) to a device.
 func (s *Service) EnrolledDevice(ctx context.Context, resultToken string) (*store.Device, error) {
 	d, err := s.Store.DeviceByResultToken(ctx, token.Hash(resultToken), time.Now(), EnrollResultTTL)
 	if errors.Is(err, store.ErrNotFound) {
@@ -166,8 +162,7 @@ func (s *Service) publishSetup(ctx context.Context, dev *store.Device, verifyTok
 	})
 }
 
-// undoEnrollment removes a half-built enrollment. Whatever it cannot remove is an unverified
-// device, which Purge removes later.
+// undoEnrollment rolls back half-built enrollments. Lingering state is cleaned up by Purge later.
 func (s *Service) undoEnrollment(ctx context.Context, dev *store.Device, codeHash []byte) {
 	if err := s.removeDevice(ctx, dev); err != nil {
 		s.Log.Warn("enroll: undo", "device", dev.ID, "err", err)
@@ -179,8 +174,7 @@ func (s *Service) undoEnrollment(ctx context.Context, dev *store.Device, codeHas
 	}
 }
 
-// ResendSetupPush publishes a fresh "Finish setup" push to a device still awaiting setup, for when
-// the first one was missed (e.g. the app was not signed in yet).
+// ResendSetupPush republishes the setup push for unverified devices.
 func (s *Service) ResendSetupPush(ctx context.Context, deviceID, username string) error {
 	d, err := s.Store.Device(ctx, deviceID)
 	if errors.Is(err, store.ErrNotFound) || (err == nil && d.Username != username) {

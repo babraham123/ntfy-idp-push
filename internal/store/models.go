@@ -218,8 +218,8 @@ func (s *Store) Devices(ctx context.Context, userID string) ([]Device, error) {
 
 var ErrCodeUnavailable = errors.New("enrollment code used or expired")
 
-// CreateEnrollment atomically claims the enrollment code (when codeHash is set) and inserts the
-// unverified device with its passkey. It returns ErrCodeUnavailable if the code cannot be claimed.
+// CreateEnrollment atomically claims the codeHash and inserts the device/passkey (returns
+// ErrCodeUnavailable on failure).
 func (s *Store) CreateEnrollment(ctx context.Context, d *Device, verifyTokenHash, resultTokenHash []byte, p *Passkey, codeHash []byte) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -249,8 +249,7 @@ func (s *Store) CreateEnrollment(ctx context.Context, d *Device, verifyTokenHash
 	return tx.Commit()
 }
 
-// DeviceByResultToken returns the unrevoked device enrolled within ttl whose result token hashes
-// to tokenHash.
+// DeviceByResultToken returns the unrevoked device enrolled within ttl matching tokenHash.
 func (s *Store) DeviceByResultToken(ctx context.Context, tokenHash []byte, now time.Time, ttl time.Duration) (*Device, error) {
 	ds, err := s.queryDevices(ctx, `WHERE d.result_token_hash = ? AND d.created_at > ? AND d.revoked_at IS NULL`, tokenHash, unix(now.Add(-ttl)))
 	if err != nil {
@@ -364,11 +363,8 @@ func (s *Store) Challenge(ctx context.Context, id string) (*Challenge, error) {
 	return &c, nil
 }
 
-// DecideChallenge moves a pending, unexpired challenge to state. It reports whether this call
-// made the decision; a challenge is decided at most once. Allow additionally requires, in the same
-// statement, that the device is active and its user enabled: core's eligibility rule (less the kill
-// switch, which lives in config), repeated here so a concurrent revoke or disable cannot slip
-// between core's check and the update.
+// DecideChallenge atomically applies a single state transition to pending challenges. Allow
+// mandates the device is active and user enabled, closing race windows with revokes/disables.
 func (s *Store) DecideChallenge(ctx context.Context, id string, state ChallengeState, now time.Time) (bool, error) {
 	cond := ` AND expires_at > ?`
 	args := []any{string(state), unix(now), id, unix(now)}
@@ -387,8 +383,8 @@ func (s *Store) DecideChallenge(ctx context.Context, id string, state ChallengeS
 	return n == 1, nil
 }
 
-// ChallengeFilter selects pending challenges by device, username or expiry; the zero value selects
-// all.
+// ChallengeFilter selects pending challenges by device, username, or expiry (zero value selects
+// all).
 type ChallengeFilter struct {
 	DeviceID string
 	Username string
@@ -396,8 +392,7 @@ type ChallengeFilter struct {
 	ExpiredBy time.Time
 }
 
-// PendingChallengeIDs lists undecided challenges matching f, used when revoking, disabling or
-// purging.
+// PendingChallengeIDs lists undecided challenges for revocation, disabling, or purging.
 func (s *Store) PendingChallengeIDs(ctx context.Context, f ChallengeFilter) ([]string, error) {
 	q, args := `SELECT id FROM challenges WHERE state = 'pending'`, []any{}
 	if f.DeviceID != "" {

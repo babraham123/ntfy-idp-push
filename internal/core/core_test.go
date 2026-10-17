@@ -24,8 +24,8 @@ import (
 
 var callSeq atomic.Int32
 
-// authCall runs an Authelia-shaped auth request in the background. Each call differs (by
-// hostname) so back-to-back calls are not identical signed requests, which the replay guard refuses.
+// authCall runs an Authelia-shaped auth request in the background. Calls differ by hostname to
+// bypass replay guard.
 func authCall(h *testutil.Harness, user, device string) <-chan *authapi.AuthResult {
 	out := make(chan *authapi.AuthResult, 1)
 	seq := callSeq.Add(1)
@@ -301,9 +301,9 @@ func TestDisableAndKillSwitch(t *testing.T) {
 	}
 }
 
-// Preauth: an unknown user, or one with no active device, enrolls (or is denied without
-// enroll-portal-url); a disabled user or the kill switch denies; otherwise the active devices are
-// listed most recently used first, and device=auto pushes to the first.
+// Preauth logic: Unknown users or those without devices enroll (or get denied without
+// enroll-portal-url). Disabled users/kill switch deny. Otherwise, active devices are listed MRU
+// first; device=auto picks the first.
 func TestPreauth(t *testing.T) {
 	ctx := context.Background()
 	h := testutil.NewHarness(t, func(c *config.Config) { c.PushTimeout = config.Duration(5 * time.Second) })
@@ -394,8 +394,8 @@ func TestRevokeDevice(t *testing.T) {
 	}
 }
 
-// The device list shows every device a user has; the user list counts only those that can
-// receive logins.
+// The device list includes all user devices. The user list only counts devices that can receive
+// logins.
 func TestUsersAndDevicesOf(t *testing.T) {
 	ctx := context.Background()
 	h := testutil.NewHarness(t, nil)
@@ -576,8 +576,8 @@ func TestProvision(t *testing.T) {
 	}
 }
 
-// linkParam finds the first link starting with prefix in an HTML page and returns query param
-// key, or with key "" the rest of the link after prefix.
+// linkParam parses an HTML page for the first link starting with prefix, returning the query param
+// key (or the rest of the link if key is "").
 func linkParam(t *testing.T, page, prefix, key string) string {
 	t.Helper()
 	i := strings.Index(page, prefix)
@@ -735,8 +735,7 @@ func TestCleanupWhenNtfyUserAlreadyGone(t *testing.T) {
 	}
 }
 
-// A push whose auth call is gone (the process restarted) is timed out by the purge job and
-// cleared from the phone, as a live one is when it expires.
+// Pushes orphaned by process restarts are timed out and cleared by the purge job.
 func TestPurgeTimesOutOrphanedPush(t *testing.T) {
 	ctx := context.Background()
 	h := testutil.NewHarness(t, nil)
@@ -817,8 +816,8 @@ func TestPendingLoginBlockedByLaterDisable(t *testing.T) {
 		}
 	})
 	t.Run("disabled by another process", func(t *testing.T) {
-		// A disable that did not deny the pending login (e.g. a direct database change) still
-		// keeps a valid passkey from approving it, and the CLI break-glass too.
+		// A disabled user (even via direct DB change without denying pending logins)
+		// prevents valid passkey or CLI break-glass approvals.
 		h := testutil.NewHarness(t, func(c *config.Config) { c.PushTimeout = config.Duration(2 * time.Second) })
 		dev := h.Enroll(t, "alice", testutil.NewAuthenticator(t, testutil.PublicURL))
 		authCall(h, "alice", dev.DeviceID)
@@ -921,8 +920,8 @@ func TestRevokeResumesAfterNtfyFailure(t *testing.T) {
 	}
 }
 
-// A reset asked for with a revoke must happen even when the revoke fails before reaching it and the
-// purge job then removes the device row a manual retry would need.
+// A reset requested with a revoke must complete, even if the revoke fails early and the purge job
+// removes the device row.
 func TestPurgeFinishesInterruptedReset(t *testing.T) {
 	ctx := context.Background()
 	h := testutil.NewHarness(t, nil)
@@ -954,8 +953,8 @@ func TestPurgeFinishesInterruptedReset(t *testing.T) {
 	}
 }
 
-// Disabling a user denies its logins; it must not stop a reset from recreating the ntfy account,
-// or the reset would delete the user and then stay pending forever.
+// Disabling a user denies logins, but must not prevent resetting/recreating the ntfy account to
+// avoid hanging resets.
 func TestResetWhileUserDisabled(t *testing.T) {
 	ctx := context.Background()
 	h := testutil.NewHarness(t, nil)

@@ -89,8 +89,7 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any, auth 
 		return he
 	}
 	if len(b) > maxResponse {
-		// GET /v1/users lists every ntfy user with its grants, so this is reached first by a large
-		// user base; a truncated list must never be mistaken for the whole one.
+		// Validates full /v1/users response to avoid truncating large user lists.
 		return fmt.Errorf("ntfy %s %s: response exceeds the %d MiB cap (too many ntfy users or grants for this client)", method, path, maxResponse>>20)
 	}
 	if out != nil {
@@ -149,8 +148,7 @@ func (c *Client) ChangePassword(ctx context.Context, username, password string) 
 	return c.do(ctx, http.MethodPut, "/v1/users", map[string]string{"username": username, "password": password}, nil, true)
 }
 
-// DeleteUser removes username. A user that is already gone counts as deleted, so an interrupted
-// delete-and-recreate can resume.
+// DeleteUser removes a user. Missing users count as deleted for resumability.
 func (c *Client) DeleteUser(ctx context.Context, username string) error {
 	err := c.do(ctx, http.MethodDelete, "/v1/users", map[string]string{"username": username}, nil, true)
 	if IsUserNotFound(err) {
@@ -164,8 +162,8 @@ func (c *Client) AllowAccess(ctx context.Context, username, topic, permission st
 		map[string]string{"username": username, "topic": topic, "permission": permission}, nil, true)
 }
 
-// ResetAccess removes username's grant on topic. A missing user has no grants, so that counts as
-// done; ntfy reports it only as a generic 500, hence the lookup.
+// ResetAccess removes topic grant. A missing user is treated as successful to bypass ntfy's generic
+// 500 error.
 func (c *Client) ResetAccess(ctx context.Context, username, topic string) error {
 	err := c.do(ctx, http.MethodDelete, "/v1/users/access", map[string]string{"username": username, "topic": topic}, nil, true)
 	if err == nil {
@@ -184,10 +182,8 @@ type EnrollCode struct {
 
 func (ec *EnrollCode) ExpiresAt() time.Time { return time.Unix(ec.Expires, 0) }
 
-// MintEnrollCode asks for a single-use code that redeems for a new token as username (ntfy#597,
-// POST /v1/users/token/enroll). Issuing a code invalidates the user's previous pending one. ntfy
-// refuses admin users (401) and unknown users (400). Servers without the endpoint answer 404,
-// reported as ErrNotSupported.
+// MintEnrollCode issues a single-use code, invalidating previous pending codes. Answers
+// 404/ErrNotSupported if absent, 401 for admins, 400 for unknown users.
 func (c *Client) MintEnrollCode(ctx context.Context, username string) (*EnrollCode, error) {
 	var ec EnrollCode
 	err := c.do(ctx, http.MethodPost, "/v1/users/token/enroll", map[string]string{"username": username}, &ec, true)
@@ -232,8 +228,7 @@ type Token struct {
 	Username string `json:"username"`
 }
 
-// RedeemEnrollCode exchanges an enrollment code for a token, as the app or web app does
-// (POST /v1/account/token/redeem, unauthenticated).
+// RedeemEnrollCode exchanges a code for a token via unauthenticated POST /v1/account/token/redeem.
 func (c *Client) RedeemEnrollCode(ctx context.Context, code, label string) (*Token, error) {
 	var t Token
 	return &t, c.do(ctx, http.MethodPost, "/v1/account/token/redeem", map[string]string{"code": code, "label": label}, &t, false)

@@ -70,8 +70,8 @@ func (s *Server) provisionPage(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if code != "" {
-			// The fragment never reaches the ntfy server, so the code stays out of its logs.
-			// user= makes the web app refuse rather than mix accounts when signed in as someone else.
+			// The fragment keeps the code out of ntfy server logs. user= prevents the
+			// web app from mixing accounts.
 			frag := url.Values{"code": {code}, "user": {user}, "subscribe": {strings.Join(topics, ",")}}
 			data["Redeem"] = template.URL(cfg.NtfyBaseURL + "/account/token/redeem#" + frag.Encode())
 		}

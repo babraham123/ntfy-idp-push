@@ -22,8 +22,7 @@ const (
 	FlagAT = 0x40
 )
 
-// Authenticator is a software platform authenticator with one ES256 credential, producing the
-// JSON a browser would POST after navigator.credentials.create()/get().
+// Authenticator simulates a software platform authenticator generating WebAuthn browser payloads.
 type Authenticator struct {
 	Origin string
 	// Flags are set on every response in addition to UP (and AT on registration).

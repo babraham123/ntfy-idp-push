@@ -89,8 +89,8 @@ func NewHarness(t *testing.T, mutate func(*config.Config)) *Harness {
 	}
 	h := &Harness{Cfg: cfg, Ntfy: fn, Server: srv, Host: host, Store: st, log: log}
 	h.serve(t)
-	// Shorter than push-timeout, as serve's write timeout is, so a blocking auth must extend its own
-	// deadline.
+	// Shorter than push-timeout (like serve's write timeout), forcing blocking auth to extend
+	// its own deadline.
 	srv.Config.WriteTimeout = 3 * time.Second
 	srv.StartTLS()
 	t.Cleanup(srv.Close)
@@ -224,8 +224,8 @@ func (h *Harness) BeginEnroll(t *testing.T, user, code, name string) (string, js
 	return out.Token, out.Options, resp.StatusCode
 }
 
-// FinishEnroll runs both passkey steps of the web enrollment, by forward-auth identity (code
-// empty) or by enrollment code, without verifying the device. It returns finish's status and body.
+// FinishEnroll simulates web enrollment passkey steps and returns the outcome, skipping device
+// verification.
 func (h *Harness) FinishEnroll(t *testing.T, user, code string, a *Authenticator) (Enrolled, int, []byte) {
 	t.Helper()
 	token, opts, status := h.BeginEnroll(t, user, code, "Pixel")
@@ -260,8 +260,7 @@ func (h *Harness) Enroll(t *testing.T, user string, a *Authenticator) Enrolled {
 	return e
 }
 
-// VerifyFromPush follows the "Finish setup" push's action like the user tapping it and pressing
-// Activate on the page it opens.
+// VerifyFromPush simulates a user tapping the setup push and clicking Activate.
 func (h *Harness) VerifyFromPush(t *testing.T, m ntfy.Message) {
 	t.Helper()
 	if m.Title != "Finish setup" {
@@ -279,9 +278,8 @@ var (
 	referrerRe = regexp.MustCompile(`<meta name="referrer" content="([^"]+)">`)
 )
 
-// SubmitForm loads page and submits its first POST form whose action contains match, as a browser
-// would: its hidden inputs plus extra, with the Origin header that the page's referrer policy
-// yields under the Fetch standard ("null" for no-referrer), not one set by hand.
+// SubmitForm simulates browser form submission, including hidden inputs, extra data, and Fetch
+// standard Origin headers.
 func (h *Harness) SubmitForm(t *testing.T, page, user, match string, extra url.Values) (*http.Response, []byte) {
 	t.Helper()
 	resp, body := h.Do(t, Request{Method: "GET", Path: page, User: user})

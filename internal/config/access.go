@@ -13,8 +13,7 @@ const (
 	PermDenyAll   = "deny-all"
 )
 
-// placeholderUser stands in for ${user} when validating config before any real username is known.
-// It is chosen so it cannot itself collide with a topic prefix check.
+// placeholderUser acts as ${user} for config validation, chosen to avoid topic prefix collisions.
 const placeholderUser = "u0"
 
 type AccessRule struct {
@@ -74,9 +73,8 @@ func ExpandAccess(rules []AccessRule, prefix, username string) ([]Grant, error) 
 	return grants, nil
 }
 
-// ValidateAccess refuses patterns that could match a push topic (<prefix>*) or everything. With
-// username empty it checks the config shape; at enrollment it is re-run with the real username,
-// because "${user}-*" for a user named like the prefix would otherwise grant every push topic.
+// ValidateAccess refuses patterns matching push topics or everything. Re-run at enrollment with the
+// real username to prevent user-specific prefix collisions.
 func ValidateAccess(rules []AccessRule, prefix, username string) error {
 	if username == "" {
 		username = placeholderUser
@@ -102,9 +100,8 @@ func ValidateAccess(rules []AccessRule, prefix, username string) error {
 	return nil
 }
 
-// Readable reports whether topic (with ${user} expanded) is readable under the rules, using the
-// rule ntfy applies regardless of config order: the longest matching pattern, then the one that
-// allows write, then the one that allows read (ntfy user/manager_*.go).
+// Readable evaluates read access based on ntfy's rules: longest match, then write allowed, then
+// read allowed.
 func Readable(rules []AccessRule, topic, username string) bool {
 	topic = Expand(topic, username)
 	var best *AccessRule

@@ -424,8 +424,7 @@ func (s *Server) deny(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// fraud lets whoever holds the push report it. Anyone able to reach this can only deny a login,
-// never approve one.
+// fraud lets push holders report it. This endpoint can only deny logins, never approve them.
 func (s *Server) fraud(w http.ResponseWriter, r *http.Request) {
 	if err := s.svc.ReportFraud(r.Context(), r.PathValue("id"), s.clientIP(r)); err != nil {
 		jsonError(w, http.StatusGone, "request already closed")
@@ -436,8 +435,8 @@ func (s *Server) fraud(w http.ResponseWriter, r *http.Request) {
 
 // ---- QR for IdP-driven enrollment
 
-// enrollQR renders the enrollment URL only for codes the shim issued, so it cannot be used as a
-// general-purpose QR generator.
+// enrollQR renders QR codes only for shim-issued enrollment codes (preventing general-purpose QR
+// abuse).
 func (s *Server) enrollQR(w http.ResponseWriter, r *http.Request) {
 	value := r.URL.Query().Get("value")
 	prefix := s.svc.Config().PublicURL + "/enroll?code="

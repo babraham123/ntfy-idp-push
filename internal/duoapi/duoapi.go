@@ -34,8 +34,8 @@ func New(svc *core.Service, log *slog.Logger) *Handler {
 // Register mounts the Duo API routes on mux.
 func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /auth/v2/ping", h.ping)
-	// Signatures have one-second date resolution, so identical idempotent calls (an IdP polling
-	// enroll_status) legitimately repeat a signature; only calls with side effects refuse replays.
+	// Signatures have 1s resolution. Identical idempotent calls legitimately repeat signatures;
+	// side-effecting calls refuse replays.
 	mux.Handle("GET /auth/v2/check", h.signed(h.check, false))
 	mux.Handle("POST /auth/v2/preauth", h.signed(h.preauth, false))
 	mux.Handle("POST /auth/v2/auth", h.signed(h.auth, true))
@@ -198,8 +198,8 @@ func (h *Handler) auth(w http.ResponseWriter, r *http.Request, p params) {
 		writeOK(w, deny("Only push is supported"))
 		return
 	}
-	// The response blocks until the push is answered, so it must outlast push-timeout. The deadline
-	// is set here rather than on the server so a reloaded push-timeout takes effect.
+	// The response blocks until push is answered. The deadline is set here to pick up a
+	// reloaded push-timeout.
 	timeout := h.svc.Config().PushTimeout.D()
 	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(timeout + 30*time.Second)); err != nil {
 		h.internal(w, err)

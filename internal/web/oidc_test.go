@@ -30,8 +30,7 @@ func cookie(resp *http.Response, name string) string {
 	return ""
 }
 
-// signIn runs the browser's side of the OIDC login for next, letting tamper alter the callback the
-// provider redirects to, and returns the callback's response.
+// signIn simulates the OIDC browser login, allowing tamper on the callback.
 func signIn(t *testing.T, h *testutil.Harness, next string, tamper func(q url.Values)) *http.Response {
 	t.Helper()
 	resp, _ := h.Do(t, testutil.Request{Method: "GET", Path: "/oidc/login?next=" + url.QueryEscape(next)})

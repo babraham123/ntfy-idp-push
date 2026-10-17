@@ -1,5 +1,5 @@
-// Package core holds the operations shared by the Duo facade, the web UI and the CLI: provisioning,
-// enrollment, login challenges and revocation.
+// Package core holds shared operations for the Duo facade, web UI, and CLI (provisioning,
+// enrollment, logins, revocation).
 package core
 
 import (
@@ -47,7 +47,7 @@ var usernameRe = regexp.MustCompile(`^[-_.+@a-zA-Z0-9]{1,128}$`)
 
 type Service struct {
 	cfg atomic.Pointer[config.Config]
-	// Store stays exported for what is store-level by nature: OIDC sessions, backup and the audit
+	// Store remains exported for store-level features: OIDC sessions, backup, and the audit
 	// log.
 	Store *store.Store
 	Log   *slog.Logger
@@ -55,8 +55,8 @@ type Service struct {
 	rp    *webauthn.RP
 
 	waitMu sync.Mutex
-	// waiters holds a channel per challenge an auth call in this process waits on, closed when it
-	// is decided.
+	// waiters holds a channel per pending auth call challenge in this process, closed upon
+	// decision.
 	waiters map[string]chan struct{}
 }
 
@@ -84,9 +84,8 @@ func New(cfg *config.Config, st *store.Store, log *slog.Logger) (*Service, error
 
 func (s *Service) Config() *config.Config { return s.cfg.Load() }
 
-// Reload swaps in a new config for settings read per request (keys, kill switch, grants, timeouts).
-// Listener, TLS, database and WebAuthn RP settings need a restart. Turning the kill switch on also
-// denies every login whose push is still on a phone.
+// Reload swaps config for per-request settings (keys, kill switch, grants, timeouts). Listener,
+// TLS, DB, and WebAuthn need a restart. Enabling the kill switch denies pending phone pushes.
 func (s *Service) Reload(cfg *config.Config) {
 	s.cfg.Store(cfg)
 	if cfg.PushDisabled {
@@ -103,8 +102,8 @@ func ValidUsername(u string) error {
 	return nil
 }
 
-// Provision ensures the ntfy account exists with the enroll-access grants. It creates nothing
-// push-related and is safe to re-run.
+// Provision safely ensures the ntfy account exists with enroll-access grants without creating push
+// resources.
 func (s *Service) Provision(ctx context.Context, username string) (*store.User, error) {
 	if err := ValidUsername(username); err != nil {
 		return nil, err
@@ -134,8 +133,8 @@ func (s *Service) enrollGrants(username string) ([]config.Grant, error) {
 	return config.ExpandAccess(cfg.Access, cfg.NtfyTopicPrefix, username)
 }
 
-// applyNtfyAccount ensures u's ntfy user exists with grants and records them on u. It applies no
-// user policy, so an ntfy user reset can restore a disabled user's account.
+// applyNtfyAccount ensures the ntfy user exists with grants, ignoring user policy to allow
+// restoring disabled accounts.
 func (s *Service) applyNtfyAccount(ctx context.Context, u *store.User, grants []config.Grant) error {
 	if err := s.ensureNtfyUser(ctx, u.Username); err != nil {
 		return err
@@ -219,8 +218,8 @@ func (s *Service) NtfyLink(topic, username, code string) string {
 	return link
 }
 
-// MintNtfyCode returns an ntfy#597 enrollment code, or nil when the server does not support it.
-// ntfy keeps one pending code per user, so minting supersedes any code handed out earlier.
+// MintNtfyCode returns an ntfy enrollment code (or nil if unsupported). Minting supersedes any
+// previous pending code for the user.
 func (s *Service) MintNtfyCode(ctx context.Context, username string) (*ntfy.EnrollCode, error) {
 	ec, err := s.ntfy.MintEnrollCode(ctx, username)
 	if errors.Is(err, ntfy.ErrNotSupported) {
@@ -229,12 +228,12 @@ func (s *Service) MintNtfyCode(ctx context.Context, username string) (*ntfy.Enro
 	return ec, err
 }
 
-// Purge expires challenges and old records, removes devices never verified, and reconciles
-// unfinished revocations. Each step runs even if an earlier one fails.
+// Purge expires challenges/records, removes unverified devices, and reconciles unfinished
+// revocations. Steps run independently of previous failures.
 func (s *Service) Purge(ctx context.Context) {
 	now := time.Now()
-	// Times out challenges whose auth call is gone (the process restarted mid-push); deciding them
-	// clears their pushes from the phone.
+	// Times out challenges with missing auth calls (e.g., process restarted) and clears their
+	// phone pushes.
 	if err := s.decidePending(ctx, store.ChallengeFilter{ExpiredBy: now}, store.StateTimeout); err != nil {
 		s.Log.Error("purge: expire challenges", "err", err)
 	}
@@ -251,8 +250,8 @@ func (s *Service) Purge(ctx context.Context) {
 	}
 }
 
-// SetNtfyPassword gives the ntfy user a fresh random password and returns it, for apps that cannot
-// redeem enrollment codes. Existing tokens stay valid.
+// SetNtfyPassword generates a random password for apps unable to redeem enrollment codes. Existing
+// tokens remain valid.
 func (s *Service) SetNtfyPassword(ctx context.Context, username string) (string, error) {
 	if _, err := s.Provision(ctx, username); err != nil {
 		return "", err

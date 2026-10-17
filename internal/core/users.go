@@ -29,8 +29,7 @@ func (s *Service) Users(ctx context.Context) ([]UserSummary, error) {
 	return out, nil
 }
 
-// DevicesOf returns the user and every device it has, in any state, most recently used first.
-// An unknown username is ErrUnknownUser.
+// DevicesOf returns the user and all their devices (MRU first).
 func (s *Service) DevicesOf(ctx context.Context, username string) (*store.User, []store.Device, error) {
 	u, err := s.resolveUser(ctx, UserRef{Username: username})
 	if err != nil {

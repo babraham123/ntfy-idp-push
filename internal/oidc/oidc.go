@@ -1,5 +1,5 @@
-// Package oidc signs users into the web UI with Authelia (or any OIDC provider) using the
-// authorization code flow with PKCE. Username is the preferred_username claim.
+// Package oidc handles Web UI logins via OIDC auth code flow with PKCE, mapping preferred_username
+// to Username.
 package oidc
 
 import (
@@ -71,8 +71,8 @@ func (a *Auth) User(r *http.Request) string {
 	return u
 }
 
-// LocalPath returns next if it is a path on this origin, else /devices. Browsers read "\" as "/"
-// and drop tabs and newlines, so "/\evil.example" would otherwise redirect off-site.
+// LocalPath returns next if on-origin, else /devices. Protects against browser normalization tricks
+// (e.g., /\evil.example).
 func LocalPath(next string) string {
 	const fallback = "/devices"
 	if !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") || strings.Contains(next, "\\") ||

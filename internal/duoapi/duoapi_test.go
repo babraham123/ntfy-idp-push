@@ -208,8 +208,8 @@ func TestSHA1SignatureAccepted(t *testing.T) {
 }
 
 func TestVerifyBodyKind(t *testing.T) {
-	// ARCHITECTURE.md: a JSON body is verified as v5 only, a form body as v2 only, a bodyless
-	// request against both; SHA-1 is accepted only for v2.
+	// JSON bodies are v5 only, form bodies v2 only, bodyless requests try both. SHA-1 is v2
+	// only.
 	const host, path, skey = "api-test.example", "/auth/v2/preauth", "verify-body-kind-secret-key-0123456789ab"
 	date := time.Now().UTC().Format(time.RFC1123Z)
 	alice := url.Values{"username": {"alice"}}
@@ -298,8 +298,8 @@ func TestKeyRotationGrace(t *testing.T) {
 }
 
 func TestV5SignedGET(t *testing.T) {
-	// JSONSignedCall and duo_client_python v5 send GET params in the query string with no body and
-	// no Content-Type, but still sign v5.
+	// JSONSignedCall and duo_client_python v5 send GET query params without body/Content-Type
+	// but sign v5.
 	h := testutil.NewHarness(t, nil)
 	resp, body, err := h.DuoClient().JSONSignedCall("GET", "/auth/v2/check", duoapigo.JSONParams{}, duoapigo.UseTimeout)
 	if err != nil {

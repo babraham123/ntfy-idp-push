@@ -50,8 +50,7 @@ from a file with <key>-file or NTFY_IDP_PUSH_<KEY>_FILE (e.g. NTFY_IDP_PUSH_DUO_
 // version is stamped by -ldflags "-X main.version=…" in release builds and the image.
 var version = "dev"
 
-// buildVersion falls back to the version the Go toolchain records: the module version for
-// go install …@v1.2.3, or a pseudo-version from git for a plain go build in a checkout.
+// buildVersion falls back to the module version (go install) or git pseudo-version (go build).
 func buildVersion() string {
 	if version != "dev" {
 		return version
@@ -108,8 +107,8 @@ func run(args []string) error {
 		fmt.Println(buildVersion())
 		return nil
 	}
-	// A missing default config file is fine when everything comes from the environment; a path
-	// given explicitly must exist.
+	// A missing default config file is ignored if environment variables suffice, but explicit
+	// paths must exist.
 	path, explicit := *cfgPath, os.Getenv("NTFY_IDP_PUSH_CONFIG") != ""
 	global.Visit(func(f *flag.Flag) { explicit = explicit || f.Name == "c" || f.Name == "config" })
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) && !explicit {
@@ -181,8 +180,7 @@ func open(cfg *config.Config) (*core.Service, func(), error) {
 	return svc, func() { st.Close() }, nil
 }
 
-// backup writes the database copy to path, or to stdout for "-" by way of a temporary file in dir
-// (the state volume in a container, which is writable).
+// backup writes the database copy to path, or stdout for "-" via a temporary file in dir.
 func backup(ctx context.Context, st *store.Store, dir, path string) error {
 	if path != "-" {
 		return st.Backup(ctx, path)
