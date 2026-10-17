@@ -49,8 +49,7 @@ var usernameRe = regexp.MustCompile(`^[-_.+@a-zA-Z0-9]{1,128}$`)
 
 type Service struct {
 	cfg atomic.Pointer[config.Config]
-	// Store remains exported for store-level features: OIDC sessions, backup, and the audit
-	// log.
+	// Store remains exported for store-level features: backup and the audit log.
 	Store *store.Store
 	Log   *slog.Logger
 	ntfy  *ntfy.Client

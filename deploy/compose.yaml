@@ -1,13 +1,16 @@
 # docker compose -f deploy/compose.yaml up -d
-# ./config holds server.yml (from deploy/server.yml) and the TLS certificate and key. It is mounted as a
-# directory, not file by file, so replacing a file (keygen --rotate, certificate renewal) is seen inside
-# the container.
+# ./config holds server.yml (from deploy/server.yml). It is mounted as a directory, not file by file,
+# so replacing a file (keygen --rotate) is seen inside the container.
+#
+# The shim speaks plain HTTP and trusts the identity header from trusted-proxies, so it must only be
+# reachable through the reverse proxy that terminates TLS for duo-hostname and runs Authelia's or
+# authentik's forward-auth. Put the proxy on the `proxy` network and point it at ntfy-idp-push:8080;
+# never publish the port on the host.
 services:
   ntfy-idp-push:
     image: ghcr.io/babraham123/ntfy-idp-push:latest
     restart: unless-stopped
-    ports:
-      - "443:8443"   # IdPs always dial https://<duo-hostname>/
+    networks: [proxy]
     volumes:
       - ./config:/etc/ntfy-idp-push:ro
       - state:/var/lib/ntfy-idp-push
@@ -17,11 +20,9 @@ services:
     environment:
       NTFY_IDP_PUSH_DUO_SECRET_KEY_FILE: /run/secrets/duo_secret_key
       NTFY_IDP_PUSH_NTFY_ADMIN_TOKEN_FILE: /run/secrets/ntfy_admin_token
-      NTFY_IDP_PUSH_OIDC_CLIENT_SECRET_FILE: /run/secrets/oidc_client_secret
     secrets:
       - duo_secret_key
       - ntfy_admin_token
-      - oidc_client_secret
     healthcheck:
       test: ["CMD", "/usr/bin/ntfy-idp-push", "healthcheck"]
       interval: 30s
@@ -32,8 +33,10 @@ secrets:
     file: ./secrets/duo_secret_key
   ntfy_admin_token:
     file: ./secrets/ntfy_admin_token
-  oidc_client_secret:
-    file: ./secrets/oidc_client_secret
+
+networks:
+  proxy:
+    external: true   # the reverse proxy's network; its subnet goes in trusted-proxies
 
 volumes:
   state:

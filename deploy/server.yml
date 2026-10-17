@@ -1,10 +1,11 @@
 # ntfy-idp-push example config. Every key can also be set as NTFY_IDP_PUSH_<KEY>
 # (dashes to underscores; lists comma-separated). SIGHUP reloads per-request settings.
-# Secrets (duo-secret-key, duo-secret-key-previous, ntfy-admin-token, oidc-client-secret) can instead
-# be read from a file: <key>-file here, or NTFY_IDP_PUSH_<KEY>_FILE.
+# Secrets (duo-secret-key, duo-secret-key-previous, ntfy-admin-token) can instead be read from a
+# file: <key>-file here, or NTFY_IDP_PUSH_<KEY>_FILE.
 
-listen-https: ":443"
-# listen-http: ":8080"                 # plain HTTP behind a TLS proxy that preserves Host
+# Plain HTTP. The reverse proxy in front terminates TLS for duo-hostname, preserves Host, and signs
+# users in (forward-auth). Only the proxy may reach this port.
+listen-http: ":8080"
 # public-url: "https://push.example.com"  # default: https://<duo-hostname>
 
 duo-hostname: "push.example.com"        # Authelia duo_api.hostname; also the WebAuthn RP ID
@@ -16,15 +17,12 @@ push-timeout: "60s"
 push-disabled: false                    # kill switch: every preauth/auth answers deny
 duo-key-grace: "1h"                     # previous key accepted this long after keygen --rotate
 
-tls-cert-file: "/etc/ntfy-idp-push/tls.crt"   # reloaded when it changes
-tls-key-file: "/etc/ntfy-idp-push/tls.key"
-
-# The enrollment, provisioning and device pages sign users in through the IdP's OIDC provider
-# (Authelia or authentik). Redirect URI: <public-url>/oidc/callback.
-oidc-issuer: "https://auth.example.com"
-oidc-client-id: "ntfy-idp-push"
-oidc-client-secret: "…"                  # or oidc-client-secret-file
-# trusted-proxies: ["10.0.0.0/8"]        # peers whose X-Forwarded-For is believed for audit IPs and rate limits
+# The enrollment, provisioning and device pages take the signed-in username from identity-header,
+# which the proxy sets after its forward-auth step. The header is believed only from trusted-proxies,
+# so keep that list to the proxy itself: anyone who can reach the port from a trusted address can
+# sign in as anyone.
+trusted-proxies: ["10.0.0.5/32"]
+identity-header: "Remote-User"         # authentik: X-authentik-username; oauth2-proxy: X-Auth-Request-User
 enroll-portal-url: "https://push.example.com/enroll"   # empty: unenrolled users are denied
 
 ntfy-base-url: "https://ntfy.example.com"

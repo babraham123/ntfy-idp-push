@@ -3,12 +3,10 @@ package web
 
 import (
 	"bytes"
-	"context"
 	"embed"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"html/template"
 	"io"
 	"log/slog"
@@ -23,7 +21,6 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/babraham123/ntfy-idp-push/internal/core"
-	"github.com/babraham123/ntfy-idp-push/internal/oidc"
 	"github.com/babraham123/ntfy-idp-push/internal/store"
 )
 
@@ -36,12 +33,13 @@ var tmpl = template.Must(template.New("").Funcs(template.FuncMap{
 
 const maxBody = 64 << 10
 
+// Server serves two kinds of routes. Identity routes (/enroll, /provision, /devices) know the user
+// only from the identity header a trusted proxy sets after its forward-auth step. Token routes
+// (/token/*, /challenge/*) never read it: an enrollment code, result token, verify token, deny token
+// or passkey is their whole credential, so the proxy can let them through unauthenticated.
 type Server struct {
 	svc *core.Service
-	// auth signs users into the self-service pages through the IdP's OIDC provider; there is no
-	// other identity.
-	auth *oidc.Auth
-	log  *slog.Logger
+	log *slog.Logger
 
 	mu       sync.Mutex
 	limiters map[string]*limiterEntry
@@ -52,29 +50,26 @@ type limiterEntry struct {
 	seen time.Time
 }
 
-func New(ctx context.Context, svc *core.Service, log *slog.Logger) (*Server, error) {
-	cfg := svc.Config()
-	a, err := oidc.New(ctx, cfg.OIDCIssuer, cfg.OIDCClientID, cfg.OIDCClientSecret, cfg.PublicURL, svc.Store)
-	if err != nil {
-		return nil, fmt.Errorf("oidc: %w", err)
-	}
-	return &Server{svc: svc, auth: a, log: log, limiters: map[string]*limiterEntry{}}, nil
+func New(svc *core.Service, log *slog.Logger) *Server {
+	return &Server{svc: svc, log: log, limiters: map[string]*limiterEntry{}}
 }
 
 func (s *Server) Register(mux *http.ServeMux) {
-	mux.HandleFunc("GET "+oidc.LoginPath, s.auth.Login)
-	mux.HandleFunc("GET "+oidc.CallbackPath, s.auth.Callback)
 	mux.Handle("GET /static/", http.FileServerFS(assets))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "ok\n") })
 
 	mux.Handle("GET /enroll", s.limit(s.enrollPage))
 	mux.Handle("POST /enroll/begin", s.limit(s.sameOrigin(s.enrollBegin)))
 	mux.Handle("POST /enroll/finish", s.limit(s.sameOrigin(s.enrollFinish)))
-	mux.Handle("GET /enroll/verify/{device}", s.limit(s.verifyPage))
-	mux.Handle("POST /enroll/verify/{device}", s.limit(s.sameOrigin(s.verifyDevice)))
-	mux.Handle("POST /enroll/resend", s.limit(s.sameOrigin(s.enrollResend)))
-	mux.Handle("POST /enroll/password", s.limit(s.sameOrigin(s.enrollPassword)))
-	mux.HandleFunc("GET /enroll/qr", s.enrollQR)
+
+	mux.Handle("GET /token/{code}", s.limit(s.tokenPage))
+	mux.Handle("POST /token/begin", s.limit(s.sameOrigin(s.tokenBegin)))
+	mux.Handle("POST /token/finish", s.limit(s.sameOrigin(s.tokenFinish)))
+	mux.Handle("GET /token/verify/{device}", s.limit(s.verifyPage))
+	mux.Handle("POST /token/verify/{device}", s.limit(s.sameOrigin(s.verifyDevice)))
+	mux.Handle("POST /token/resend", s.limit(s.sameOrigin(s.enrollResend)))
+	mux.Handle("POST /token/password", s.limit(s.sameOrigin(s.enrollPassword)))
+	mux.HandleFunc("GET /token/qr", s.enrollQR)
 
 	mux.Handle("GET /challenge/{id}", s.limit(s.approvePage))
 	mux.Handle("GET /challenge/{id}/options", s.limit(s.assertionOptions))
@@ -146,17 +141,18 @@ func (s *Server) sameOrigin(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// signedIn returns the session's user, or "" and false after sending the browser to sign in (a
-// redirect for page loads, 401 for everything else).
+// signedIn returns the user named by the identity header when a trusted proxy sent it, or "" and
+// false after answering 401. The proxy's forward-auth step signs users in before requests reach
+// the shim, so a request without identity means the proxy is misconfigured, not that the browser
+// should be sent anywhere.
 func (s *Server) signedIn(w http.ResponseWriter, r *http.Request) (string, bool) {
-	if u := s.auth.User(r); u != "" {
-		return u, true
+	cfg := s.svc.Config()
+	if trusted(cfg.TrustedNets, remoteIP(r)) {
+		if u := strings.TrimSpace(r.Header.Get(cfg.IdentityHeader)); u != "" {
+			return u, true
+		}
 	}
-	if r.Method != http.MethodGet {
-		http.Error(w, "sign in required", http.StatusUnauthorized)
-		return "", false
-	}
-	http.Redirect(w, r, oidc.LoginPath+"?next="+url.QueryEscape(r.URL.RequestURI()), http.StatusFound)
+	http.Error(w, "sign in required: no "+cfg.IdentityHeader+" from a trusted proxy", http.StatusUnauthorized)
 	return "", false
 }
 
@@ -230,45 +226,65 @@ func qrDataURL(content string) (template.URL, error) {
 
 // ---- enrollment
 
-// enrollUser resolves the enrolling user from an enrollment code or from the signed-in session.
-func (s *Server) enrollUser(w http.ResponseWriter, r *http.Request, code string) (string, bool) {
-	if code != "" {
-		user, err := s.svc.ResolveEnrollCode(r.Context(), code)
-		if err != nil {
-			s.message(w, http.StatusGone, "Link expired", "This enrollment link is invalid or has expired. Ask for a new one.")
-			return "", false
-		}
-		return user, true
-	}
-	return s.signedIn(w, r)
-}
-
+// enrollPage is the identity route: the proxy signed the user in. Links from before the route
+// split carried the code as ?code=; they are forwarded to /token/{code} for one release.
 func (s *Server) enrollPage(w http.ResponseWriter, r *http.Request) {
-	code := r.URL.Query().Get("code")
-	user, ok := s.enrollUser(w, r, code)
+	if code := r.URL.Query().Get("code"); code != "" {
+		http.Redirect(w, r, "/token/"+url.PathEscape(code), http.StatusFound)
+		return
+	}
+	user, ok := s.signedIn(w, r)
 	if !ok {
 		return
 	}
-	s.render(w, http.StatusOK, "enroll.html", map[string]string{"User": user, "Code": code})
+	s.render(w, http.StatusOK, "enroll.html", map[string]string{"User": user, "Base": "/enroll"})
+}
+
+// tokenPage is the token route: a shim-issued enrollment code is the whole credential.
+func (s *Server) tokenPage(w http.ResponseWriter, r *http.Request) {
+	code := r.PathValue("code")
+	user, err := s.svc.ResolveEnrollCode(r.Context(), code)
+	if err != nil {
+		s.message(w, http.StatusGone, "Link expired", "This enrollment link is invalid or has expired. Ask for a new one.")
+		return
+	}
+	s.render(w, http.StatusOK, "enroll.html", map[string]string{"User": user, "Code": code, "Base": "/token"})
 }
 
 func (s *Server) enrollBegin(w http.ResponseWriter, r *http.Request) {
+	user, ok := s.signedIn(w, r)
+	if !ok {
+		return
+	}
+	var in struct{ Name string }
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxBody)).Decode(&in); err != nil {
+		jsonError(w, http.StatusBadRequest, "bad request")
+		return
+	}
+	s.beginEnrollment(w, r, core.EnrollRequest{Username: user, DeviceName: in.Name})
+}
+
+func (s *Server) tokenBegin(w http.ResponseWriter, r *http.Request) {
 	var in struct{ Name, Code string }
 	if err := json.NewDecoder(io.LimitReader(r.Body, maxBody)).Decode(&in); err != nil {
 		jsonError(w, http.StatusBadRequest, "bad request")
 		return
 	}
-	req := core.EnrollRequest{Code: in.Code, DeviceName: in.Name}
 	if in.Code == "" {
-		user, ok := s.signedIn(w, r)
-		if !ok {
-			return
-		}
-		req.Username = user
+		s.codeExpired(w)
+		return
 	}
+	s.beginEnrollment(w, r, core.EnrollRequest{Code: in.Code, DeviceName: in.Name})
+}
+
+func (s *Server) codeExpired(w http.ResponseWriter) {
+	jsonError(w, http.StatusGone, "This enrollment link is invalid or has expired. Ask for a new one.")
+}
+
+func (s *Server) beginEnrollment(w http.ResponseWriter, r *http.Request, req core.EnrollRequest) {
 	handle, opts, err := s.svc.BeginEnrollment(r.Context(), req)
 	if errors.Is(err, core.ErrInvalidCode) {
-		jsonError(w, http.StatusGone, "This enrollment link is invalid or has expired. Ask for a new one.")
+		s.codeExpired(w)
 		return
 	} else if err != nil {
 		jsonError(w, http.StatusBadRequest, err.Error())
@@ -278,8 +294,22 @@ func (s *Server) enrollBegin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) enrollFinish(w http.ResponseWriter, r *http.Request) {
+	user, ok := s.signedIn(w, r)
+	if !ok {
+		return
+	}
+	s.finishEnrollment(w, r, user)
+}
+
+func (s *Server) tokenFinish(w http.ResponseWriter, r *http.Request) {
+	s.finishEnrollment(w, r, "")
+}
+
+// finishEnrollment completes a ceremony begun on the same kind of route: core refuses one begun
+// with identity when none is presented now.
+func (s *Server) finishEnrollment(w http.ResponseWriter, r *http.Request, signedIn string) {
 	handle := r.URL.Query().Get("token")
-	res, err := s.svc.FinishEnrollment(r.Context(), handle, s.auth.User(r), io.LimitReader(r.Body, maxBody))
+	res, err := s.svc.FinishEnrollment(r.Context(), handle, signedIn, io.LimitReader(r.Body, maxBody))
 	switch {
 	case errors.Is(err, core.ErrIdentityChanged):
 		jsonError(w, http.StatusForbidden, err.Error())
@@ -451,12 +481,12 @@ func (s *Server) fraud(w http.ResponseWriter, r *http.Request) {
 // abuse).
 func (s *Server) enrollQR(w http.ResponseWriter, r *http.Request) {
 	value := r.URL.Query().Get("value")
-	prefix := s.svc.Config().PublicURL + "/enroll?code="
+	prefix := s.svc.Config().PublicURL + "/token/"
 	code := ""
 	if strings.HasPrefix(value, prefix) {
-		code = value[len(prefix):]
+		code, _ = url.PathUnescape(value[len(prefix):])
 	}
-	if code == "" {
+	if code == "" || strings.Contains(code, "/") {
 		http.NotFound(w, r)
 		return
 	}

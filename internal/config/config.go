@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/textproto"
 	"net/url"
 	"os"
 	"reflect"
@@ -34,8 +35,8 @@ func (d *Duration) UnmarshalYAML(n *yaml.Node) error {
 func (d Duration) D() time.Duration { return time.Duration(d) }
 
 type Config struct {
-	ListenHTTPS string `yaml:"listen-https"`
-	// ListenHTTP serves plain HTTP, for running behind a TLS-terminating proxy that preserves Host.
+	// ListenHTTP serves plain HTTP. The shim always sits behind the reverse proxy that terminates
+	// TLS and signs users in, so there is no TLS listener.
 	ListenHTTP string `yaml:"listen-http"`
 	// PublicURL is the origin users reach the shim at; defaults to https://<duo-hostname>.
 	PublicURL string `yaml:"public-url"`
@@ -52,17 +53,12 @@ type Config struct {
 	PushTimeout              Duration `yaml:"push-timeout"`
 	PushDisabled             bool     `yaml:"push-disabled"`
 
-	TLSCertFile string `yaml:"tls-cert-file"`
-	TLSKeyFile  string `yaml:"tls-key-file"`
-
-	// TrustedProxies are the peers whose X-Forwarded-For is believed for client IPs in audit entries
-	// and rate limits. Identity never comes from a proxy header.
-	TrustedProxies       []string `yaml:"trusted-proxies"`
-	OIDCIssuer           string   `yaml:"oidc-issuer"`
-	OIDCClientID         string   `yaml:"oidc-client-id"`
-	OIDCClientSecret     string   `yaml:"oidc-client-secret"`
-	OIDCClientSecretFile string   `yaml:"oidc-client-secret-file"`
-	EnrollPortalURL      string   `yaml:"enroll-portal-url"`
+	// TrustedProxies are the peers whose IdentityHeader and X-Forwarded-For are believed. Anyone
+	// who can reach the shim from one of them can sign in as anyone, so keep it to the proxy.
+	TrustedProxies []string `yaml:"trusted-proxies"`
+	// IdentityHeader carries the signed-in username, set by the proxy's forward-auth step.
+	IdentityHeader  string `yaml:"identity-header"`
+	EnrollPortalURL string `yaml:"enroll-portal-url"`
 
 	NtfyBaseURL        string   `yaml:"ntfy-base-url"`
 	NtfyAdminToken     string   `yaml:"ntfy-admin-token"`
@@ -88,7 +84,8 @@ type Config struct {
 
 func defaults() *Config {
 	return &Config{
-		ListenHTTPS:     ":443",
+		ListenHTTP:      ":8080",
+		IdentityHeader:  "Remote-User",
 		DuoMaxSkew:      Duration(300 * time.Second),
 		PushTimeout:     Duration(60 * time.Second),
 		DuoKeyGrace:     Duration(time.Hour),
@@ -204,18 +201,15 @@ func (c *Config) Validate() error {
 	}
 	c.NtfyBaseURL = strings.TrimRight(c.NtfyBaseURL, "/")
 
-	if c.ListenHTTPS != "" {
-		req("tls-cert-file", c.TLSCertFile)
-		req("tls-key-file", c.TLSKeyFile)
-	}
-	if c.ListenHTTPS == "" && c.ListenHTTP == "" {
-		errs = append(errs, errors.New("one of listen-https or listen-http is required"))
-	}
+	req("listen-http", c.ListenHTTP)
 
-	// The self-service pages sign in through the IdP's OIDC provider; there is no other identity.
-	req("oidc-issuer", c.OIDCIssuer)
-	req("oidc-client-id", c.OIDCClientID)
-	req("oidc-client-secret", c.OIDCClientSecret)
+	// The self-service pages know the user only from the proxy's header, so without a trusted
+	// proxy nobody can sign in.
+	req("identity-header", c.IdentityHeader)
+	c.IdentityHeader = textproto.CanonicalMIMEHeaderKey(strings.TrimSpace(c.IdentityHeader))
+	if len(c.TrustedProxies) == 0 {
+		errs = append(errs, errors.New("trusted-proxies is required: the proxy that sets "+c.IdentityHeader))
+	}
 	c.TrustedNets = nil
 	for _, p := range c.TrustedProxies {
 		if !strings.Contains(p, "/") {
@@ -273,7 +267,6 @@ func (c *Config) secretFiles() []secretFile {
 	return []secretFile{
 		{"duo-secret-key", &c.DuoSecretKey, &c.DuoSecretKeyFile},
 		{"duo-secret-key-previous", &c.DuoSecretKeyPrevious, &c.DuoSecretKeyPreviousFile},
-		{"oidc-client-secret", &c.OIDCClientSecret, &c.OIDCClientSecretFile},
 		{"ntfy-admin-token", &c.NtfyAdminToken, &c.NtfyAdminTokenFile},
 	}
 }

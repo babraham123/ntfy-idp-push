@@ -3,11 +3,13 @@
 ntfy-idp-push implements the Duo **Auth API**, allowing identity providers (Authelia `duo_api`, authentik's Duo stage) to deliver mobile push via ntfy. ntfy acts only as the transport layer; sign-in approval requires a signature from a device-bound passkey.
 
 ```
-browser ──1FA──▶ IdP ──signed Duo API──▶ ntfy-idp-push ──publish──▶ ntfy ──▶ phone (ntfy app)
-                  ▲                            ▲                                  │
-                  │        allow/deny          │  WebAuthn assertion (browser)    │ tap Approve
-                  └────────────────────────────┴──────────────────────────────────┘
+browser ──1FA──▶ IdP ──signed Duo API──▶ proxy ──▶ ntfy-idp-push ──publish──▶ ntfy ──▶ phone (ntfy app)
+                  ▲                                     ▲                                  │
+                  │        allow/deny                   │  WebAuthn assertion (browser)    │ tap Approve
+                  └─────────────────────────────────────┴──────────────────────────────────┘
 ```
+
+The shim sits behind the reverse proxy that fronts the IdP: the proxy terminates TLS for `duo-hostname`, forwards plain HTTP, and signs users into the self-service pages with the IdP's forward-auth.
 
 The server also provisions ntfy accounts (`/provision`, `user provision`) without a push device, serving as a self-service ntfy onboarding tool behind an IdP.
 
@@ -28,13 +30,11 @@ internal/config/     YAML + NTFY_IDP_PUSH_* env + <key>-file secrets; validation
 internal/duoapi/     Duo Auth API: signature verification (v2/v5), replay guard, preauth/auth/enroll
 internal/core/       provisioning, enrollment, login (eligibility, challenges), revocation, purge, startup checks
 internal/webauthn/   passkey registration/assertion over stored passkeys (wraps go-webauthn); synced-passkey (BE flag) policy
-internal/web/        enrollment, approval, provisioning and device pages; identity (OIDC session)
-internal/oidc/       OIDC client (code + PKCE), session cookie
+internal/web/        enrollment, approval, provisioning and device pages; identity from the proxy's header
 internal/ntfy/       ntfy admin, publish and token client
 internal/store/      SQLite (modernc.org/sqlite, pure Go), migrations
-internal/tlsconfig/  certificate/key from files, reloaded on change
 internal/token/      random secrets and the hashes stored in their place
-internal/testutil/   integration harness: fake ntfy, fake OIDC provider, software authenticator
+internal/testutil/   integration harness: fake ntfy, software authenticator, test client as the proxy
 ```
 
 ## Data model
@@ -47,7 +47,6 @@ passkeys      (cred_id, device_id, credential_json, aaguid, sign_count, created_
 challenges    (id, username, device_id, nonce, ipaddr, target_url, display_username,
                state pending|allow|deny|fraud|timeout, deny_token_hash, created_at, expires_at, decided_at)
 enroll_codes  (code_hash, username, device_id, expires_at, used_at)
-oidc_sessions (id, username, expires_at)
 audit         (ts, username, event, detail_json)
 ```
 
@@ -77,7 +76,7 @@ Request validation order:
 | `GET /auth/v2/check` | signed; `{"time":…}` |
 | `POST /auth/v2/preauth` | unknown user or no verified device → `enroll` with `enroll_portal_url` (or `deny` if unset); otherwise `auth` with one `phone` device per enrolled phone, capability `push` |
 | `POST /auth/v2/auth` | user by `username` or `user_id`; `factor` must be `push` or `auto`; `device=auto` picks the most recently used device; publishes the push and blocks until decided or `push-timeout` |
-| `POST /auth/v2/enroll` | IdP-driven enrollment: returns `user_id`, `activation_code`, `activation_url`, `activation_barcode` (`/enroll/qr`), `expiration` |
+| `POST /auth/v2/enroll` | IdP-driven enrollment: returns `user_id`, `activation_code`, `activation_url`, `activation_barcode` (`/token/qr`), `expiration` |
 | `POST /auth/v2/enroll_status` | `waiting` → `success` once the device is verified; `invalid` for an unknown, expired or revoked enrollment |
 
 `/auth/v2/auth` blocks up to `push-timeout`, extending its write deadline. Reloading `push-timeout` applies to subsequent requests.
@@ -109,13 +108,13 @@ Challenges are single-use; decisions or expiries return 410 for `/challenge/<id>
 
 ## Enrollment
 
-Entry points: `enroll-portal-url` (via preauth) to `/enroll` behind the IdP; or `enroll-link <user>`, generating a single-use `/enroll?code=…` (valid 5 minutes) to bootstrap users lacking a second factor.
+Entry points: `enroll-portal-url` (via preauth) to `/enroll` behind the proxy's forward-auth; or `enroll-link <user>`, generating a single-use `/token/<code>` link (valid 5 minutes) to bootstrap users lacking a second factor. Both render the same page; it posts to `/enroll/begin` and `/enroll/finish` (identity routes) or `/token/begin` and `/token/finish` (code routes). A ceremony begun on one family cannot be finished on the other.
 
 1. **Passkey**: `navigator.credentials.create()` requires a platform authenticator, user verification, and direct attestation. Synced passkeys (BE flag) are rejected unless `webauthn-allow-synced`.
 2. **ntfy account**: Provisioned as described below.
 3. **Topic grant**: `PUT /v1/users/access` grants read-only access to the device's topic.
 4. **Link**: Generates an ntfy enrollment code (ntfy#597, `POST /v1/users/token/enroll`) formatted as `ntfy://<host>/<topic>?user=<u>&code=<c>` (tap link and QR). The UI also offers "Set an ntfy password" and "Resend setup push".
-5. **Test push**: Sends a "Finish setup" action to `/enroll/verify/<device>` to activate the device. Unverified devices are hidden from preauth and purged after 24 hours.
+5. **Test push**: Sends a "Finish setup" action to `/token/verify/<device>` to activate the device. Unverified devices are hidden from preauth and purged after 24 hours.
 
 Execution order: verify attestation (read-only), claim the code and insert the unverified device/passkey in one transaction, then execute remote steps. Failed remote steps rollback the device and release the code for retry. Crashes leave unverified devices for the 24-hour purge.
 
@@ -125,12 +124,12 @@ Execution order: verify attestation (read-only), claim the code and insert the u
 
 `/provision` mints an ntfy enrollment code and renders based on User-Agent: phones get app install links and one deep link per `default-topics` entry; desktops get a QR and web-app links to `<ntfy-base-url>/account/token/redeem#code=…&subscribe=…`. Reloading supersedes the previous code.
 
-Identity for `/enroll`, `/provision`, `/devices`: The shim authenticates users via the IdP's OIDC provider (code + PKCE, `preferred_username`) and issues a 12-hour session cookie. Proxy headers are ignored. Duo API routes, `/challenge/*`, and token-authenticated enrollment routes require no identity. 
-IdPs must require a second factor for the shim's OIDC client to prevent attackers from enrolling devices with just a stolen password. Users lacking a second factor enroll via: an existing IdP second-factor (e.g., TOTP), an admin `enroll-link`, or authentik's IdP-driven enrollment (bypassing the portal session).
+Identity for `/enroll`, `/provision`, `/devices`: the proxy's forward-auth step signs the user in and sets `identity-header` (default `Remote-User`); the shim believes it only when the request arrives from `trusted-proxies`, and answers 401 otherwise. There is no session, cookie or login page in the shim. The header is the whole login, so the proxy must overwrite or strip a client-sent copy on every route and the shim must be reachable only through it. `/token/*`, `/challenge/*` and the Duo API routes never read the header; their code, token, passkey or signature is the whole credential, which is what lets the proxy bypass them.
+IdPs must require a second factor on the identity routes to prevent attackers from enrolling devices with just a stolen password. Users lacking a second factor enroll via: an existing IdP second-factor (e.g., TOTP), an admin `enroll-link`, or authentik's IdP-driven enrollment (bypassing the portal session).
 
 ### IdP-driven enrollment
 
-authentik calls `enroll`, displays `activation_barcode` (`/enroll/qr?value=<activation url>`, generated only for shim-issued codes), and polls `enroll_status`. Phones scan the code and enroll via `/enroll?code=…` without an IdP session; the code serves as proof. Used codes persist for the unverified device's lifetime to accommodate IdP polling.
+authentik calls `enroll`, displays `activation_barcode` (`/token/qr?value=<activation url>`, generated only for shim-issued codes), and polls `enroll_status`. Phones scan the code and enroll via `/token/<code>` without an IdP session; the code serves as proof. Used codes persist for the unverified device's lifetime to accommodate IdP polling.
 
 ## Revocation
 
@@ -152,15 +151,15 @@ All actions are audited (`audit`).
 
 ## Configuration
 
-See [`deploy/server.yml`](deploy/server.yml). Configuration mirrors ntfy's `server.yml`. Set keys via `NTFY_IDP_PUSH_<KEY>`. Secrets (`duo-secret-key`, `duo-secret-key-previous`, `ntfy-admin-token`, `oidc-client-secret`) support `<key>-file` or `NTFY_IDP_PUSH_<KEY>_FILE`. `SIGHUP` reloads request-scoped config (keys, kill switch, `enroll-access`, `push-timeout`, secret files). Listeners, TLS files, database, and WebAuthn settings require a restart.
+See [`deploy/server.yml`](deploy/server.yml). Configuration mirrors ntfy's `server.yml`. Set keys via `NTFY_IDP_PUSH_<KEY>`. Secrets (`duo-secret-key`, `duo-secret-key-previous`, `ntfy-admin-token`) support `<key>-file` or `NTFY_IDP_PUSH_<KEY>_FILE`. `SIGHUP` reloads request-scoped config (keys, kill switch, `enroll-access`, `push-timeout`, `trusted-proxies`, `identity-header`, secret files). The listener, database, and WebAuthn settings require a restart.
 
 `enroll-access` rules use `<topic-pattern>:<access>` matching ntfy's syntax, `*` wildcards, and `${user}` expansion. Validation rejects patterns matching the push topic prefix, `everyone`/`*`, duplicate pattern rules, and `default-topics` unreadable under ntfy's applied rules.
 
 Startup checks (fail closed): Valid ntfy admin token; `GET /v1/users` succeeds under the 1 MiB response cap; anonymous push topic reads are refused; the shim can publish to push topics.
 
-## TLS
+## Reverse proxy
 
-Serve certificates via `tls-cert-file`/`tls-key-file` (auto-reloaded on change), or use plain HTTP behind a `Host`-preserving TLS proxy (`listen-http`). Since Duo clients pin Duo's CA bundle, the IdP must trust the shim's certificate chain or disable pinning.
+The shim serves plain HTTP (`listen-http`) and has no TLS listener: it cannot be used without the proxy anyway, since the proxy is what signs users in. The proxy holds the certificate for `duo-hostname`, from any publicly trusted issuer, and must preserve `Host`, which Duo clients sign. The IdP's Duo client must not pin Duo's CA bundle (Authelia's does until it carries the change that skips pinning for non-Duo hostnames). Routes split into two families so the proxy's access rules can be written by prefix: identity routes (`/enroll`, `/provision`, `/devices`) behind forward-auth, everything else (`/token/`, `/challenge/`, `/auth/v2/`, `/static/`) bypassed.
 
 ## ntfy prerequisites
 
@@ -177,7 +176,7 @@ Optional upstream ntfy features utilized (degrades gracefully without):
 
 ## Testing
 
-Integration tests execute `duo_api_golang` (v2 form and v5 JSON signing) against the server using a fake ntfy (v2.30 error contract), fake OIDC provider, and software WebAuthn authenticator. They cover enrollment, push, passkey approval, deny, fraud, timeout, revocation recovery, provisioning, OIDC sign-in, and config loading. Forms simulate browser submissions, matching referrer policy Origins.
+Integration tests execute `duo_api_golang` (v2 form and v5 JSON signing) against the server using a fake ntfy (v2.30 error contract) and a software WebAuthn authenticator; the test client connects from the configured trusted proxy address and sets the identity header as forward-auth would. They cover enrollment, push, passkey approval, deny, fraud, timeout, revocation recovery, provisioning, proxy identity (untrusted peers, forged headers on bypassed routes), and config loading. Forms simulate browser submissions, matching referrer policy Origins.
 Live tests for `internal/ntfy` require a real ntfy server via `NTFY_IDP_PUSH_TEST_NTFY_URL`/`_TOKEN`.
 
 ## Other IdPs

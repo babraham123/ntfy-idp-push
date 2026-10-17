@@ -6,16 +6,14 @@ It also functions as a generic **ntfy provisioning tool**. Without Duo integrati
 
 ## Run
 
-Deploy with Docker Compose using [`deploy/compose.yaml`](deploy/compose.yaml):
+The shim runs behind the reverse proxy that already fronts your IdP. The proxy terminates TLS for `duo-hostname`, forwards requests over plain HTTP, and signs users into the self-service pages with the IdP's forward-auth (Authelia `access_control`, authentik proxy provider). Deploy with Docker Compose using [`deploy/compose.yaml`](deploy/compose.yaml):
 
 ```sh
 ntfy-idp-push keygen                 # integration + secret key for the IdP
 mkdir -p deploy/config deploy/secrets
 cp deploy/server.yml deploy/config/server.yml     # fill in; leave the secrets out
-cp tls.crt tls.key deploy/config/
 printf '%s' '<secret key>' > deploy/secrets/duo_secret_key
 printf '%s' 'tk_…' > deploy/secrets/ntfy_admin_token
-printf '%s' '<client secret>' > deploy/secrets/oidc_client_secret
 docker compose -f deploy/compose.yaml up -d
 ```
 
@@ -24,26 +22,26 @@ services:
   ntfy-idp-push:
     image: ghcr.io/babraham123/ntfy-idp-push:latest
     restart: unless-stopped
-    ports: ["443:8443"]
+    networks: [proxy]                      # the proxy's network; never publish port 8080 on the host
     volumes:
       - ./config:/etc/ntfy-idp-push:ro     # a directory, so replaced files are seen
       - state:/var/lib/ntfy-idp-push
     environment:                           # where the app reads each mounted secret
       NTFY_IDP_PUSH_DUO_SECRET_KEY_FILE: /run/secrets/duo_secret_key
       NTFY_IDP_PUSH_NTFY_ADMIN_TOKEN_FILE: /run/secrets/ntfy_admin_token
-      NTFY_IDP_PUSH_OIDC_CLIENT_SECRET_FILE: /run/secrets/oidc_client_secret
-    secrets: [duo_secret_key, ntfy_admin_token, oidc_client_secret]   # mounts them at /run/secrets/<name>
+    secrets: [duo_secret_key, ntfy_admin_token]   # mounts them at /run/secrets/<name>
 secrets:                                   # where Compose reads each secret on the host
   duo_secret_key: {file: ./secrets/duo_secret_key}
   ntfy_admin_token: {file: ./secrets/ntfy_admin_token}
-  oidc_client_secret: {file: ./secrets/oidc_client_secret}
+networks:
+  proxy: {external: true}
 volumes:
   state:
 ```
 
 Build the local image with `make image`. Execute CLI commands inside the container using `docker compose -f deploy/compose.yaml exec ntfy-idp-push ntfy-idp-push <command>`.
 
-**Configuration:** Set keys from [`deploy/server.yml`](deploy/server.yml) via environment variables as `NTFY_IDP_PUSH_<KEY>`. Load secrets (`duo-secret-key`, `duo-secret-key-previous`, `ntfy-admin-token`, `oidc-client-secret`) from files using `<key>-file` or `NTFY_IDP_PUSH_<KEY>_FILE` (ideal for Docker secrets or systemd credentials). Reload per-request settings (`push-disabled`, keys, secret files, `enroll-access`, `push-timeout`) with `SIGHUP` (`docker compose kill -s HUP`).
+**Configuration:** Set keys from [`deploy/server.yml`](deploy/server.yml) via environment variables as `NTFY_IDP_PUSH_<KEY>`. Load secrets (`duo-secret-key`, `duo-secret-key-previous`, `ntfy-admin-token`) from files using `<key>-file` or `NTFY_IDP_PUSH_<KEY>_FILE` (ideal for Docker secrets or systemd credentials). Reload per-request settings (`push-disabled`, keys, secret files, `enroll-access`, `push-timeout`, `trusted-proxies`, `identity-header`) with `SIGHUP` (`docker compose kill -s HUP`).
 
 ntfy prerequisites (`server.yml`):
 
@@ -52,6 +50,27 @@ auth-default-access: deny-all
 auth-users: ["idp-push:<bcrypt>:admin"]
 auth-tokens: ["idp-push:tk_…:ntfy-idp-push"]
 ```
+
+## Reverse proxy and sign-in
+
+> **Warning: the identity header is the whole login.** The shim takes the signed-in username from `identity-header` (default `Remote-User`) on any request that arrives from `trusted-proxies`. It has no other way to tell who is asking. Any gap lets anyone sign in as anyone, so:
+>
+> - The proxy must **overwrite or strip** a client-sent `Remote-User` on **every** route, bypassed ones included. Forward-auth middlewares that copy the IdP's response headers onto the upstream request do this for protected routes; check what your proxy does on bypassed ones.
+> - Port 8080 must be reachable **only through the proxy**: no host port, no other containers on that network.
+> - `trusted-proxies` must be **as narrow as possible**: the proxy's address, not its whole subnet when you can avoid it.
+
+Supported proxies, each with the directive that sets the header:
+
+| Proxy | Directive |
+|---|---|
+| Traefik | `forwardAuth` middleware with `authResponseHeaders: [Remote-User]`; Traefik replaces the client's header with the IdP's |
+| Caddy | `forward_auth` with `copy_headers Remote-User` |
+| nginx | `auth_request` plus `auth_request_set $user $upstream_http_remote_user;` and `proxy_set_header Remote-User $user;` |
+| HAProxy | Authelia's documented Lua integration (`auth-request.lua`), which sets `Remote-User` from the IdP's response |
+
+Authelia's [proxy integration docs](https://www.authelia.com/integration/proxies/introduction/) have complete examples for each. authentik's proxy provider sends `X-authentik-username`; oauth2-proxy sends `X-Auth-Request-User`. Set `identity-header` to match.
+
+The proxy holds the TLS certificate for `duo-hostname`; any publicly trusted issuer (Let's Encrypt included) works. One prerequisite: the IdP's Duo client must not pin Duo's CA bundle, or its calls fail with an x509 error. Authelia's does until it carries the change that skips pinning for non-Duo hostnames.
 
 Authelia:
 
@@ -62,25 +81,20 @@ duo_api:
   secret_key: …
   enable_self_enrollment: true
 
-identity_providers:
-  oidc:
-    clients:
-      - client_id: ntfy-idp-push
-        client_secret: $pbkdf2-sha512$…         # authelia crypto hash generate; plaintext in oidc-client-secret
-        authorization_policy: two_factor        # a stolen password alone must not enroll a phone
-        redirect_uris: [https://push.example.com/oidc/callback]   # <public-url>/oidc/callback
-        scopes: [openid, profile]               # profile carries preferred_username
-        require_pkce: true
-        pkce_challenge_method: S256
+# Rules match in order: the bypass rule must come first. Each bypassed route checks its own code,
+# token, passkey or signature; the two_factor rule protects the pages that trust Remote-User.
+access_control:
+  rules:
+    - domain: push.example.com
+      resources: ['^/token/', '^/challenge/', '^/auth/v2/', '^/static/']
+      policy: bypass
+    - domain: push.example.com
+      policy: two_factor                    # a stolen password alone must not enroll a phone
 ```
 
 **First enrollment:** Users must register another second factor in Authelia (TOTP or browser passkey) to pass the `two_factor` policy before enrolling their phone at `/enroll`. Admins can bypass this with a single-use link via `enroll-link <user>`. authentik uses its own Duo stage (`/auth/v2/enroll`).
 
 Startup fails closed if the ntfy token lacks admin rights, anonymous reads of push topics are allowed, or the ntfy user list exceeds the client's 1 MiB response limit.
-
-## TLS
-
-Set `tls-cert-file` and `tls-key-file` (reloaded automatically on change). Alternatively, use `listen-http` to terminate TLS at a proxy preserving `Host`. Duo clients pin Duo's CA bundle; ensure the IdP trusts your certificate chain or disable pinning.
 
 ## Backup
 
@@ -99,7 +113,7 @@ ntfy-idp-push [-c config.yml] <command>
 
 Server
   serve                                      run the server
-  healthcheck [url]                          exit 0 if /healthz answers (default https://127.0.0.1:8443/healthz)
+  healthcheck [url]                          exit 0 if /healthz answers (default http://127.0.0.1:8080/healthz)
   backup <path>|-                            consistent database copy, safe while serving
   keygen [--rotate]                          new integration/secret keys, or rotate the secret in the config
   version
@@ -122,25 +136,25 @@ Devices
 ## Routes
 
 **Access Levels:**
-*   **IdP:** Requires an OIDC session; redirects to `/oidc/login`.
-*   **Public:** Must be reachable by user devices. Each route independently validates its code, token, or passkey.
+*   **IdP:** Behind the proxy's forward-auth; the shim reads the user from `identity-header` and answers 401 without it.
+*   **Public:** Bypassed at the proxy and reachable by user devices. Each route independently validates its code, token, or passkey and never reads the identity header.
 *   **Internal:** Called only by the IdP server or container healthcheck.
-
-No proxy bypassing or protection is required.
 
 | Path | Access | Purpose |
 |---|---|---|
+| `/enroll`<br>`/enroll/begin`<br>`/enroll/finish` | IdP | register a passkey, get the ntfy link |
 | `/provision`<br>`/provision/password`<br>`/devices`<br>`/devices/<id>/revoke` | IdP | ntfy account setup and manual sign-in; device list and revoke |
-| `/enroll`<br>`/enroll/begin`<br>`/enroll/finish` | Public with `?code=`, else IdP | register a passkey, get the ntfy link |
-| `/enroll/resend`<br>`/enroll/password` | Public (result-page token) | resend the setup push; set an ntfy password for apps without one-tap sign-in |
-| `/enroll/verify/<device>` | Public (token in the setup push) | activate the device |
-| `/enroll/qr` | Public (shim-issued codes only) | QR for an enrollment URL, shown by the IdP |
+| `/token/<code>`<br>`/token/begin`<br>`/token/finish` | Public (enrollment code) | enroll from an `enroll-link` or authentik activation link |
+| `/token/resend`<br>`/token/password` | Public (result-page token) | resend the setup push; set an ntfy password for apps without one-tap sign-in |
+| `/token/verify/<device>` | Public (token in the setup push) | activate the device |
+| `/token/qr` | Public (shim-issued codes only) | QR for an enrollment URL, shown by the IdP |
 | `/challenge/<id>`<br>`/challenge/<id>/options`<br>`/challenge/<id>/assert`<br>`/challenge/<id>/fraud` | Public (passkey) | approve a sign-in, or report fraud |
 | `/challenge/<id>/deny` | Public (deny token) | the ntfy app's Deny action |
-| `/oidc/login`<br>`/oidc/callback` | Public | sign in to the IdP pages |
 | `/static/` | Public | page assets |
-| `/auth/v2/ping`<br>`/auth/v2/check`<br>`/auth/v2/preauth`<br>`/auth/v2/auth`<br>`/auth/v2/enroll`<br>`/auth/v2/enroll_status` | Internal (IdP server; HMAC-signed except `ping`) | Duo Auth API; see [TLS](#tls) for certificate pinning |
+| `/auth/v2/ping`<br>`/auth/v2/check`<br>`/auth/v2/preauth`<br>`/auth/v2/auth`<br>`/auth/v2/enroll`<br>`/auth/v2/enroll_status` | Internal (IdP server; HMAC-signed except `ping`) | Duo Auth API |
 | `/healthz` | Internal | health check |
+
+`/enroll?code=…` links from earlier releases redirect to `/token/<code>` for one release.
 
 ## Releases
 
@@ -155,4 +169,4 @@ make test   # go test -race ./...
 make lint   # gofmt, go vet, staticcheck, govulncheck; CI runs both on every PR
 ```
 
-Tests execute the real `duo_api_golang` client (v2 form, v5 JSON signing) against the server using a fake ntfy, fake OIDC provider, and software WebAuthn authenticator. They cover enrollment, push, passkey approval, deny, fraud, timeout, revocation, and provisioning.
+Tests execute the real `duo_api_golang` client (v2 form, v5 JSON signing) against the server using a fake ntfy and a software WebAuthn authenticator, with the test client standing in for the proxy's forward-auth. They cover enrollment, push, passkey approval, deny, fraud, timeout, revocation, provisioning, and proxy identity.

@@ -514,22 +514,6 @@ func TestUnverifiedDeviceHidden(t *testing.T) {
 	}
 }
 
-// The self-service pages know a user only from the shim's own OIDC session. A proxy header names
-// nobody.
-func TestPagesRequireSignIn(t *testing.T) {
-	h := testutil.NewHarness(t, nil)
-	for name, hdr := range map[string]map[string]string{"anonymous": nil, "Remote-User header": {"Remote-User": "alice"}} {
-		resp, _ := h.Do(t, testutil.Request{Method: "GET", Path: "/devices", Header: hdr})
-		if resp.StatusCode != 302 || resp.Header.Get("Location") != "/oidc/login?next=%2Fdevices" {
-			t.Fatalf("%s: %d %s", name, resp.StatusCode, resp.Header.Get("Location"))
-		}
-		resp, _ = h.Do(t, testutil.Request{Method: "POST", Path: "/devices/x/revoke", Header: hdr})
-		if resp.StatusCode != 401 {
-			t.Fatalf("%s POST: %d", name, resp.StatusCode)
-		}
-	}
-}
-
 func TestProvision(t *testing.T) {
 	h := testutil.NewHarness(t, nil)
 	resp, page := h.Do(t, testutil.Request{Method: "GET", Path: "/provision", User: "dana",
@@ -630,7 +614,7 @@ func TestEnrollLinkSingleUse(t *testing.T) {
 	}
 	a := testutil.NewAuthenticator(t, testutil.PublicURL)
 	token, opts, _ := h.BeginEnroll(t, "", code, "Phone")
-	resp, _ = h.Do(t, testutil.Request{Method: "POST", Path: "/enroll/finish?token=" + url.QueryEscape(token), Body: a.Create(t, opts)})
+	resp, _ = h.Do(t, testutil.Request{Method: "POST", Path: "/token/finish?token=" + url.QueryEscape(token), Body: a.Create(t, opts)})
 	if resp.StatusCode != 200 {
 		t.Fatalf("finish: %d", resp.StatusCode)
 	}
@@ -1087,28 +1071,28 @@ func TestEnrollmentResultResendAndManualSignIn(t *testing.T) {
 
 	// Manual sign-in for apps that ignore the code: a fresh ntfy password, shown once.
 	before := h.Ntfy.Password("alice")
-	resp, b := h.Do(t, testutil.Request{Method: "POST", Path: "/enroll/password", Body: []byte(`{"token":"` + e.ResultToken + `"}`)})
+	resp, b := h.Do(t, testutil.Request{Method: "POST", Path: "/token/password", Body: []byte(`{"token":"` + e.ResultToken + `"}`)})
 	var pw struct{ Username, Password string }
 	_ = json.Unmarshal(b, &pw)
 	if resp.StatusCode != 200 || pw.Username != "alice" || pw.Password == "" || pw.Password == before || h.Ntfy.Password("alice") != pw.Password {
 		t.Fatalf("manual password: %d %s", resp.StatusCode, b)
 	}
-	resp, _ = h.Do(t, testutil.Request{Method: "POST", Path: "/enroll/password", Body: []byte(`{"token":"forged"}`)})
+	resp, _ = h.Do(t, testutil.Request{Method: "POST", Path: "/token/password", Body: []byte(`{"token":"forged"}`)})
 	if resp.StatusCode != 410 {
 		t.Fatalf("forged result token: %d", resp.StatusCode)
 	}
 
 	// Resending replaces the setup link: the new one activates, the old one no longer does.
-	resp, _ = h.Do(t, testutil.Request{Method: "POST", Path: "/enroll/resend", Body: []byte(`{"token":"` + e.ResultToken + `"}`)})
+	resp, _ = h.Do(t, testutil.Request{Method: "POST", Path: "/token/resend", Body: []byte(`{"token":"` + e.ResultToken + `"}`)})
 	if resp.StatusCode != 200 {
 		t.Fatalf("resend: %d", resp.StatusCode)
 	}
 	second := h.Ntfy.NextPublish(t)
-	if resp, _ := h.SubmitForm(t, testutil.LocalPath(t, first.Click), "", "/enroll/verify/", nil); resp.StatusCode != 410 {
+	if resp, _ := h.SubmitForm(t, testutil.LocalPath(t, first.Click), "", "/token/verify/", nil); resp.StatusCode != 410 {
 		t.Fatalf("superseded setup link: %d", resp.StatusCode)
 	}
 	h.VerifyFromPush(t, second)
-	resp, _ = h.Do(t, testutil.Request{Method: "POST", Path: "/enroll/resend", Body: []byte(`{"token":"` + e.ResultToken + `"}`)})
+	resp, _ = h.Do(t, testutil.Request{Method: "POST", Path: "/token/resend", Body: []byte(`{"token":"` + e.ResultToken + `"}`)})
 	if resp.StatusCode != 410 {
 		t.Fatalf("resend after setup: %d", resp.StatusCode)
 	}
@@ -1126,11 +1110,11 @@ func TestEnrollmentThroughCore(t *testing.T) {
 	h := testutil.NewHarness(t, nil)
 	a := testutil.NewAuthenticator(t, testutil.PublicURL)
 
-	handle, opts, err := h.Svc.BeginEnrollment(ctx, core.EnrollRequest{Username: "alice", DeviceName: "  Pixel 9 "})
+	handle, _, err := h.Svc.BeginEnrollment(ctx, core.EnrollRequest{Username: "alice", DeviceName: "  Pixel 9 "})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Without a code, the session finishing the ceremony must belong to the user who began it.
+	// Without a code, the identity finishing the ceremony must be the user who began it.
 	if _, err := h.Svc.FinishEnrollment(ctx, handle, "mallory", strings.NewReader("")); !errors.Is(err, core.ErrIdentityChanged) {
 		t.Fatalf("finish as another user: %v", err)
 	}
@@ -1139,7 +1123,7 @@ func TestEnrollmentThroughCore(t *testing.T) {
 		t.Fatalf("reused handle: %v", err)
 	}
 
-	handle, opts, err = h.Svc.BeginEnrollment(ctx, core.EnrollRequest{Username: "alice", DeviceName: "  Pixel 9 "})
+	handle, opts, err := h.Svc.BeginEnrollment(ctx, core.EnrollRequest{Username: "alice", DeviceName: "  Pixel 9 "})
 	if err != nil {
 		t.Fatal(err)
 	}

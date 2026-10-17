@@ -68,11 +68,6 @@ var migrations = []string{
 		expires_at INTEGER NOT NULL,
 		used_at    INTEGER
 	);
-	CREATE TABLE oidc_sessions (
-		id         TEXT PRIMARY KEY,
-		username   TEXT NOT NULL,
-		expires_at INTEGER NOT NULL
-	);
 	CREATE TABLE audit (
 		ts          INTEGER NOT NULL,
 		username    TEXT NOT NULL,
@@ -89,6 +84,9 @@ var migrations = []string{
 	// Set for pending ntfy resets to ensure completion via purge job (even if device rows are
 	// deleted).
 	`ALTER TABLE users ADD COLUMN ntfy_reset_pending INTEGER NOT NULL DEFAULT 0;`,
+	// Sign-in moved to the proxy's forward-auth step; databases from the OIDC releases still carry
+	// the session table.
+	`DROP TABLE IF EXISTS oidc_sessions;`,
 }
 
 func Open(path string) (*Store, error) {
@@ -218,7 +216,6 @@ func (s *Store) Purge(ctx context.Context, now time.Time, unverifiedTTL, challen
 	}{
 		{`DELETE FROM challenges WHERE created_at < ?`, []any{unix(now.Add(-challengeTTL))}},
 		{`DELETE FROM enroll_codes WHERE (used_at IS NULL AND expires_at < ?) OR used_at < ?`, []any{unix(now), unix(now.Add(-unverifiedTTL))}},
-		{`DELETE FROM oidc_sessions WHERE expires_at < ?`, []any{unix(now)}},
 	} {
 		if _, err := s.db.ExecContext(ctx, q.sql, q.args...); err != nil {
 			return err

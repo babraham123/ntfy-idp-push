@@ -13,7 +13,6 @@ import (
 
 	"github.com/babraham123/ntfy-idp-push/internal/config"
 	"github.com/babraham123/ntfy-idp-push/internal/duoapi"
-	"github.com/babraham123/ntfy-idp-push/internal/tlsconfig"
 	"github.com/babraham123/ntfy-idp-push/internal/web"
 )
 
@@ -34,45 +33,24 @@ func serve(cfg *config.Config, cfgPath string) error {
 		return fmt.Errorf("startup check: %w", err)
 	}
 
-	pages, err := web.New(ctx, svc, log)
-	if err != nil {
-		return err
-	}
 	mux := http.NewServeMux()
 	duoapi.New(svc, log).Register(mux)
-	pages.Register(mux)
+	web.New(svc, log).Register(mux)
 
-	newServer := func(addr string) *http.Server {
-		return &http.Server{
-			Addr:              addr,
-			Handler:           web.SecurityHeaders(mux),
-			ReadHeaderTimeout: 10 * time.Second,
-			ReadTimeout:       30 * time.Second,
-			// /auth/v2/auth extends its own deadline past push-timeout.
-			WriteTimeout: 30 * time.Second,
-			IdleTimeout:  2 * time.Minute,
-			ErrorLog:     slog.NewLogLogger(log.Handler(), slog.LevelWarn),
-		}
+	// Plain HTTP: the reverse proxy in front terminates TLS and signs users in.
+	srv := &http.Server{
+		Addr:              cfg.ListenHTTP,
+		Handler:           web.SecurityHeaders(mux),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		// /auth/v2/auth extends its own deadline past push-timeout.
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  2 * time.Minute,
+		ErrorLog:     slog.NewLogLogger(log.Handler(), slog.LevelWarn),
 	}
-	var servers []*http.Server
-	errc := make(chan error, 2)
-	if cfg.ListenHTTPS != "" {
-		tc, err := tlsconfig.New(cfg.TLSCertFile, cfg.TLSKeyFile)
-		if err != nil {
-			return err
-		}
-		srv := newServer(cfg.ListenHTTPS)
-		srv.TLSConfig = tc
-		servers = append(servers, srv)
-		go func() { errc <- srv.ListenAndServeTLS("", "") }()
-		log.Info("listening", "https", cfg.ListenHTTPS, "hostname", cfg.DuoHostname)
-	}
-	if cfg.ListenHTTP != "" {
-		srv := newServer(cfg.ListenHTTP)
-		servers = append(servers, srv)
-		go func() { errc <- srv.ListenAndServe() }()
-		log.Info("listening", "http", cfg.ListenHTTP)
-	}
+	errc := make(chan error, 1)
+	go func() { errc <- srv.ListenAndServe() }()
+	log.Info("listening", "http", cfg.ListenHTTP, "hostname", cfg.DuoHostname)
 
 	go func() {
 		t := time.NewTicker(10 * time.Minute)
@@ -107,9 +85,7 @@ func serve(cfg *config.Config, cfgPath string) error {
 			log.Info("shutting down")
 			shCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			for _, s := range servers {
-				_ = s.Shutdown(shCtx)
-			}
+			_ = srv.Shutdown(shCtx)
 			return nil
 		}
 	}

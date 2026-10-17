@@ -18,7 +18,7 @@ import (
 	"github.com/babraham123/ntfy-idp-push/internal/webauthn"
 )
 
-// CreateEnrollCode mints a single-use /enroll?code=... link providing identity for enrollment.
+// CreateEnrollCode mints a single-use /token/<code> link providing identity for enrollment.
 func (s *Service) CreateEnrollCode(ctx context.Context, username string, ttl time.Duration) (code, link string, err error) {
 	if err := ValidUsername(username); err != nil {
 		return "", "", err
@@ -33,7 +33,7 @@ func (s *Service) CreateEnrollCode(ctx context.Context, username string, ttl tim
 }
 
 func (s *Service) EnrollURL(code string) string {
-	return s.Config().PublicURL + "/enroll?code=" + url.QueryEscape(code)
+	return s.Config().PublicURL + "/token/" + url.PathEscape(code)
 }
 
 // ResolveEnrollCode returns the username an unused, unexpired code was issued for.
@@ -146,9 +146,9 @@ type Enrollment struct {
 const EnrollResultTTL = time.Hour
 
 // FinishEnrollment completes the ceremony begun under handle: it verifies the passkey, provisions
-// the device and its grant, and sends the setup push. signedIn is the current session's user; when
-// no code identifies the enrolling user, it must be the one who began. Failures roll everything
-// back and release the code for another try.
+// the device and its grant, and sends the setup push. signedIn is the user the proxy names on this
+// request ("" on token routes); when no code identifies the enrolling user, it must be the one who
+// began. Failures roll everything back and release the code for another try.
 func (s *Service) FinishEnrollment(ctx context.Context, handle, signedIn string, attestation io.Reader) (*Enrollment, error) {
 	p := s.takeEnrollment(handle)
 	if p == nil {
@@ -226,7 +226,7 @@ func (s *Service) connectDevice(ctx context.Context, dev *store.Device, verifyTo
 }
 
 func (s *Service) publishSetup(ctx context.Context, dev *store.Device, verifyToken string) error {
-	verifyURL := fmt.Sprintf("%s/enroll/verify/%s?t=%s", s.Config().PublicURL, dev.ID, url.QueryEscape(verifyToken))
+	verifyURL := fmt.Sprintf("%s/token/verify/%s?t=%s", s.Config().PublicURL, dev.ID, url.QueryEscape(verifyToken))
 	return s.ntfy.Publish(ctx, &ntfy.Message{
 		Topic:    dev.NtfyTopic,
 		Title:    "Finish setup",

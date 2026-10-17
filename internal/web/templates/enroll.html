@@ -1,7 +1,7 @@
 {{template "head" "Enroll a phone"}}
 <h1>Enroll a phone</h1>
 <p>Signed in as <strong>{{.User}}</strong>. Do this <em>on the phone</em> that will approve sign-ins.</p>
-<form id="enroll" data-code="{{.Code}}">
+<form id="enroll" data-base="{{.Base}}" data-code="{{.Code}}">
   <label>Device name <input name="name" maxlength="64" placeholder="Pixel 9" required></label>
   <button type="submit">Create passkey</button>
 </form>

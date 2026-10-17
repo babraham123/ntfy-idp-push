@@ -2,7 +2,6 @@ package testutil
 
 import (
 	"bytes"
-	"context"
 	"crypto/tls"
 	"encoding/json"
 	"html"
@@ -23,9 +22,7 @@ import (
 	"github.com/babraham123/ntfy-idp-push/internal/core"
 	"github.com/babraham123/ntfy-idp-push/internal/duoapi"
 	"github.com/babraham123/ntfy-idp-push/internal/ntfy"
-	"github.com/babraham123/ntfy-idp-push/internal/oidc"
 	"github.com/babraham123/ntfy-idp-push/internal/store"
-	"github.com/babraham123/ntfy-idp-push/internal/token"
 	"github.com/babraham123/ntfy-idp-push/internal/web"
 )
 
@@ -35,13 +32,13 @@ const (
 	PublicURL = "https://push.test"
 )
 
-// Harness is the whole shim on an httptest TLS server, with a fake ntfy and a fake OIDC provider
-// behind it.
+// Harness is the whole shim on an httptest TLS server with a fake ntfy behind it. The test client
+// connects from loopback, which the config lists as the trusted proxy, so Request.User plays the
+// proxy's forward-auth step.
 type Harness struct {
 	Cfg    *config.Config
 	Svc    *core.Service
 	Ntfy   *FakeNtfy
-	OIDC   *FakeOIDC
 	Server *httptest.Server
 	// Host is what Duo clients put in the Host header and sign (duo-hostname).
 	Host   string
@@ -54,7 +51,6 @@ type Harness struct {
 func NewHarness(t *testing.T, mutate func(*config.Config)) *Harness {
 	t.Helper()
 	fn := NewFakeNtfy(t)
-	idp := NewFakeOIDC(t)
 	srv := httptest.NewUnstartedServer(nil)
 	host := srv.Listener.Addr().String()
 	cfg := &config.Config{
@@ -67,9 +63,7 @@ func NewHarness(t *testing.T, mutate func(*config.Config)) *Harness {
 		DuoKeyGrace:       config.Duration(time.Hour),
 		PushTimeout:       config.Duration(10 * time.Second),
 		TrustedProxies:    []string{"127.0.0.1/32", "::1/128"},
-		OIDCIssuer:        idp.URL,
-		OIDCClientID:      OIDCClientID,
-		OIDCClientSecret:  OIDCClientSecret,
+		IdentityHeader:    "Remote-User",
 		EnrollPortalURL:   PublicURL + "/enroll",
 		NtfyBaseURL:       fn.URL,
 		NtfyAdminToken:    AdminToken,
@@ -94,7 +88,7 @@ func NewHarness(t *testing.T, mutate func(*config.Config)) *Harness {
 	if testing.Verbose() {
 		log = slog.New(slog.NewTextHandler(&testWriter{t}, nil))
 	}
-	h := &Harness{Cfg: cfg, Ntfy: fn, OIDC: idp, Server: srv, Host: host, Store: st, log: log}
+	h := &Harness{Cfg: cfg, Ntfy: fn, Server: srv, Host: host, Store: st, log: log}
 	h.serve(t)
 	// Shorter than push-timeout (like serve's write timeout), forcing blocking auth to extend
 	// its own deadline.
@@ -119,13 +113,9 @@ func (h *Harness) serve(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pages, err := web.New(context.Background(), svc, h.log)
-	if err != nil {
-		t.Fatal(err)
-	}
 	mux := http.NewServeMux()
 	duoapi.New(svc, h.log).Register(mux)
-	pages.Register(mux)
+	web.New(svc, h.log).Register(mux)
 	h.Server.Config.Handler = web.SecurityHeaders(mux)
 	h.Svc = svc
 }
@@ -163,8 +153,8 @@ type Request struct {
 	Method, Path string
 	Body         []byte
 	Header       map[string]string
-	// User, when set, is signed in: the request carries a session cookie for that user, as the
-	// browser would after the OIDC callback.
+	// User, when set, is signed in: the request carries the identity header the proxy adds after
+	// its forward-auth step.
 	User string
 }
 
@@ -180,11 +170,7 @@ func (h *Harness) Do(t *testing.T, r Request) (*http.Response, []byte) {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	if r.User != "" {
-		id := token.Random(16)
-		if err := h.Store.CreateSession(req.Context(), id, r.User, time.Now().Add(time.Hour)); err != nil {
-			t.Fatal(err)
-		}
-		req.AddCookie(&http.Cookie{Name: oidc.SessionCookie, Value: id})
+		req.Header.Set(h.Cfg.IdentityHeader, r.User)
 	}
 	for k, v := range r.Header {
 		if v == "" {
@@ -219,11 +205,21 @@ type Enrolled struct {
 	Auth        *Authenticator
 }
 
-// BeginEnroll runs /enroll/begin and returns the registration token and creation options.
+// enrollBase picks the route family: /token with an enrollment code, /enroll with the proxy's
+// identity.
+func enrollBase(code string) string {
+	if code != "" {
+		return "/token"
+	}
+	return "/enroll"
+}
+
+// BeginEnroll runs /enroll/begin or /token/begin and returns the registration token and creation
+// options.
 func (h *Harness) BeginEnroll(t *testing.T, user, code, name string) (string, json.RawMessage, int) {
 	t.Helper()
 	body, _ := json.Marshal(map[string]string{"name": name, "code": code})
-	req := Request{Method: "POST", Path: "/enroll/begin", Body: body}
+	req := Request{Method: "POST", Path: enrollBase(code) + "/begin", Body: body}
 	if code == "" {
 		req.User = user
 	}
@@ -244,7 +240,7 @@ func (h *Harness) FinishEnroll(t *testing.T, user, code string, a *Authenticator
 	if status != 200 {
 		t.Fatalf("enroll begin: %d", status)
 	}
-	req := Request{Method: "POST", Path: "/enroll/finish?token=" + url.QueryEscape(token), Body: a.Create(t, opts)}
+	req := Request{Method: "POST", Path: enrollBase(code) + "/finish?token=" + url.QueryEscape(token), Body: a.Create(t, opts)}
 	if code == "" {
 		req.User = user
 	}
@@ -278,7 +274,7 @@ func (h *Harness) VerifyFromPush(t *testing.T, m ntfy.Message) {
 	if m.Title != "Finish setup" {
 		t.Fatalf("expected the setup push, got %q", m.Title)
 	}
-	resp, b := h.SubmitForm(t, LocalPath(t, m.Click), "", "/enroll/verify/", nil)
+	resp, b := h.SubmitForm(t, LocalPath(t, m.Click), "", "/token/verify/", nil)
 	if resp.StatusCode != 200 {
 		t.Fatalf("verify: %d %s", resp.StatusCode, b)
 	}

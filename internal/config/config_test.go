@@ -13,9 +13,7 @@ func valid() *Config {
 	c.DuoHostname = "push.example.com"
 	c.DuoIntegrationKey = "DIAAAAAAAAAAAAAAAAAA"
 	c.DuoSecretKey = strings.Repeat("s", 40)
-	c.TLSCertFile, c.TLSKeyFile = "/etc/tls.crt", "/etc/tls.key"
 	c.TrustedProxies = []string{"10.0.0.0/8"}
-	c.OIDCIssuer, c.OIDCClientID, c.OIDCClientSecret = "https://auth.example.com", "ntfy-idp-push", "s3cret"
 	c.NtfyBaseURL = "https://ntfy.example.com"
 	c.NtfyAdminToken = "tk_x"
 	c.EnrollAccess = []string{"${user}-*:rw", "alerts:ro"}
@@ -76,9 +74,10 @@ func TestValidateFailsClosed(t *testing.T) {
 	for name, mutate := range map[string]func(*Config){
 		"admin role":         func(c *Config) { c.EnrollRole = "admin" },
 		"short secret":       func(c *Config) { c.DuoSecretKey = "short" },
-		"oidc incomplete":    func(c *Config) { c.OIDCIssuer = "" },
-		"https without cert": func(c *Config) { c.TLSCertFile = "" },
-		"no listener":        func(c *Config) { c.ListenHTTPS = "" },
+		"no trusted proxy":   func(c *Config) { c.TrustedProxies = nil },
+		"bad trusted proxy":  func(c *Config) { c.TrustedProxies = []string{"proxy"} },
+		"no identity header": func(c *Config) { c.IdentityHeader = " " },
+		"no listener":        func(c *Config) { c.ListenHTTP = "" },
 	} {
 		c := valid()
 		mutate(c)
@@ -115,27 +114,27 @@ func TestLoadAndRotate(t *testing.T) {
 duo-hostname: push.example.com
 duo-integration-key: DIAAAAAAAAAAAAAAAAAA
 duo-secret-key: "` + strings.Repeat("o", 40) + `"  # from keygen
-tls-cert-file: /etc/tls.crt
-tls-key-file: /etc/tls.key
-oidc-issuer: https://auth.example.com
-oidc-client-id: ntfy-idp-push
-oidc-client-secret: s3cret
+trusted-proxies: [10.0.0.5]
+identity-header: x-authentik-username
 ntfy-base-url: https://ntfy.example.com
 ntfy-admin-token: tk_x
 `
 	if err := os.WriteFile(path, []byte(yml), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Load(path); err != nil {
+	c, err := Load(path)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if c.IdentityHeader != "X-Authentik-Username" || len(c.TrustedNets) != 1 || c.TrustedNets[0].String() != "10.0.0.5/32" {
+		t.Fatalf("identity settings: %q %v", c.IdentityHeader, c.TrustedNets)
 	}
 	now := time.Now()
 	key, err := RotateSecretKey(path, now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	c, err := Load(path)
-	if err != nil {
+	if c, err = Load(path); err != nil {
 		t.Fatal(err)
 	}
 	if c.DuoSecretKey != key || c.DuoSecretKeyPrevious != strings.Repeat("o", 40) {
@@ -173,11 +172,7 @@ func TestSecretFiles(t *testing.T) {
 	cfgPath := write("server.yml", `duo-hostname: push.example.com
 duo-integration-key: DIAAAAAAAAAAAAAAAAAA
 duo-secret-key-file: `+write("skey", skey+"\n")+`
-tls-cert-file: /etc/tls.crt
-tls-key-file: /etc/tls.key
-oidc-issuer: https://auth.example.com
-oidc-client-id: ntfy-idp-push
-oidc-client-secret: s3cret
+trusted-proxies: [10.0.0.0/8]
 ntfy-base-url: https://ntfy.example.com
 `)
 	// Docker and Podman secrets, and systemd credentials, are files named by an env variable.

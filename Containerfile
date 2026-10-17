@@ -16,11 +16,11 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags 
 FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
 COPY --from=build /out/ntfy-idp-push /usr/bin/ntfy-idp-push
 COPY --from=build --chown=nonroot:nonroot /out/state /var/lib/ntfy-idp-push
-# Unprivileged port inside the container; publish it as 443 (IdPs always dial https://<hostname>/).
-ENV NTFY_IDP_PUSH_LISTEN_HTTPS=:8443 \
+# Plain HTTP for the reverse proxy that terminates TLS and signs users in; never publish it directly.
+ENV NTFY_IDP_PUSH_LISTEN_HTTP=:8080 \
     NTFY_IDP_PUSH_DATABASE=/var/lib/ntfy-idp-push/db.sqlite
 VOLUME /var/lib/ntfy-idp-push
-EXPOSE 8443
-HEALTHCHECK --interval=30s --timeout=5s CMD ["/usr/bin/ntfy-idp-push", "healthcheck", "https://127.0.0.1:8443/healthz"]
+EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=5s CMD ["/usr/bin/ntfy-idp-push", "healthcheck"]
 ENTRYPOINT ["/usr/bin/ntfy-idp-push"]
 CMD ["serve"]

@@ -497,19 +497,3 @@ func (s *Store) ReleaseEnrollCode(ctx context.Context, codeHash []byte) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE enroll_codes SET used_at = NULL, device_id = NULL WHERE code_hash = ?`, codeHash)
 	return err
 }
-
-// ---- OIDC sessions
-
-func (s *Store) CreateSession(ctx context.Context, id, username string, expires time.Time) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO oidc_sessions (id, username, expires_at) VALUES (?,?,?)`, id, username, unix(expires))
-	return err
-}
-
-func (s *Store) SessionUser(ctx context.Context, id string, now time.Time) (string, error) {
-	var u string
-	err := s.db.QueryRowContext(ctx, `SELECT username FROM oidc_sessions WHERE id = ? AND expires_at > ?`, id, unix(now)).Scan(&u)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", ErrNotFound
-	}
-	return u, err
-}

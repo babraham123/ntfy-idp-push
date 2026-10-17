@@ -82,10 +82,12 @@ if (enrollForm) {
     try {
       status("Creating passkey…");
       const name = enrollForm.elements.name.value;
-      const begin = await postJSON("/enroll/begin", { name, code: enrollForm.dataset.code });
+      // /enroll routes carry the proxy's identity; /token routes carry the enrollment code.
+      const base = enrollForm.dataset.base;
+      const begin = await postJSON(base + "/begin", { name, code: enrollForm.dataset.code });
       const cred = await navigator.credentials.create(creationOptions(begin.options));
       status("Registering…");
-      const done = await postJSON("/enroll/finish?token=" + encodeURIComponent(begin.token), attestationJSON(cred));
+      const done = await postJSON(base + "/finish?token=" + encodeURIComponent(begin.token), attestationJSON(cred));
       enrollForm.hidden = true;
       status("Passkey saved.");
       document.getElementById("ntfy-link").href = done.ntfy_link;
@@ -109,7 +111,7 @@ if (enrollForm) {
 function wireResult(token) {
   document.getElementById("password-btn").addEventListener("click", async (e) => {
     try {
-      const out = await postJSON("/enroll/password", { token });
+      const out = await postJSON("/token/password", { token });
       document.getElementById("password-user").textContent = out.username;
       document.getElementById("password-value").textContent = out.password;
       document.getElementById("password").hidden = false;
@@ -121,7 +123,7 @@ function wireResult(token) {
   });
   document.getElementById("resend-btn").addEventListener("click", async () => {
     try {
-      await postJSON("/enroll/resend", { token });
+      await postJSON("/token/resend", { token });
       status("Setup notification sent again.");
     } catch (err) {
       status(err.message);

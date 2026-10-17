@@ -3,7 +3,6 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -39,7 +38,7 @@ Commands:
   enroll-link <username>                  print a single-use enrollment link, valid 5 minutes
   audit [username]                        print the last 100 audit entries
   backup <path>|-                         write a consistent copy of the database, safe while serving
-  healthcheck [url]                       exit 0 if url (default https://127.0.0.1:8443/healthz) answers 200
+  healthcheck [url]                       exit 0 if url (default http://127.0.0.1:8080/healthz) answers 200
   version
 
 The config path defaults to $NTFY_IDP_PUSH_CONFIG, then /etc/ntfy-idp-push/server.yml.
@@ -318,13 +317,13 @@ func fmtTime(t *time.Time) string {
 	return t.Format(time.RFC3339)
 }
 
-// healthcheck probes the local listener; the certificate is for the public name, not 127.0.0.1.
+// healthcheck probes the local listener.
 func healthcheck(args []string) error {
-	u := "https://127.0.0.1:8443/healthz"
+	u := "http://127.0.0.1:8080/healthz"
 	if len(args) > 0 {
 		u = args[0]
 	}
-	c := &http.Client{Timeout: 4 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}
+	c := &http.Client{Timeout: 4 * time.Second}
 	resp, err := c.Get(u)
 	if err != nil {
 		return err

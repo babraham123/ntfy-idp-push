@@ -273,7 +273,7 @@ func (h *Handler) enroll(w http.ResponseWriter, r *http.Request, p params) {
 		return
 	}
 	writeOK(w, map[string]any{
-		"activation_barcode": h.svc.Config().PublicURL + "/enroll/qr?value=" + url.QueryEscape(link),
+		"activation_barcode": h.svc.Config().PublicURL + "/token/qr?value=" + url.QueryEscape(link),
 		"activation_code":    code,
 		"activation_url":     link,
 		"expiration":         h.now().Add(ttl).Unix(),
