@@ -3,7 +3,6 @@ package web_test
 import (
 	"context"
 	"encoding/json"
-	"net/http"
 	"net/url"
 	"strings"
 	"testing"
@@ -108,14 +107,5 @@ func TestTokenRoutesIgnoreIdentity(t *testing.T) {
 	_ = json.Unmarshal(b, &out)
 	if out.Username != "erin" {
 		t.Fatalf("enrolled as %q", out.Username)
-	}
-}
-
-// Links from before the route split carried the code as a query parameter.
-func TestOldEnrollLinkRedirects(t *testing.T) {
-	h := testutil.NewHarness(t, nil)
-	resp, _ := h.Do(t, testutil.Request{Method: "GET", Path: "/enroll?code=abc%2Fdef"})
-	if resp.StatusCode != http.StatusFound || resp.Header.Get("Location") != "/token/abc%2Fdef" {
-		t.Fatalf("old link: %d %s", resp.StatusCode, resp.Header.Get("Location"))
 	}
 }

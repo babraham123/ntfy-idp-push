@@ -281,13 +281,8 @@ func qrDataURL(content string) (template.URL, error) {
 
 // ---- enrollment
 
-// enrollPage is the identity route: the proxy signed the user in. Links from before the route
-// split carried the code as ?code=; they are forwarded to /token/{code} for one release.
+// enrollPage is the identity route: the proxy signed the user in.
 func (s *Server) enrollPage(w http.ResponseWriter, r *http.Request) {
-	if code := r.URL.Query().Get("code"); code != "" {
-		http.Redirect(w, r, routes.EnrollURL("", code), http.StatusFound)
-		return
-	}
 	user, ok := s.signedIn(w, r)
 	if !ok {
 		return

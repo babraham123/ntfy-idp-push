@@ -12,7 +12,7 @@ import (
 )
 
 // env points the CLI at a database in a temp dir with a complete configuration and no config
-// file, so commands that need no ntfy run.
+// file, so commands that do not need ntfy can run.
 func env(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()

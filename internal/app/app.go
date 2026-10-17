@@ -73,9 +73,9 @@ func (a *App) Server() *http.Server {
 // are cleaned up.
 const purgeInterval = 10 * time.Minute
 
-// Serve runs the startup checks, the listener and the purge loop until ctx ends. Each value on
-// reload re-reads the configuration with load and applies it; a refused reload keeps the running
-// one and is logged.
+// Serve runs the startup checks, the listener and the purge loop until ctx ends. Each value
+// received on the reload channel re-reads the configuration with load and applies it; a refused
+// reload keeps the running one and is logged.
 func (a *App) Serve(ctx context.Context, reload <-chan struct{}, load func() (*config.Config, error)) error {
 	checkCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	err := a.Svc.StartupChecks(checkCtx)

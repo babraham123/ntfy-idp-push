@@ -49,7 +49,7 @@ func (s *Service) ResolveEnrollCode(ctx context.Context, code string) (string, e
 }
 
 // IdPEnrollment is what the IdP needs to show a user who enrolls through it: the code and link
-// the phone uses, and the user ID it polls EnrollmentState with.
+// the phone uses, and the user ID it uses to poll EnrollmentState.
 type IdPEnrollment struct {
 	UserID, Username string
 	Code, Link       string
