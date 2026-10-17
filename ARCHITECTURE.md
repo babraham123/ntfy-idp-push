@@ -1,8 +1,6 @@
 # Architecture
 
-ntfy-idp-push implements the Duo **Auth API**, so an identity provider's existing Duo integration
-(Authelia `duo_api`, authentik's Duo stage) delivers mobile push over ntfy. ntfy is transport only:
-approving a sign-in needs a signature from a device-bound passkey on the enrolled phone.
+ntfy-idp-push implements the Duo **Auth API**, allowing identity providers (Authelia `duo_api`, authentik's Duo stage) to deliver mobile push via ntfy. ntfy acts only as the transport layer; sign-in approval requires a signature from a device-bound passkey.
 
 ```
 browser ──1FA──▶ IdP ──signed Duo API──▶ ntfy-idp-push ──publish──▶ ntfy ──▶ phone (ntfy app)
@@ -11,19 +9,16 @@ browser ──1FA──▶ IdP ──signed Duo API──▶ ntfy-idp-push ─�
                   └────────────────────────────┴──────────────────────────────────┘
 ```
 
-The same server also provisions ntfy accounts (`/provision`, `user provision`) without any push device,
-so it doubles as a self-service ntfy onboarding tool behind an IdP.
+The server also provisions ntfy accounts (`/provision`, `user provision`) without a push device, serving as a self-service ntfy onboarding tool behind an IdP.
 
 ## Principles
 
-- The IdP config is only `hostname`, `integration_key`, `secret_key`. No per-user secrets in the IdP; the
-  shim holds one ntfy admin token.
-- Reading the push, holding the ntfy token, or owning the ntfy server approves nothing. Only a passkey
-  assertion bound to the challenge does.
+- IdP config requires only `hostname`, `integration_key`, `secret_key`. The shim holds one ntfy admin token; no per-user IdP secrets.
+- Push approval strictly requires a challenge-bound passkey assertion. Reading the push or holding ntfy tokens/server grants no access.
 - ntfy username == IdP username.
 - Misconfiguration fails closed (startup checks, config validation).
-- Every failure that is not an approval answers `result: deny`, which feeds the IdP's lockout and rate limits.
-- Only push is supported; `sms`, `phone` and `passcode` answer `deny`.
+- Non-approvals return `result: deny`, feeding the IdP's lockout and rate limits.
+- Only push is supported. `sms`, `phone`, and `passcode` return `deny`.
 
 ## Packages
 
@@ -56,17 +51,16 @@ oidc_sessions (id, username, expires_at)
 audit         (ts, username, event, detail_json)
 ```
 
-One ntfy topic per device (`<ntfy-topic-prefix><uuid>`), normally one passkey per device, any number of
-devices per user. The IdP's saved `device` is `devices.id`; `user_id` is `users.id`.
+Users can have multiple devices. Each device uses one passkey and one ntfy topic (`<ntfy-topic-prefix><uuid>`). The IdP's `device` maps to `devices.id`; `user_id` maps to `users.id`.
 
 ## Duo API facade
 
-Request handling, in order:
+Request validation order:
 
-1. `Host` (lower-cased) must equal `duo-hostname`: the client signs it, so a proxy must not rewrite it.
-2. `Date` (or `X-Duo-Date`) within `duo-max-skew` (default 300 s).
-3. `Authorization: Basic ikey:sig`; ikey compared in constant time.
-4. HMAC verified against the current key, and the previous one during `duo-key-grace`:
+1. `Host` (lower-cased) must match `duo-hostname`. Proxies must not rewrite this as clients sign it.
+2. `Date` (or `X-Duo-Date`) must fall within `duo-max-skew` (default 300 s).
+3. `Authorization: Basic ikey:sig` validated with constant-time `ikey` comparison.
+4. HMAC verified against the current key (and previous key during `duo-key-grace`):
 
    | Client | Body | Canonical string |
    |---|---|---|
@@ -74,9 +68,8 @@ Request handling, in order:
    | duo_api_golang `JSONSignedCall`, duo_client_python ≥ 5 (authentik) | JSON, or query for GET/DELETE | v5: v2 + `\nsha512(body)\nsha512(x-duo-* headers)` |
    | duo_client_python `sig_version=2` | form | v2, SHA-1 or SHA-512 |
 
-   A JSON body is verified as v5 only, a form body as v2 only; a bodyless request against both. SHA-1 is
-   accepted only for v2.
-5. Replay guard: a `(date, signature)` pair is accepted once within the skew window.
+   JSON bodies are verified as v5, forms as v2, and bodyless requests as both. SHA-1 is accepted for v2 only.
+5. Replay guard: Each `(date, signature)` pair is accepted only once per skew window.
 
 | Route | Behaviour |
 |---|---|
@@ -87,18 +80,13 @@ Request handling, in order:
 | `POST /auth/v2/enroll` | IdP-driven enrollment: returns `user_id`, `activation_code`, `activation_url`, `activation_barcode` (`/enroll/qr`), `expiration` |
 | `POST /auth/v2/enroll_status` | `waiting` → `success` once the device is verified; `invalid` for an unknown, expired or revoked enrollment |
 
-`/auth/v2/auth` holds the response open for up to `push-timeout`, so it extends its own write deadline
-past the server's default; a reloaded `push-timeout` applies to the next request.
+`/auth/v2/auth` blocks up to `push-timeout`, extending its write deadline. Reloading `push-timeout` applies to subsequent requests.
 
-Disabling a user, or the global kill switch `push-disabled: true`, makes preauth and auth answer `deny`.
-Both also apply to logins already in flight: pending challenges are denied, and eligibility (user
-disabled, device revoked, kill switch) is re-checked at the moment of approval and again before `auth`
-answers `allow`.
+Disabling a user or enabling the `push-disabled: true` kill switch causes preauth/auth to return `deny`. This affects in-flight logins: pending challenges are denied, and eligibility is re-verified upon approval and immediately before `auth` returns `allow`.
 
 ## Login
 
-1. `auth` creates a challenge (32-byte nonce, `expires_at = now + push-timeout`) and a deny token (stored
-   hashed), and publishes to the device's topic:
+1. `auth` creates a challenge (32-byte nonce, `expires_at = now + push-timeout`) and a deny token (stored hashed), publishing to the device's topic:
 
    ```json
    {
@@ -112,70 +100,37 @@ answers `allow`.
      ]
    }
    ```
-2. `/challenge/<id>` shows the request; `navigator.credentials.get()` with the nonce as challenge, the
-   device's passkeys as `allowCredentials`, user verification required.
-3. `POST /challenge/<id>/assert` verifies origin, RP ID, nonce, UP+UV, that the credential belongs to the
-   challenge's device, and the BE flag unless `webauthn-allow-synced` (go-webauthn filters only at
-   registration, so the shim checks it on every assertion). State → `allow`.
-4. `POST /challenge/<id>/deny` with the deny token → `deny`; "This wasn't me" → `fraud`.
-5. The blocked `auth` wakes and answers the IdP. When a challenge is decided its push is deleted from the
-   phone (ntfy `DELETE /<topic>/<sequence_id>`).
+2. `/challenge/<id>` displays the request. It calls `navigator.credentials.get()` using the nonce as the challenge, the device's passkeys as `allowCredentials`, and requires user verification.
+3. `POST /challenge/<id>/assert` verifies origin, RP ID, nonce, UP+UV, device credential ownership, and the BE flag (unless `webauthn-allow-synced`). State becomes `allow`.
+4. `POST /challenge/<id>/deny` with the deny token yields `deny`; "This wasn't me" yields `fraud`.
+5. The blocked `auth` wakes and responds to the IdP. The push is then deleted from the device (ntfy `DELETE /<topic>/<sequence_id>`).
 
-Challenges are single-use; any decision or expiry makes `/challenge/<id>` answer 410.
-
-Every state-changing browser POST must carry `Origin` equal to the shim's origin. The ntfy app's `http`
-action sends no Origin, so `/challenge/<id>/deny` is exempt and the deny token authorizes it. Pages use
-`Referrer-Policy: same-origin`: with `no-referrer`, browsers send `Origin: null` on form posts and the
-Activate and Revoke forms would be refused. HTML pages are `Cache-Control: no-store`, since they carry
-ntfy sign-in codes and passwords.
+Challenges are single-use; decisions or expiries return 410 for `/challenge/<id>`. State-changing browser POSTs require an `Origin` matching the shim. The ntfy app's `http` action omits `Origin`, so `/challenge/<id>/deny` relies on the deny token for authorization. Pages enforce `Referrer-Policy: same-origin`, not `no-referrer`: with `no-referrer`, browsers send `Origin: null` on form posts and the Activate and Revoke forms would be refused. HTML pages use `Cache-Control: no-store` to protect ntfy sign-in codes and passwords.
 
 ## Enrollment
 
-Entry points: `enroll-portal-url` (returned by preauth) → `/enroll` behind the identity provider; or
-`enroll-link <user>`, a single-use `/enroll?code=…` valid 5 minutes, for bootstrapping a user with no
-second factor yet.
+Entry points: `enroll-portal-url` (via preauth) to `/enroll` behind the IdP; or `enroll-link <user>`, generating a single-use `/enroll?code=…` (valid 5 minutes) to bootstrap users lacking a second factor.
 
-1. **Passkey**: `navigator.credentials.create()` with a platform authenticator, user verification
-   required, direct attestation. Synced passkeys (BE flag) are refused unless `webauthn-allow-synced`.
-2. **ntfy account**: provisioned as below.
-3. **Topic grant**: `PUT /v1/users/access` read-only on the device's topic.
-4. **Link**: an ntfy enrollment code (ntfy#597, `POST /v1/users/token/enroll`) in
-   `ntfy://<host>/<topic>?user=<u>&code=<c>`, as a tap link and a QR. The result page also offers
-   "Set an ntfy password" for apps that ignore `code=`, and "Resend setup push".
-5. **Test push** with a "Finish setup" action to `/enroll/verify/<device>`, which activates the device.
-   Devices never verified are hidden from preauth and purged after 24 h.
+1. **Passkey**: `navigator.credentials.create()` requires a platform authenticator, user verification, and direct attestation. Synced passkeys (BE flag) are rejected unless `webauthn-allow-synced`.
+2. **ntfy account**: Provisioned as described below.
+3. **Topic grant**: `PUT /v1/users/access` grants read-only access to the device's topic.
+4. **Link**: Generates an ntfy enrollment code (ntfy#597, `POST /v1/users/token/enroll`) formatted as `ntfy://<host>/<topic>?user=<u>&code=<c>` (tap link and QR). The UI also offers "Set an ntfy password" and "Resend setup push".
+5. **Test push**: Sends a "Finish setup" action to `/enroll/verify/<device>` to activate the device. Unverified devices are hidden from preauth and purged after 24 hours.
 
-Order: verify the attestation (no writes); claim the code and insert the unverified device and passkey in
-one transaction; then the remote steps. If a remote step fails, the device is removed and the code
-released, so the same link works again. A crash between steps leaves an unverified device for the purge.
+Execution order: verify attestation (read-only), claim the code and insert the unverified device/passkey in one transaction, then execute remote steps. Failed remote steps rollback the device and release the code for retry. Crashes leave unverified devices for the 24-hour purge.
 
 ### Provisioning
 
-`Provision(username)` is the one code path for `user provision`, `/provision` and enrollment: ensure the
-ntfy user exists (random password, role `user`), apply `enroll-access`, record the grants. It is
-idempotent and creates nothing push-related, so preauth still answers `enroll`.
+`Provision(username)` handles `user provision`, `/provision`, and enrollment: it creates the ntfy user (random password, role `user`), applies `enroll-access`, and records grants. It is idempotent, creates no push-related data, and lets preauth return `enroll`.
 
-`/provision` mints an ntfy enrollment code and renders by User-Agent: on phones, app install links and one
-deep link per `default-topics` entry; on desktops, a QR and web-app links to
-`<ntfy-base-url>/account/token/redeem#code=…&subscribe=…` (the fragment never reaches a server log).
-Reloading supersedes the previous code.
+`/provision` mints an ntfy enrollment code and renders based on User-Agent: phones get app install links and one deep link per `default-topics` entry; desktops get a QR and web-app links to `<ntfy-base-url>/account/token/redeem#code=…&subscribe=…`. Reloading supersedes the previous code.
 
-Identity for `/enroll`, `/provision`, `/devices`: the shim signs the user in with the IdP's OIDC provider
-(code + PKCE, `preferred_username`) and keeps a 12 h session cookie. No proxy header is trusted, so nothing
-at the proxy needs protecting or bypassing. The Duo API routes, `/challenge/*` and every code- or
-token-authenticated enrollment route use no identity. In the IdP, require a second factor for the shim's
-OIDC client: with password only, a stolen password could enroll an attacker's phone. A user with no
-second factor yet cannot pass that check, so first enrollment is one of: another second-factor method
-registered in the IdP first (TOTP or a browser passkey in Authelia), which then unlocks the portal;
-`enroll-link`, an admin-issued single-use code; or authentik's IdP-driven enrollment, which needs no
-portal session.
+Identity for `/enroll`, `/provision`, `/devices`: The shim authenticates users via the IdP's OIDC provider (code + PKCE, `preferred_username`) and issues a 12-hour session cookie. Proxy headers are ignored. Duo API routes, `/challenge/*`, and token-authenticated enrollment routes require no identity. 
+IdPs must require a second factor for the shim's OIDC client to prevent attackers from enrolling devices with just a stolen password. Users lacking a second factor enroll via: an existing IdP second-factor (e.g., TOTP), an admin `enroll-link`, or authentik's IdP-driven enrollment (bypassing the portal session).
 
 ### IdP-driven enrollment
 
-authentik calls `enroll`, shows `activation_barcode` (`/enroll/qr?value=<activation url>`, rendered only
-for codes the shim issued), and polls `enroll_status`. The phone scans the code and enrolls through
-`/enroll?code=…` without an IdP session; the code is the proof. Used codes are kept for the unverified
-device lifetime, since the IdP keeps polling after the code's own expiry.
+authentik calls `enroll`, displays `activation_barcode` (`/enroll/qr?value=<activation url>`, generated only for shim-issued codes), and polls `enroll_status`. Phones scan the code and enroll via `/enroll?code=…` without an IdP session; the code serves as proof. Used codes persist for the unverified device's lifetime to accommodate IdP polling.
 
 ## Revocation
 
@@ -189,40 +144,23 @@ device lifetime, since the IdP keeps polling after the code's own expiry.
 | Kill switch | `push-disabled: true` + `SIGHUP` | every preauth/auth denies |
 | Rotate the IdP secret | `keygen --rotate` | new key written; the old one accepted for `duo-key-grace` |
 
-Revocation is resumable: if a remote step fails, the row keeps `revoked_at` and re-running the command
-(or the purge job, every 10 minutes) retries the remote steps. A requested ntfy user reset is recorded on
-the user before any step runs and cleared only when it completes, so the purge job finishes it even after
-the device row is gone. A user or grant already missing in ntfy counts as removed, so an interrupted reset
-resumes at recreation.
+Revocation is resumable. Failed remote steps retain `revoked_at`, allowing manual retries or the 10-minute purge job to complete them. ntfy user resets are recorded prior to execution and cleared upon completion, ensuring the purge job finishes them even if the device row is deleted. Missing ntfy users/grants count as removed, allowing interrupted resets to resume at recreation.
 
-After a plain revoke, a lost phone cannot approve anything, but its ntfy token is user-wide: it keeps the
-`enroll-access` grants and can read the push topics of the user's other phones, so it can deny their
-logins. Only `--reset-ntfy-user` ends that; the `/devices` page offers it as a checkbox.
+Revoked phones cannot approve requests, but their user-wide ntfy tokens retain `enroll-access` grants and can read push topics of the user's other devices (allowing them to deny logins). Only `--reset-ntfy-user` revokes this token. 
 
-Everything above is audited (`audit`).
+All actions are audited (`audit`).
 
 ## Configuration
 
-See [`deploy/server.yml`](deploy/server.yml). Keys mirror ntfy's `server.yml` style; every key can be set
-as `NTFY_IDP_PUSH_<KEY>`; secrets (`duo-secret-key`, `duo-secret-key-previous`, `ntfy-admin-token`,
-`oidc-client-secret`) can be read from a file with `<key>-file` or `NTFY_IDP_PUSH_<KEY>_FILE`. `SIGHUP`
-reloads everything read per request (keys, kill switch, `enroll-access`, `push-timeout`, re-reading
-secret files); listeners, TLS files, database and WebAuthn settings need a restart.
+See [`deploy/server.yml`](deploy/server.yml). Configuration mirrors ntfy's `server.yml`. Set keys via `NTFY_IDP_PUSH_<KEY>`. Secrets (`duo-secret-key`, `duo-secret-key-previous`, `ntfy-admin-token`, `oidc-client-secret`) support `<key>-file` or `NTFY_IDP_PUSH_<KEY>_FILE`. `SIGHUP` reloads request-scoped config (keys, kill switch, `enroll-access`, `push-timeout`, secret files). Listeners, TLS files, database, and WebAuthn settings require a restart.
 
-`enroll-access` rules are `<topic-pattern>:<access>`, with ntfy's access spellings and `*` wildcard;
-`${user}` expands to the username. Validation refuses patterns that could match the push topic prefix,
-`everyone`/`*`, two rules for the same pattern (ntfy keeps one per pattern), and `default-topics` entries
-unreadable under the rule ntfy actually applies (user grants beat `everyone`, then the longest pattern,
-then write over read).
+`enroll-access` rules use `<topic-pattern>:<access>` matching ntfy's syntax, `*` wildcards, and `${user}` expansion. Validation rejects patterns matching the push topic prefix, `everyone`/`*`, duplicate pattern rules, and `default-topics` unreadable under ntfy's applied rules.
 
-Startup checks (fail closed): the ntfy token is valid and admin; `GET /v1/users` works and fits the
-client's 1 MiB response cap; anonymous reads of push topics are refused; the shim can publish to them.
+Startup checks (fail closed): Valid ntfy admin token; `GET /v1/users` succeeds under the 1 MiB response cap; anonymous push topic reads are refused; the shim can publish to push topics.
 
 ## TLS
 
-Serve a certificate with `tls-cert-file`/`tls-key-file` (reloaded when the file changes), or run plain
-HTTP behind a TLS proxy that preserves `Host` (`listen-http`). Duo clients pin Duo's CA bundle, so the IdP
-must either trust the shim's certificate chain or have pinning disabled.
+Serve certificates via `tls-cert-file`/`tls-key-file` (auto-reloaded on change), or use plain HTTP behind a `Host`-preserving TLS proxy (`listen-http`). Since Duo clients pin Duo's CA bundle, the IdP must trust the shim's certificate chain or disable pinning.
 
 ## ntfy prerequisites
 
@@ -232,21 +170,15 @@ auth-users: ["idp-push:<bcrypt>:admin"]
 auth-tokens: ["idp-push:tk_…:ntfy-idp-push"]
 ```
 
-Optional upstream changes the shim uses when present, and degrades without:
+Optional upstream ntfy features utilized (degrades gracefully without):
 
-- ntfy#597: `POST /v1/users/token/enroll`, `POST /v1/account/token/redeem` and the web route
-  `/account/token/redeem`. Without them, phones sign in with a password set from the result page.
-- ntfy-android / ntfy-ios handling of `user=` and `code=` in deep links: redeem when signed out, subscribe
-  when signed in as that user, refuse when signed in as someone else.
+- ntfy#597: `POST /v1/users/token/enroll`, `POST /v1/account/token/redeem`, and `/account/token/redeem`. Without these, phones sign in using a password set from the result page.
+- ntfy-android / ntfy-ios deep link handling for `user=` and `code=`: redeems if signed out, subscribes if signed in as that user, and refuses if signed in as someone else.
 
 ## Testing
 
-Integration tests drive the real `duo_api_golang` client (v2 form and v5 JSON signing) against the
-server, with a fake ntfy that follows ntfy v2.30's error contract, a fake OIDC provider, and a software
-WebAuthn authenticator: enrollment, push, passkey approval, deny, fraud, timeout, revocation and its
-recovery, provisioning, OIDC sign-in, and config loading. Forms are submitted as a browser would,
-with the Origin its referrer policy yields. `internal/ntfy`'s live test runs against a real ntfy server
-when `NTFY_IDP_PUSH_TEST_NTFY_URL`/`_TOKEN` are set.
+Integration tests execute `duo_api_golang` (v2 form and v5 JSON signing) against the server using a fake ntfy (v2.30 error contract), fake OIDC provider, and software WebAuthn authenticator. They cover enrollment, push, passkey approval, deny, fraud, timeout, revocation recovery, provisioning, OIDC sign-in, and config loading. Forms simulate browser submissions, matching referrer policy Origins.
+Live tests for `internal/ntfy` require a real ntfy server via `NTFY_IDP_PUSH_TEST_NTFY_URL`/`_TOKEN`.
 
 ## Other IdPs
 

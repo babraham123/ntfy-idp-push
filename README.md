@@ -1,17 +1,12 @@
 # ntfy-idp-push
 
-A drop-in replacement for the Duo Auth API, so Authelia's `duo_api` integration (and authentik's Duo
-stage) delivers mobile push over [ntfy](https://ntfy.sh). ntfy is transport only: approving a sign-in
-requires a signature from a device-bound passkey on the enrolled phone. See
-[ARCHITECTURE.md](ARCHITECTURE.md) for the design.
+ntfy-idp-push replaces the Duo Auth API to deliver secure mobile push notifications over [ntfy](https://ntfy.sh) for Authelia and authentik. ntfy acts only as transport; approvals require a device-bound passkey signature from the enrolled phone. See [ARCHITECTURE.md](ARCHITECTURE.md) for design details.
 
-It also works as a generic **ntfy provisioning tool**, with no Duo integration at all: behind your IdP,
-`/provision` creates the signed-in user's ntfy account, applies `enroll-access` grants, and signs their
-phone or browser into ntfy with a one-tap link or QR (`user provision <u>` does the same from the CLI).
+It also functions as a generic **ntfy provisioning tool**. Without Duo integration, the `/provision` endpoint creates an ntfy account for the signed-in IdP user, applies `enroll-access` grants, and signs their device into ntfy via one-tap link or QR code (or use CLI `user provision <u>`).
 
 ## Run
 
-With Docker Compose ([`deploy/compose.yaml`](deploy/compose.yaml)):
+Deploy with Docker Compose using [`deploy/compose.yaml`](deploy/compose.yaml):
 
 ```sh
 ntfy-idp-push keygen                 # integration + secret key for the IdP
@@ -46,15 +41,9 @@ volumes:
   state:
 ```
 
-`make image` builds the image locally. Run CLI commands in the container with
-`docker compose -f deploy/compose.yaml exec ntfy-idp-push ntfy-idp-push <command>`.
+Build the local image with `make image`. Execute CLI commands inside the container using `docker compose -f deploy/compose.yaml exec ntfy-idp-push ntfy-idp-push <command>`.
 
-Configuration: every key in [`deploy/server.yml`](deploy/server.yml) can also be set as
-`NTFY_IDP_PUSH_<KEY>`. Secrets (`duo-secret-key`, `duo-secret-key-previous`, `ntfy-admin-token`,
-`oidc-client-secret`) can instead be read from a file, named by `<key>-file` in the config or by
-`NTFY_IDP_PUSH_<KEY>_FILE`, which suits Docker secrets and systemd credentials. `SIGHUP`
-(`docker compose kill -s HUP`) reloads per-request settings (`push-disabled`, keys and secret files,
-`enroll-access`, `push-timeout`).
+**Configuration:** Set keys from [`deploy/server.yml`](deploy/server.yml) via environment variables as `NTFY_IDP_PUSH_<KEY>`. Load secrets (`duo-secret-key`, `duo-secret-key-previous`, `ntfy-admin-token`, `oidc-client-secret`) from files using `<key>-file` or `NTFY_IDP_PUSH_<KEY>_FILE` (ideal for Docker secrets or systemd credentials). Reload per-request settings (`push-disabled`, keys, secret files, `enroll-access`, `push-timeout`) with `SIGHUP` (`docker compose kill -s HUP`).
 
 ntfy prerequisites (`server.yml`):
 
@@ -85,31 +74,23 @@ identity_providers:
         pkce_challenge_method: S256
 ```
 
-First enrollment: the user registers another second factor in Authelia (TOTP or a browser passkey), uses
-it to pass the `two_factor` policy on the shim's client, and enrolls the phone at `/enroll`; push works
-from then on. Without one, an admin issues a single-use link with `enroll-link <user>`. authentik enrolls
-through its own Duo stage (`/auth/v2/enroll`).
+**First enrollment:** Users must register another second factor in Authelia (TOTP or browser passkey) to pass the `two_factor` policy before enrolling their phone at `/enroll`. Admins can bypass this with a single-use link via `enroll-link <user>`. authentik uses its own Duo stage (`/auth/v2/enroll`).
 
-Startup fails closed if the ntfy token is not admin, anonymous reads of push topics are allowed, or the
-ntfy user list exceeds the client's 1 MiB response cap.
+Startup fails closed if the ntfy token lacks admin rights, anonymous reads of push topics are allowed, or the ntfy user list exceeds the client's 1 MiB response limit.
 
 ## TLS
 
-Set `tls-cert-file` and `tls-key-file`; the pair is reloaded when the certificate file changes. Or set
-`listen-http` and terminate TLS in a proxy that preserves `Host`. Duo clients pin Duo's CA bundle, so the
-IdP must trust the shim's certificate chain or have that pinning disabled.
+Set `tls-cert-file` and `tls-key-file` (reloaded automatically on change). Alternatively, use `listen-http` to terminate TLS at a proxy preserving `Host`. Duo clients pin Duo's CA bundle; ensure the IdP trusts your certificate chain or disable pinning.
 
 ## Backup
 
-The database holds every passkey; losing it means re-enrolling every phone. `backup` writes a
-consistent copy while the server runs, `-` to stdout:
+The database stores all passkeys. Losing it requires re-enrolling all phones. The `backup` command streams a consistent copy safely while the server runs (`-` outputs to stdout):
 
 ```sh
 docker compose -f deploy/compose.yaml exec -T ntfy-idp-push ntfy-idp-push backup - > backup.sqlite
 ```
 
-To restore, stop the server and replace `db.sqlite` with the copy, deleting any `db.sqlite-wal` and
-`db.sqlite-shm` beside it.
+To restore: stop the server, replace `db.sqlite` with the backup, and delete any `db.sqlite-wal` and `db.sqlite-shm` files.
 
 ## CLI
 
@@ -140,10 +121,12 @@ Devices
 
 ## Routes
 
-Access: **IdP** needs a session from the shim's own OIDC sign-in; pages redirect to `/oidc/login`.
-**Public** must be reachable from the user's phone and browser; each route checks its own code, token or
-passkey. **Internal** is called only by the IdP server or the container healthcheck. Nothing needs
-protecting or bypassing at a proxy.
+**Access Levels:**
+*   **IdP:** Requires an OIDC session; redirects to `/oidc/login`.
+*   **Public:** Must be reachable by user devices. Each route independently validates its code, token, or passkey.
+*   **Internal:** Called only by the IdP server or container healthcheck.
+
+No proxy bypassing or protection is required.
 
 | Path | Access | Purpose |
 |---|---|---|
@@ -161,10 +144,9 @@ protecting or bypassing at a proxy.
 
 ## Releases
 
-Pushing a `vX.Y.Z` tag runs CI, then publishes Linux and macOS binaries (amd64, arm64) with
-checksums to the GitHub release, and pushes `ghcr.io/babraham123/ntfy-idp-push:X.Y.Z`, `:X.Y` and
-`:latest` for amd64 and arm64 with an SBOM and build provenance. Or install from source:
-`go install github.com/babraham123/ntfy-idp-push/cmd/ntfy-idp-push@latest`.
+Pushing a `vX.Y.Z` tag triggers CI to publish Linux/macOS binaries (amd64, arm64) with checksums to GitHub Releases. It also pushes Docker images to `ghcr.io/babraham123/ntfy-idp-push` (tags `:X.Y.Z`, `:X.Y`, `:latest`) with an SBOM and build provenance.
+
+Install from source: `go install github.com/babraham123/ntfy-idp-push/cmd/ntfy-idp-push@latest`
 
 ## Develop
 
@@ -173,6 +155,4 @@ make test   # go test -race ./...
 make lint   # gofmt, go vet, staticcheck, govulncheck; CI runs both on every PR
 ```
 
-Tests drive the real `duo_api_golang` client (v2 form and v5 JSON signing) against the server, with a
-fake ntfy, a fake OIDC provider and a software WebAuthn authenticator, through enrollment, push, passkey
-approval, deny, fraud, timeout, revocation and provisioning.
+Tests execute the real `duo_api_golang` client (v2 form, v5 JSON signing) against the server using a fake ntfy, fake OIDC provider, and software WebAuthn authenticator. They cover enrollment, push, passkey approval, deny, fraud, timeout, revocation, and provisioning.
