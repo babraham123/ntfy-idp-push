@@ -15,6 +15,7 @@ func valid() *Config {
 	c.DuoSecretKey = strings.Repeat("s", 40)
 	c.TLSCertFile, c.TLSKeyFile = "/etc/tls.crt", "/etc/tls.key"
 	c.TrustedProxies = []string{"10.0.0.0/8"}
+	c.OIDCIssuer, c.OIDCClientID, c.OIDCClientSecret = "https://auth.example.com", "ntfy-idp-push", "s3cret"
 	c.NtfyBaseURL = "https://ntfy.example.com"
 	c.NtfyAdminToken = "tk_x"
 	c.EnrollAccess = []string{"${user}-*:rw", "alerts:ro"}
@@ -75,8 +76,7 @@ func TestValidateFailsClosed(t *testing.T) {
 	for name, mutate := range map[string]func(*Config){
 		"admin role":         func(c *Config) { c.EnrollRole = "admin" },
 		"short secret":       func(c *Config) { c.DuoSecretKey = "short" },
-		"no trusted proxies": func(c *Config) { c.TrustedProxies = nil },
-		"oidc incomplete":    func(c *Config) { c.AuthMode = "oidc" },
+		"oidc incomplete":    func(c *Config) { c.OIDCIssuer = "" },
 		"https without cert": func(c *Config) { c.TLSCertFile = "" },
 		"no listener":        func(c *Config) { c.ListenHTTPS = "" },
 	} {
@@ -117,7 +117,9 @@ duo-integration-key: DIAAAAAAAAAAAAAAAAAA
 duo-secret-key: "` + strings.Repeat("o", 40) + `"  # from keygen
 tls-cert-file: /etc/tls.crt
 tls-key-file: /etc/tls.key
-trusted-proxies: ["10.0.0.0/8"]
+oidc-issuer: https://auth.example.com
+oidc-client-id: ntfy-idp-push
+oidc-client-secret: s3cret
 ntfy-base-url: https://ntfy.example.com
 ntfy-admin-token: tk_x
 `
@@ -173,7 +175,9 @@ duo-integration-key: DIAAAAAAAAAAAAAAAAAA
 duo-secret-key-file: `+write("skey", skey+"\n")+`
 tls-cert-file: /etc/tls.crt
 tls-key-file: /etc/tls.key
-trusted-proxies: ["10.0.0.0/8"]
+oidc-issuer: https://auth.example.com
+oidc-client-id: ntfy-idp-push
+oidc-client-secret: s3cret
 ntfy-base-url: https://ntfy.example.com
 `)
 	// Docker and Podman secrets, and systemd credentials, are files named by an env variable.

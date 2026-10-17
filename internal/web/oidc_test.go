@@ -7,18 +7,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/babraham123/ntfy-idp-push/internal/config"
 	"github.com/babraham123/ntfy-idp-push/internal/testutil"
 )
 
 func oidcHarness(t *testing.T) (*testutil.Harness, *testutil.FakeOIDC) {
 	t.Helper()
-	idp := testutil.NewFakeOIDC(t)
-	h := testutil.NewHarness(t, func(c *config.Config) {
-		c.AuthMode = "oidc"
-		c.OIDCIssuer, c.OIDCClientID, c.OIDCClientSecret = idp.URL, testutil.OIDCClientID, testutil.OIDCClientSecret
-	})
-	return h, idp
+	h := testutil.NewHarness(t, nil)
+	return h, h.OIDC
 }
 
 func cookie(resp *http.Response, name string) string {
@@ -81,10 +76,10 @@ func TestOIDCSignIn(t *testing.T) {
 		t.Fatalf("Cache-Control %q", cc)
 	}
 
-	// The user is whoever the provider says; a forged Remote-User means nothing in this mode.
-	resp, _ = h.Do(t, testutil.Request{Method: "GET", Path: "/provision", User: "dana"})
+	// The user is whoever the provider says; a proxy-style Remote-User header means nothing.
+	resp, _ = h.Do(t, testutil.Request{Method: "GET", Path: "/provision", Header: map[string]string{"Remote-User": "dana"}})
 	if resp.StatusCode != http.StatusFound {
-		t.Fatalf("Remote-User honored under oidc: %d", resp.StatusCode)
+		t.Fatalf("Remote-User honored: %d", resp.StatusCode)
 	}
 
 	if err := h.Store.CreateSession(context.Background(), "stale", "dana", time.Now().Add(-time.Minute)); err != nil {
@@ -93,6 +88,28 @@ func TestOIDCSignIn(t *testing.T) {
 	resp, _ = h.Do(t, testutil.Request{Method: "GET", Path: "/provision", Header: map[string]string{"Cookie": "nip_session=stale"}})
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("expired session: %d", resp.StatusCode)
+	}
+}
+
+// Authelia 4.39+ leaves profile claims out of the ID token unless a claims policy adds them; the
+// shim then reads preferred_username from userinfo, for the same subject only.
+func TestOIDCUsernameFromUserInfo(t *testing.T) {
+	h, idp := oidcHarness(t)
+	idp.SignInSplit(map[string]any{"sub": "u1"}, map[string]any{"sub": "u1", "preferred_username": "dana"})
+	resp := signIn(t, h, "/provision", nil)
+	session := cookie(resp, "nip_session")
+	if resp.StatusCode != http.StatusFound || session == "" {
+		t.Fatalf("userinfo fallback: %d, session %q", resp.StatusCode, session)
+	}
+	resp, _ = h.Do(t, testutil.Request{Method: "GET", Path: "/provision", Header: map[string]string{"Cookie": "nip_session=" + session}})
+	if resp.StatusCode != http.StatusOK || h.Ntfy.User("dana") == nil {
+		t.Fatalf("signed in as dana: %d", resp.StatusCode)
+	}
+
+	idp.SignInSplit(map[string]any{"sub": "u1"}, map[string]any{"sub": "u2", "preferred_username": "mallory"})
+	resp = signIn(t, h, "/provision", nil)
+	if resp.StatusCode != http.StatusUnauthorized || cookie(resp, "nip_session") != "" {
+		t.Fatalf("userinfo for another subject: %d", resp.StatusCode)
 	}
 }
 

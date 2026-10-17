@@ -55,7 +55,8 @@ type Config struct {
 	TLSCertFile string `yaml:"tls-cert-file"`
 	TLSKeyFile  string `yaml:"tls-key-file"`
 
-	AuthMode             string   `yaml:"auth-mode"`
+	// TrustedProxies are the peers whose X-Forwarded-For is believed for client IPs in audit entries
+	// and rate limits. Identity never comes from a proxy header.
 	TrustedProxies       []string `yaml:"trusted-proxies"`
 	OIDCIssuer           string   `yaml:"oidc-issuer"`
 	OIDCClientID         string   `yaml:"oidc-client-id"`
@@ -91,7 +92,6 @@ func defaults() *Config {
 		DuoMaxSkew:      Duration(300 * time.Second),
 		PushTimeout:     Duration(60 * time.Second),
 		DuoKeyGrace:     Duration(time.Hour),
-		AuthMode:        "forward",
 		NtfyTopicPrefix: "push-",
 		EnrollRole:      "user",
 		Database:        "/var/lib/ntfy-idp-push/db.sqlite",
@@ -212,18 +212,10 @@ func (c *Config) Validate() error {
 		errs = append(errs, errors.New("one of listen-https or listen-http is required"))
 	}
 
-	switch c.AuthMode {
-	case "forward":
-		if len(c.TrustedProxies) == 0 {
-			errs = append(errs, errors.New("auth-mode forward requires trusted-proxies"))
-		}
-	case "oidc":
-		req("oidc-issuer", c.OIDCIssuer)
-		req("oidc-client-id", c.OIDCClientID)
-		req("oidc-client-secret", c.OIDCClientSecret)
-	default:
-		errs = append(errs, fmt.Errorf("auth-mode must be forward or oidc, got %q", c.AuthMode))
-	}
+	// The self-service pages sign in through the IdP's OIDC provider; there is no other identity.
+	req("oidc-issuer", c.OIDCIssuer)
+	req("oidc-client-id", c.OIDCClientID)
+	req("oidc-client-secret", c.OIDCClientSecret)
 	c.TrustedNets = nil
 	for _, p := range c.TrustedProxies {
 		if !strings.Contains(p, "/") {

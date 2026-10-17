@@ -19,11 +19,12 @@ duo-key-grace: "1h"                     # previous key accepted this long after 
 tls-cert-file: "/etc/ntfy-idp-push/tls.crt"   # reloaded when it changes
 tls-key-file: "/etc/ntfy-idp-push/tls.key"
 
-auth-mode: "forward"                    # forward: Remote-User from trusted-proxies | oidc
-trusted-proxies: ["10.0.0.0/8"]
-# oidc-issuer: "https://auth.example.com"
-# oidc-client-id: "ntfy-idp-push"
-# oidc-client-secret: "…"                  # or oidc-client-secret-file
+# The enrollment, provisioning and device pages sign users in through the IdP's OIDC provider
+# (Authelia or authentik). Redirect URI: <public-url>/oidc/callback.
+oidc-issuer: "https://auth.example.com"
+oidc-client-id: "ntfy-idp-push"
+oidc-client-secret: "…"                  # or oidc-client-secret-file
+# trusted-proxies: ["10.0.0.0/8"]        # peers whose X-Forwarded-For is believed for audit IPs and rate limits
 enroll-portal-url: "https://push.example.com/enroll"   # empty: unenrolled users are denied
 
 ntfy-base-url: "https://ntfy.example.com"

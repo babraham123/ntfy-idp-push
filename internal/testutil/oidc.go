@@ -18,6 +18,7 @@ import (
 const (
 	OIDCClientID     = "ntfy-idp-push"
 	OIDCClientSecret = "oidc-secret"
+	accessToken      = "at"
 )
 
 // FakeOIDC simulates an OpenID provider, immediately returning an authorization code without a
@@ -29,7 +30,9 @@ type FakeOIDC struct {
 	mu sync.Mutex
 	// Claims are put in the next ID tokens; "sub" defaults to preferred_username.
 	claims map[string]any
-	codes  map[string]pendingCode
+	// userinfo, when set, is what GET /userinfo answers for the issued access token.
+	userinfo map[string]any
+	codes    map[string]pendingCode
 }
 
 type pendingCode struct{ challenge, redirect string }
@@ -47,6 +50,7 @@ func NewFakeOIDC(t *testing.T) *FakeOIDC {
 			"authorization_endpoint":                f.URL + "/authorize",
 			"token_endpoint":                        f.URL + "/token",
 			"jwks_uri":                              f.URL + "/jwks",
+			"userinfo_endpoint":                     f.URL + "/userinfo",
 			"id_token_signing_alg_values_supported": []string{"RS256"},
 		})
 	})
@@ -58,16 +62,42 @@ func NewFakeOIDC(t *testing.T) *FakeOIDC {
 	})
 	mux.HandleFunc("GET /authorize", f.authorize)
 	mux.HandleFunc("POST /token", f.token)
+	mux.HandleFunc("GET /userinfo", f.userInfo)
 	f.Server = httptest.NewServer(mux)
 	t.Cleanup(f.Close)
 	return f
 }
 
-// SignIn sets the claims of the ID tokens issued from now on.
+// SignIn sets the claims of the ID tokens issued from now on; userinfo answers with the same
+// claims, as a provider that puts profile claims in both does.
 func (f *FakeOIDC) SignIn(claims map[string]any) {
+	f.SignInSplit(claims, claims)
+}
+
+// SignInSplit sets the ID token claims and, separately, the userinfo claims, as a provider that
+// keeps profile claims out of the ID token does.
+func (f *FakeOIDC) SignInSplit(idToken, userinfo map[string]any) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.claims = claims
+	f.claims, f.userinfo = idToken, userinfo
+}
+
+func (f *FakeOIDC) userInfo(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("Authorization") != "Bearer "+accessToken {
+		http.Error(w, "invalid_token", http.StatusUnauthorized)
+		return
+	}
+	f.mu.Lock()
+	out := map[string]any{}
+	for k, v := range f.userinfo {
+		out[k] = v
+	}
+	f.mu.Unlock()
+	if _, set := out["sub"]; !set {
+		out["sub"] = out["preferred_username"]
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(out)
 }
 
 func (f *FakeOIDC) authorize(w http.ResponseWriter, r *http.Request) {
@@ -114,7 +144,7 @@ func (f *FakeOIDC) token(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
-		"access_token": "at", "token_type": "Bearer", "expires_in": 3600, "id_token": f.sign(claims),
+		"access_token": accessToken, "token_type": "Bearer", "expires_in": 3600, "id_token": f.sign(claims),
 	})
 }
 

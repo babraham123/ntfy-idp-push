@@ -514,16 +514,19 @@ func TestUnverifiedDeviceHidden(t *testing.T) {
 	}
 }
 
-func TestForwardAuthOnlyFromTrustedProxies(t *testing.T) {
-	h := testutil.NewHarness(t, func(c *config.Config) { c.TrustedProxies = []string{"10.9.9.9"} })
-	resp, _ := h.Do(t, testutil.Request{Method: "GET", Path: "/devices", User: "alice"})
-	if resp.StatusCode != 403 {
-		t.Fatalf("untrusted Remote-User: %d", resp.StatusCode)
-	}
-	h = testutil.NewHarness(t, nil)
-	resp, _ = h.Do(t, testutil.Request{Method: "GET", Path: "/devices"})
-	if resp.StatusCode != 403 {
-		t.Fatalf("missing Remote-User: %d", resp.StatusCode)
+// The self-service pages know a user only from the shim's own OIDC session. A proxy header names
+// nobody.
+func TestPagesRequireSignIn(t *testing.T) {
+	h := testutil.NewHarness(t, nil)
+	for name, hdr := range map[string]map[string]string{"anonymous": nil, "Remote-User header": {"Remote-User": "alice"}} {
+		resp, _ := h.Do(t, testutil.Request{Method: "GET", Path: "/devices", Header: hdr})
+		if resp.StatusCode != 302 || resp.Header.Get("Location") != "/oidc/login?next=%2Fdevices" {
+			t.Fatalf("%s: %d %s", name, resp.StatusCode, resp.Header.Get("Location"))
+		}
+		resp, _ = h.Do(t, testutil.Request{Method: "POST", Path: "/devices/x/revoke", Header: hdr})
+		if resp.StatusCode != 401 {
+			t.Fatalf("%s POST: %d", name, resp.StatusCode)
+		}
 	}
 }
 

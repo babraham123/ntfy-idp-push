@@ -6,7 +6,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"strings"
 
 	"github.com/babraham123/ntfy-idp-push/internal/core"
 	"github.com/babraham123/ntfy-idp-push/internal/oidc"
@@ -18,13 +17,10 @@ type Identity interface {
 	User(w http.ResponseWriter, r *http.Request) (string, bool)
 }
 
-// NewIdentity returns the identity for the auth-mode. OIDC also registers its login/callback
-// routes.
+// NewIdentity signs users in through the IdP's OIDC provider and registers the login and callback
+// routes on mux.
 func NewIdentity(ctx context.Context, svc *core.Service, mux *http.ServeMux) (Identity, error) {
 	cfg := svc.Config()
-	if cfg.AuthMode != "oidc" {
-		return ForwardAuth{Trusted: func() []*net.IPNet { return svc.Config().TrustedNets }}, nil
-	}
 	a, err := oidc.New(ctx, cfg.OIDCIssuer, cfg.OIDCClientID, cfg.OIDCClientSecret, cfg.PublicURL, svc.Store)
 	if err != nil {
 		return nil, fmt.Errorf("oidc: %w", err)
@@ -49,24 +45,6 @@ func trusted(nets []*net.IPNet, ip net.IP) bool {
 		}
 	}
 	return false
-}
-
-// ForwardAuth trusts Remote-User set by an Authelia forward-auth proxy, from trusted-proxies only.
-type ForwardAuth struct {
-	Trusted func() []*net.IPNet
-}
-
-func (f ForwardAuth) User(w http.ResponseWriter, r *http.Request) (string, bool) {
-	if !trusted(f.Trusted(), remoteIP(r)) {
-		http.Error(w, "forbidden: request did not come through the authenticating proxy", http.StatusForbidden)
-		return "", false
-	}
-	u := strings.TrimSpace(r.Header.Get("Remote-User"))
-	if u == "" {
-		http.Error(w, "forbidden: proxy sent no Remote-User", http.StatusForbidden)
-		return "", false
-	}
-	return u, true
 }
 
 type OIDCAuth struct{ *oidc.Auth }

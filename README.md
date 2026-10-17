@@ -20,6 +20,7 @@ cp deploy/server.yml deploy/config/server.yml     # fill in; leave the secrets o
 cp tls.crt tls.key deploy/config/
 printf '%s' '<secret key>' > deploy/secrets/duo_secret_key
 printf '%s' 'tk_…' > deploy/secrets/ntfy_admin_token
+printf '%s' '<client secret>' > deploy/secrets/oidc_client_secret
 docker compose -f deploy/compose.yaml up -d
 ```
 
@@ -32,15 +33,15 @@ services:
     volumes:
       - ./config:/etc/ntfy-idp-push:ro     # a directory, so replaced files are seen
       - state:/var/lib/ntfy-idp-push
-    environment:
-      NTFY_IDP_PUSH_TLS_CERT_FILE: /etc/ntfy-idp-push/tls.crt
-      NTFY_IDP_PUSH_TLS_KEY_FILE: /etc/ntfy-idp-push/tls.key
+    environment:                           # where the app reads each mounted secret
       NTFY_IDP_PUSH_DUO_SECRET_KEY_FILE: /run/secrets/duo_secret_key
       NTFY_IDP_PUSH_NTFY_ADMIN_TOKEN_FILE: /run/secrets/ntfy_admin_token
-    secrets: [duo_secret_key, ntfy_admin_token]
-secrets:
+      NTFY_IDP_PUSH_OIDC_CLIENT_SECRET_FILE: /run/secrets/oidc_client_secret
+    secrets: [duo_secret_key, ntfy_admin_token, oidc_client_secret]   # mounts them at /run/secrets/<name>
+secrets:                                   # where Compose reads each secret on the host
   duo_secret_key: {file: ./secrets/duo_secret_key}
   ntfy_admin_token: {file: ./secrets/ntfy_admin_token}
+  oidc_client_secret: {file: ./secrets/oidc_client_secret}
 volumes:
   state:
 ```
@@ -71,7 +72,23 @@ duo_api:
   integration_key: DI…
   secret_key: …
   enable_self_enrollment: true
+
+identity_providers:
+  oidc:
+    clients:
+      - client_id: ntfy-idp-push
+        client_secret: $pbkdf2-sha512$…         # authelia crypto hash generate; plaintext in oidc-client-secret
+        authorization_policy: two_factor        # a stolen password alone must not enroll a phone
+        redirect_uris: [https://push.example.com/oidc/callback]   # <public-url>/oidc/callback
+        scopes: [openid, profile]               # profile carries preferred_username
+        require_pkce: true
+        pkce_challenge_method: S256
 ```
+
+First enrollment: the user registers another second factor in Authelia (TOTP or a browser passkey), uses
+it to pass the `two_factor` policy on the shim's client, and enrolls the phone at `/enroll`; push works
+from then on. Without one, an admin issues a single-use link with `enroll-link <user>`. authentik enrolls
+through its own Duo stage (`/auth/v2/enroll`).
 
 Startup fails closed if the ntfy token is not admin, anonymous reads of push topics are allowed, or the
 ntfy user list exceeds the client's 1 MiB response cap.
@@ -97,25 +114,50 @@ To restore, stop the server and replace `db.sqlite` with the copy, deleting any 
 ## CLI
 
 ```
-serve | keygen [--rotate] | enroll-link <user> | audit [user] | backup <path>|- | healthcheck [url] | version
-user list | provision <u> | disable <u> | enable <u> | delete <u> [--keep-ntfy-user] | approve <challenge>
-user reset-ntfy <u> [--force]
-device list <u> | revoke <id> [--reset-ntfy-user] [--force]
+ntfy-idp-push [-c config.yml] <command>
+
+Server
+  serve                                      run the server
+  healthcheck [url]                          exit 0 if /healthz answers (default https://127.0.0.1:8443/healthz)
+  backup <path>|-                            consistent database copy, safe while serving
+  keygen [--rotate]                          new integration/secret keys, or rotate the secret in the config
+  version
+
+Users
+  user list
+  user provision <user>                      create the ntfy account and apply enroll-access
+  user disable|enable <user>
+  user delete <user> [--keep-ntfy-user]
+  user reset-ntfy <user> [--force]           recreate the ntfy user, invalidating its tokens
+  user approve <challenge-id>                approve a pending login without a passkey (break-glass)
+  enroll-link <user>                         single-use enrollment link, valid 5 minutes
+  audit [user]                               last 100 audit entries
+
+Devices
+  device list <user>
+  device revoke <device-id> [--reset-ntfy-user] [--force]
 ```
 
 ## Routes
 
-| Path | Who | Purpose |
+Access: **IdP** needs a session from the shim's own OIDC sign-in; pages redirect to `/oidc/login`.
+**Public** must be reachable from the user's phone and browser; each route checks its own code, token or
+passkey. **Internal** is called only by the IdP server or the container healthcheck. Nothing needs
+protecting or bypassing at a proxy.
+
+| Path | Access | Purpose |
 |---|---|---|
-| `/auth/v2/{ping,check,preauth,auth,enroll,enroll_status}` | IdP (signed) | Duo Auth API |
-| `/enroll` | forward-auth/OIDC user, or `?code=` | register passkey, get ntfy link |
-| `/enroll/resend`, `/enroll/password` | the enrollment result page | resend the setup push; set an ntfy password for apps without one-tap sign-in |
-| `/enroll/verify/<device>` | the phone (from the test push) | activate device |
-| `/challenge/<id>` | the phone (from the push) | approve with passkey, or report fraud |
-| `/challenge/<id>/deny` | ntfy app `http` action | deny with token |
-| `/provision`, `/provision/password`, `/devices` | forward-auth/OIDC user | ntfy account setup and manual sign-in, device list/revoke |
-| `/enroll/qr` | IdP | QR for an issued enrollment URL |
-| `/oidc/login`, `/oidc/callback` | browser (`auth-mode: oidc`) | sign in to the pages above |
+| `/provision`<br>`/provision/password`<br>`/devices`<br>`/devices/<id>/revoke` | IdP | ntfy account setup and manual sign-in; device list and revoke |
+| `/enroll`<br>`/enroll/begin`<br>`/enroll/finish` | Public with `?code=`, else IdP | register a passkey, get the ntfy link |
+| `/enroll/resend`<br>`/enroll/password` | Public (result-page token) | resend the setup push; set an ntfy password for apps without one-tap sign-in |
+| `/enroll/verify/<device>` | Public (token in the setup push) | activate the device |
+| `/enroll/qr` | Public (shim-issued codes only) | QR for an enrollment URL, shown by the IdP |
+| `/challenge/<id>`<br>`/challenge/<id>/options`<br>`/challenge/<id>/assert`<br>`/challenge/<id>/fraud` | Public (passkey) | approve a sign-in, or report fraud |
+| `/challenge/<id>/deny` | Public (deny token) | the ntfy app's Deny action |
+| `/oidc/login`<br>`/oidc/callback` | Public | sign in to the IdP pages |
+| `/static/` | Public | page assets |
+| `/auth/v2/ping`<br>`/auth/v2/check`<br>`/auth/v2/preauth`<br>`/auth/v2/auth`<br>`/auth/v2/enroll`<br>`/auth/v2/enroll_status` | Internal (IdP server; HMAC-signed except `ping`) | Duo Auth API; see [TLS](#tls) for certificate pinning |
+| `/healthz` | Internal | health check |
 
 ## Releases
 

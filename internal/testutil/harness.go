@@ -23,7 +23,9 @@ import (
 	"github.com/babraham123/ntfy-idp-push/internal/core"
 	"github.com/babraham123/ntfy-idp-push/internal/duoapi"
 	"github.com/babraham123/ntfy-idp-push/internal/ntfy"
+	"github.com/babraham123/ntfy-idp-push/internal/oidc"
 	"github.com/babraham123/ntfy-idp-push/internal/store"
+	"github.com/babraham123/ntfy-idp-push/internal/token"
 	"github.com/babraham123/ntfy-idp-push/internal/web"
 )
 
@@ -33,11 +35,13 @@ const (
 	PublicURL = "https://push.test"
 )
 
-// Harness is the whole shim on an httptest TLS server, with a fake ntfy behind it.
+// Harness is the whole shim on an httptest TLS server, with a fake ntfy and a fake OIDC provider
+// behind it.
 type Harness struct {
 	Cfg    *config.Config
 	Svc    *core.Service
 	Ntfy   *FakeNtfy
+	OIDC   *FakeOIDC
 	Server *httptest.Server
 	// Host is what Duo clients put in the Host header and sign (duo-hostname).
 	Host   string
@@ -50,6 +54,7 @@ type Harness struct {
 func NewHarness(t *testing.T, mutate func(*config.Config)) *Harness {
 	t.Helper()
 	fn := NewFakeNtfy(t)
+	idp := NewFakeOIDC(t)
 	srv := httptest.NewUnstartedServer(nil)
 	host := srv.Listener.Addr().String()
 	cfg := &config.Config{
@@ -61,8 +66,10 @@ func NewHarness(t *testing.T, mutate func(*config.Config)) *Harness {
 		DuoMaxSkew:        config.Duration(300 * time.Second),
 		DuoKeyGrace:       config.Duration(time.Hour),
 		PushTimeout:       config.Duration(10 * time.Second),
-		AuthMode:          "forward",
 		TrustedProxies:    []string{"127.0.0.1/32", "::1/128"},
+		OIDCIssuer:        idp.URL,
+		OIDCClientID:      OIDCClientID,
+		OIDCClientSecret:  OIDCClientSecret,
 		EnrollPortalURL:   PublicURL + "/enroll",
 		NtfyBaseURL:       fn.URL,
 		NtfyAdminToken:    AdminToken,
@@ -87,7 +94,7 @@ func NewHarness(t *testing.T, mutate func(*config.Config)) *Harness {
 	if testing.Verbose() {
 		log = slog.New(slog.NewTextHandler(&testWriter{t}, nil))
 	}
-	h := &Harness{Cfg: cfg, Ntfy: fn, Server: srv, Host: host, Store: st, log: log}
+	h := &Harness{Cfg: cfg, Ntfy: fn, OIDC: idp, Server: srv, Host: host, Store: st, log: log}
 	h.serve(t)
 	// Shorter than push-timeout (like serve's write timeout), forcing blocking auth to extend
 	// its own deadline.
@@ -156,7 +163,8 @@ type Request struct {
 	Method, Path string
 	Body         []byte
 	Header       map[string]string
-	// User is sent as Remote-User, as the forward-auth proxy would.
+	// User, when set, is signed in: the request carries a session cookie for that user, as the
+	// browser would after the OIDC callback.
 	User string
 }
 
@@ -172,7 +180,11 @@ func (h *Harness) Do(t *testing.T, r Request) (*http.Response, []byte) {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	if r.User != "" {
-		req.Header.Set("Remote-User", r.User)
+		id := token.Random(16)
+		if err := h.Store.CreateSession(req.Context(), id, r.User, time.Now().Add(time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		req.AddCookie(&http.Cookie{Name: oidc.SessionCookie, Value: id})
 	}
 	for k, v := range r.Header {
 		if v == "" {

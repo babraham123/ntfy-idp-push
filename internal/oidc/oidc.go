@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -20,14 +21,16 @@ import (
 )
 
 const (
-	flowCookie    = "nip_oidc"
-	sessionCookie = "nip_session"
+	flowCookie = "nip_oidc"
+	// SessionCookie carries the session ID issued by the callback.
+	SessionCookie = "nip_session"
 	sessionTTL    = 12 * time.Hour
 	CallbackPath  = "/oidc/callback"
 	LoginPath     = "/oidc/login"
 )
 
 type Auth struct {
+	provider *gooidc.Provider
 	oauth    oauth2.Config
 	verifier *gooidc.IDTokenVerifier
 	store    *store.Store
@@ -40,6 +43,7 @@ func New(ctx context.Context, issuer, clientID, clientSecret, publicURL string, 
 		return nil, err
 	}
 	return &Auth{
+		provider: p,
 		oauth: oauth2.Config{
 			ClientID:     clientID,
 			ClientSecret: clientSecret,
@@ -60,7 +64,7 @@ func (a *Auth) cookie(name, value string, maxAge time.Duration) *http.Cookie {
 
 // User returns the signed-in username, or "" when there is no valid session.
 func (a *Auth) User(r *http.Request) string {
-	c, err := r.Cookie(sessionCookie)
+	c, err := r.Cookie(SessionCookie)
 	if err != nil {
 		return ""
 	}
@@ -103,6 +107,36 @@ func (a *Auth) Callback(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, next, http.StatusFound)
 }
 
+// username is preferred_username from the ID token, or from the userinfo endpoint when the
+// provider leaves profile claims out of the ID token (Authelia 4.39+ does by default). The userinfo
+// response must be about the same subject as the ID token.
+func (a *Auth) username(ctx context.Context, idt *gooidc.IDToken, tok *oauth2.Token) (string, error) {
+	var claims struct {
+		Subject           string `json:"sub"`
+		PreferredUsername string `json:"preferred_username"`
+	}
+	if err := idt.Claims(&claims); err != nil {
+		return "", err
+	}
+	if claims.PreferredUsername != "" {
+		return claims.PreferredUsername, nil
+	}
+	ui, err := a.provider.UserInfo(ctx, oauth2.StaticTokenSource(tok))
+	if err != nil {
+		return "", fmt.Errorf("id_token lacks preferred_username and userinfo failed: %w", err)
+	}
+	if ui.Subject != idt.Subject {
+		return "", errors.New("userinfo subject does not match id_token")
+	}
+	if err := ui.Claims(&claims); err != nil {
+		return "", err
+	}
+	if claims.PreferredUsername == "" {
+		return "", errors.New("neither id_token nor userinfo has preferred_username")
+	}
+	return claims.PreferredUsername, nil
+}
+
 func (a *Auth) callback(w http.ResponseWriter, r *http.Request) (string, error) {
 	c, err := r.Cookie(flowCookie)
 	if err != nil {
@@ -126,16 +160,14 @@ func (a *Auth) callback(w http.ResponseWriter, r *http.Request) (string, error) 
 	if err != nil {
 		return "", err
 	}
-	var claims struct {
-		PreferredUsername string `json:"preferred_username"`
-	}
-	if err := idt.Claims(&claims); err != nil || claims.PreferredUsername == "" {
-		return "", errors.New("id_token lacks preferred_username")
-	}
-	id := token.Random(32)
-	if err := a.store.CreateSession(r.Context(), id, claims.PreferredUsername, time.Now().Add(sessionTTL)); err != nil {
+	username, err := a.username(r.Context(), idt, tok)
+	if err != nil {
 		return "", err
 	}
-	http.SetCookie(w, a.cookie(sessionCookie, id, sessionTTL))
+	id := token.Random(32)
+	if err := a.store.CreateSession(r.Context(), id, username, time.Now().Add(sessionTTL)); err != nil {
+		return "", err
+	}
+	http.SetCookie(w, a.cookie(SessionCookie, id, sessionTTL))
 	return LocalPath(string(next)), nil
 }

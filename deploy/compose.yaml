@@ -11,15 +11,17 @@ services:
     volumes:
       - ./config:/etc/ntfy-idp-push:ro
       - state:/var/lib/ntfy-idp-push
+    # A secret is named three times: the top-level secrets: says where Compose reads it on the host, the
+    # service's secrets: mounts it at /run/secrets/<name>, and the _FILE variable tells the app that path.
+    # Reading secrets from files keeps them out of server.yml and the environment.
     environment:
-      NTFY_IDP_PUSH_TLS_CERT_FILE: /etc/ntfy-idp-push/tls.crt
-      NTFY_IDP_PUSH_TLS_KEY_FILE: /etc/ntfy-idp-push/tls.key
-      # Secrets from files keep them out of server.yml and the environment; leave them out of server.yml.
       NTFY_IDP_PUSH_DUO_SECRET_KEY_FILE: /run/secrets/duo_secret_key
       NTFY_IDP_PUSH_NTFY_ADMIN_TOKEN_FILE: /run/secrets/ntfy_admin_token
+      NTFY_IDP_PUSH_OIDC_CLIENT_SECRET_FILE: /run/secrets/oidc_client_secret
     secrets:
       - duo_secret_key
       - ntfy_admin_token
+      - oidc_client_secret
     healthcheck:
       test: ["CMD", "/usr/bin/ntfy-idp-push", "healthcheck"]
       interval: 30s
@@ -30,6 +32,8 @@ secrets:
     file: ./secrets/duo_secret_key
   ntfy_admin_token:
     file: ./secrets/ntfy_admin_token
+  oidc_client_secret:
+    file: ./secrets/oidc_client_secret
 
 volumes:
   state:

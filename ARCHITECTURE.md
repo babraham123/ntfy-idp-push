@@ -33,7 +33,7 @@ internal/config/     YAML + NTFY_IDP_PUSH_* env + <key>-file secrets; validation
 internal/duoapi/     Duo Auth API: signature verification (v2/v5), replay guard, preauth/auth/enroll
 internal/core/       provisioning, enrollment, login (eligibility, challenges), revocation, purge, startup checks
 internal/webauthn/   passkey registration/assertion over stored passkeys (wraps go-webauthn); synced-passkey (BE flag) policy
-internal/web/        enrollment, approval, provisioning and device pages; identity (forward auth / OIDC)
+internal/web/        enrollment, approval, provisioning and device pages; identity (OIDC session)
 internal/oidc/       OIDC client (code + PKCE), session cookie
 internal/ntfy/       ntfy admin, publish and token client
 internal/store/      SQLite (modernc.org/sqlite, pure Go), migrations
@@ -160,10 +160,15 @@ deep link per `default-topics` entry; on desktops, a QR and web-app links to
 `<ntfy-base-url>/account/token/redeem#code=…&subscribe=…` (the fragment never reaches a server log).
 Reloading supersedes the previous code.
 
-Identity for `/enroll`, `/provision`, `/devices`: `auth-mode: forward` trusts `Remote-User` from
-`trusted-proxies` only; `auth-mode: oidc` signs in with any OIDC provider (code + PKCE,
-`preferred_username`). The Duo API routes and `/challenge/*` use neither. Use a `two_factor` policy for the
-shim in the IdP: with `one_factor`, a stolen password could enroll an attacker's phone.
+Identity for `/enroll`, `/provision`, `/devices`: the shim signs the user in with the IdP's OIDC provider
+(code + PKCE, `preferred_username`) and keeps a 12 h session cookie. No proxy header is trusted, so nothing
+at the proxy needs protecting or bypassing. The Duo API routes, `/challenge/*` and every code- or
+token-authenticated enrollment route use no identity. In the IdP, require a second factor for the shim's
+OIDC client: with password only, a stolen password could enroll an attacker's phone. A user with no
+second factor yet cannot pass that check, so first enrollment is one of: another second-factor method
+registered in the IdP first (TOTP or a browser passkey in Authelia), which then unlocks the portal;
+`enroll-link`, an admin-issued single-use code; or authentik's IdP-driven enrollment, which needs no
+portal session.
 
 ### IdP-driven enrollment
 

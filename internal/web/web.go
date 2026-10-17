@@ -108,7 +108,7 @@ func (s *Server) render(w http.ResponseWriter, status int, name string, data any
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	// Pages carry ntfy sign-in codes and passwords, and per-user content under forward auth.
+	// Pages carry ntfy sign-in codes and passwords, and per-user content.
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'")
 	// Not no-referrer: with it, browsers send "Origin: null" on form posts and sameOrigin refuses them.
