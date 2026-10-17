@@ -41,7 +41,7 @@ volumes:
 
 Build the local image with `make image`. Execute CLI commands inside the container using `docker compose -f deploy/compose.yaml exec ntfy-idp-push ntfy-idp-push <command>`.
 
-**Configuration:** Set keys from [`deploy/server.yml`](deploy/server.yml) via environment variables as `NTFY_IDP_PUSH_<KEY>`. Load secrets (`duo-secret-key`, `duo-secret-key-previous`, `ntfy-admin-token`) from files using `<key>-file` or `NTFY_IDP_PUSH_<KEY>_FILE` (ideal for Docker secrets or systemd credentials). Reload per-request settings (`push-disabled`, keys, secret files, `enroll-access`, `push-timeout`, `trusted-proxies`, `identity-header`) with `SIGHUP` (`docker compose kill -s HUP`).
+**Configuration:** Set keys from [`deploy/server.yml`](deploy/server.yml) via environment variables as `NTFY_IDP_PUSH_<KEY>`. Load secrets (`duo-secret-key`, `duo-secret-key-previous`, `ntfy-admin-token`) from files using `<key>-file` or `NTFY_IDP_PUSH_<KEY>_FILE` (ideal for Docker secrets or systemd credentials). Reload per-request settings (`push-disabled`, keys, secret files including a rotated `ntfy-admin-token`, `enroll-access`, `push-timeout`, `trusted-proxies`, `identity-header`) with `SIGHUP` (`docker compose kill -s HUP`). A reload that changes `listen-http`, `database`, `public-url`, `webauthn-*` or `ntfy-topic-prefix` is refused and logged; restart instead.
 
 ntfy prerequisites (`server.yml`):
 
@@ -127,6 +127,7 @@ Users
   user approve <challenge-id>                approve a pending login without a passkey (break-glass)
   enroll-link <user>                         single-use enrollment link, valid 5 minutes
   audit [user]                               last 100 audit entries
+                                             (write "--" before a username that starts with "-")
 
 Devices
   device list <user>
@@ -169,4 +170,4 @@ make test   # go test -race ./...
 make lint   # gofmt, go vet, staticcheck, govulncheck; CI runs both on every PR
 ```
 
-Tests execute the real `duo_api_golang` client (v2 form, v5 JSON signing) against the server using a fake ntfy and a software WebAuthn authenticator, with the test client standing in for the proxy's forward-auth. They cover enrollment, push, passkey approval, deny, fraud, timeout, revocation, provisioning, and proxy identity.
+Tests execute the real `duo_api_golang` client (v2 form, v5 JSON signing) against the handler `serve` runs, using a fake ntfy and a software WebAuthn authenticator, with the test client standing in for the proxy's forward-auth. They cover enrollment, push, passkey approval, deny, fraud, timeout, revocation, provisioning, and proxy identity.

@@ -8,12 +8,12 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/babraham123/ntfy-idp-push/internal/store"
+	"github.com/babraham123/ntfy-idp-push/internal/model"
 	"github.com/babraham123/ntfy-idp-push/internal/testutil"
 	"github.com/babraham123/ntfy-idp-push/internal/webauthn"
 )
 
-var alice = &store.User{ID: "user-alice", Username: "alice"}
+var alice = &model.User{ID: "user-alice", Username: "alice"}
 
 func newRP(t *testing.T, allowSynced bool) *webauthn.RP {
 	t.Helper()
@@ -24,7 +24,7 @@ func newRP(t *testing.T, allowSynced bool) *webauthn.RP {
 	return rp
 }
 
-func register(t *testing.T, rp *webauthn.RP, a *testutil.Authenticator) (store.Passkey, error) {
+func register(t *testing.T, rp *webauthn.RP, a *testutil.Authenticator) (model.Passkey, error) {
 	t.Helper()
 	opts, session, err := rp.BeginRegistration(alice, "Pixel")
 	if err != nil {
@@ -41,7 +41,7 @@ func nonce(t *testing.T) []byte {
 	return n
 }
 
-func loginOptions(t *testing.T, rp *webauthn.RP, pks []store.Passkey, n []byte) json.RawMessage {
+func loginOptions(t *testing.T, rp *webauthn.RP, pks []model.Passkey, n []byte) json.RawMessage {
 	t.Helper()
 	opts, err := rp.BeginLogin(alice.ID, pks, n)
 	if err != nil {
@@ -62,7 +62,7 @@ func TestRegisterThenLogin(t *testing.T) {
 	}
 
 	n := nonce(t)
-	opts := loginOptions(t, rp, []store.Passkey{pk}, n)
+	opts := loginOptions(t, rp, []model.Passkey{pk}, n)
 	var o struct {
 		PublicKey struct {
 			Challenge        string `json:"challenge"`
@@ -87,7 +87,7 @@ func TestRegisterThenLogin(t *testing.T) {
 	}
 
 	first, second := a.Get(t, opts), a.Get(t, opts) // counters 1 and 2
-	pk2, regressed, err := rp.FinishLogin(alice.ID, []store.Passkey{pk}, n, bytes.NewReader(second))
+	pk2, regressed, err := rp.FinishLogin(alice.ID, []model.Passkey{pk}, n, bytes.NewReader(second))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestRegisterThenLogin(t *testing.T) {
 	}
 
 	// The returned record is what gets stored, so the next login must see its counter.
-	pk3, regressed, err := rp.FinishLogin(alice.ID, []store.Passkey{pk2}, n, bytes.NewReader(first))
+	pk3, regressed, err := rp.FinishLogin(alice.ID, []model.Passkey{pk2}, n, bytes.NewReader(first))
 	if err != nil {
 		t.Fatalf("stale counter refused: %v", err)
 	}
@@ -117,20 +117,20 @@ func TestLoginRefusals(t *testing.T) {
 		t.Fatal(err)
 	}
 	n := nonce(t)
-	assertion := a.Get(t, loginOptions(t, rp, []store.Passkey{pk}, n))
+	assertion := a.Get(t, loginOptions(t, rp, []model.Passkey{pk}, n))
 
-	if _, _, err := rp.FinishLogin(alice.ID, []store.Passkey{other}, n, bytes.NewReader(assertion)); err == nil {
+	if _, _, err := rp.FinishLogin(alice.ID, []model.Passkey{other}, n, bytes.NewReader(assertion)); err == nil {
 		t.Fatal("assertion by another device's passkey accepted")
 	}
-	if _, _, err := rp.FinishLogin(alice.ID, []store.Passkey{pk}, nonce(t), bytes.NewReader(assertion)); err == nil {
+	if _, _, err := rp.FinishLogin(alice.ID, []model.Passkey{pk}, nonce(t), bytes.NewReader(assertion)); err == nil {
 		t.Fatal("assertion over another nonce accepted")
 	}
 	a.Flags |= testutil.FlagBE | testutil.FlagBS
-	if _, _, err := rp.FinishLogin(alice.ID, []store.Passkey{pk}, n, bytes.NewReader(a.Get(t, loginOptions(t, rp, []store.Passkey{pk}, n)))); err == nil {
+	if _, _, err := rp.FinishLogin(alice.ID, []model.Passkey{pk}, n, bytes.NewReader(a.Get(t, loginOptions(t, rp, []model.Passkey{pk}, n)))); err == nil {
 		t.Fatal("backup-eligible assertion accepted")
 	}
 	a.Flags = 0
-	if _, _, err := rp.FinishLogin(alice.ID, []store.Passkey{pk}, n, bytes.NewReader(a.Get(t, loginOptions(t, rp, []store.Passkey{pk}, n)))); err == nil {
+	if _, _, err := rp.FinishLogin(alice.ID, []model.Passkey{pk}, n, bytes.NewReader(a.Get(t, loginOptions(t, rp, []model.Passkey{pk}, n)))); err == nil {
 		t.Fatal("assertion without user verification accepted")
 	}
 }
@@ -148,16 +148,16 @@ func TestSyncedPasskeyPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	n := nonce(t)
-	assertion := a.Get(t, loginOptions(t, lenient, []store.Passkey{pk}, n))
-	if _, _, err := lenient.FinishLogin(alice.ID, []store.Passkey{pk}, n, bytes.NewReader(assertion)); err != nil {
+	assertion := a.Get(t, loginOptions(t, lenient, []model.Passkey{pk}, n))
+	if _, _, err := lenient.FinishLogin(alice.ID, []model.Passkey{pk}, n, bytes.NewReader(assertion)); err != nil {
 		t.Fatalf("lenient login with a synced passkey: %v", err)
 	}
 
 	// A synced passkey enrolled while allowed is locked out once the policy is tightened.
-	if _, err := strict.BeginLogin(alice.ID, []store.Passkey{pk}, n); !errors.Is(err, webauthn.ErrNoUsableCredential) {
+	if _, err := strict.BeginLogin(alice.ID, []model.Passkey{pk}, n); !errors.Is(err, webauthn.ErrNoUsableCredential) {
 		t.Fatalf("strict begin with a synced passkey: %v", err)
 	}
-	if _, _, err := strict.FinishLogin(alice.ID, []store.Passkey{pk}, n, bytes.NewReader(assertion)); !errors.Is(err, webauthn.ErrNoUsableCredential) {
+	if _, _, err := strict.FinishLogin(alice.ID, []model.Passkey{pk}, n, bytes.NewReader(assertion)); !errors.Is(err, webauthn.ErrNoUsableCredential) {
 		t.Fatalf("strict finish with a synced passkey: %v", err)
 	}
 }

@@ -12,6 +12,8 @@ import (
 	"time"
 
 	_ "modernc.org/sqlite"
+
+	"github.com/babraham123/ntfy-idp-push/internal/model"
 )
 
 var ErrNotFound = errors.New("not found")
@@ -173,14 +175,7 @@ func (s *Store) Audit(ctx context.Context, username, event string, detail map[st
 		unix(time.Now()), username, event, string(b))
 }
 
-type AuditEntry struct {
-	TS       time.Time
-	Username string
-	Event    string
-	Detail   string
-}
-
-func (s *Store) AuditLog(ctx context.Context, username string, limit int) ([]AuditEntry, error) {
+func (s *Store) AuditLog(ctx context.Context, username string, limit int) ([]model.AuditEntry, error) {
 	q := `SELECT ts, username, event, detail_json FROM audit`
 	args := []any{}
 	if username != "" {
@@ -194,9 +189,9 @@ func (s *Store) AuditLog(ctx context.Context, username string, limit int) ([]Aud
 		return nil, err
 	}
 	defer rows.Close()
-	var out []AuditEntry
+	var out []model.AuditEntry
 	for rows.Next() {
-		var e AuditEntry
+		var e model.AuditEntry
 		var ts int64
 		if err := rows.Scan(&ts, &e.Username, &e.Event, &e.Detail); err != nil {
 			return nil, err
@@ -225,11 +220,11 @@ func (s *Store) Purge(ctx context.Context, now time.Time, unverifiedTTL, challen
 }
 
 // ExpiredUnverifiedDevices lists unrevoked devices never verified within unverifiedTTL.
-func (s *Store) ExpiredUnverifiedDevices(ctx context.Context, now time.Time, unverifiedTTL time.Duration) ([]Device, error) {
+func (s *Store) ExpiredUnverifiedDevices(ctx context.Context, now time.Time, unverifiedTTL time.Duration) ([]model.Device, error) {
 	return s.queryDevices(ctx, `WHERE `+pendingDevice+` AND d.created_at < ?`, unix(now.Add(-unverifiedTTL)))
 }
 
 // RevokedDevices lists revoked devices awaiting ntfy cleanup.
-func (s *Store) RevokedDevices(ctx context.Context) ([]Device, error) {
+func (s *Store) RevokedDevices(ctx context.Context) ([]model.Device, error) {
 	return s.queryDevices(ctx, `WHERE d.revoked_at IS NOT NULL`)
 }

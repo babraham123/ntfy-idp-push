@@ -92,7 +92,7 @@ func TestTokenRoutesIgnoreIdentity(t *testing.T) {
 
 	// A code ceremony runs entirely on /token, forged header or not, and the page names the code's
 	// user rather than the header's.
-	code, link, err := h.Svc.CreateEnrollCode(context.Background(), "erin", core.EnrollCodeTTL)
+	code, link, _, err := h.Svc.CreateEnrollCode(context.Background(), "erin", core.EnrollCodeTTL)
 	if err != nil {
 		t.Fatal(err)
 	}

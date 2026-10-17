@@ -3,18 +3,18 @@ package core
 import (
 	"context"
 
-	"github.com/babraham123/ntfy-idp-push/internal/store"
+	"github.com/babraham123/ntfy-idp-push/internal/model"
 )
 
 // UserSummary is a user with the number of its devices that can receive logins.
 type UserSummary struct {
-	store.User
+	model.User
 	ActiveDevices int
 }
 
 // Users lists every user, by username.
 func (s *Service) Users(ctx context.Context) ([]UserSummary, error) {
-	users, err := s.Store.Users(ctx)
+	users, err := s.store.Users(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -29,13 +29,13 @@ func (s *Service) Users(ctx context.Context) ([]UserSummary, error) {
 	return out, nil
 }
 
-// DevicesOf returns the user and all their devices (MRU first).
-func (s *Service) DevicesOf(ctx context.Context, username string) (*store.User, []store.Device, error) {
+// DevicesOf returns the user and all their devices (MRU first); an unknown user is ErrUnknownUser.
+func (s *Service) DevicesOf(ctx context.Context, username string) (*model.User, []model.Device, error) {
 	u, err := s.resolveUser(ctx, UserRef{Username: username})
 	if err != nil {
 		return nil, nil, err
 	}
-	devs, err := s.Store.Devices(ctx, u.ID)
+	devs, err := s.store.Devices(ctx, u.ID)
 	if err != nil {
 		return nil, nil, err
 	}

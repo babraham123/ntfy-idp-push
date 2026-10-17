@@ -10,32 +10,41 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/babraham123/ntfy-idp-push/internal/model"
 	"github.com/babraham123/ntfy-idp-push/internal/store"
 )
 
 // RevokeDevice cuts off a phone's topic grant and (if resetNtfyUser) all user ntfy tokens. force
 // skips checking for foreign ntfy grants.
 func (s *Service) RevokeDevice(ctx context.Context, deviceID string, resetNtfyUser, force bool, actor string) error {
-	d, err := s.Store.Device(ctx, deviceID)
-	if err != nil {
+	d, err := s.store.Device(ctx, deviceID)
+	if errors.Is(err, store.ErrNotFound) {
+		return ErrUnknownDevice
+	} else if err != nil {
 		return err
 	}
 	return s.revoke(ctx, d, resetNtfyUser, force, actor)
 }
 
-// RevokeOwned is RevokeDevice on behalf of the device's owner, who may not force a reset. Another
-// user's device is ErrUnknownDevice, the same as one that does not exist.
+// RevokeOwned is RevokeDevice on behalf of the device's owner, who may not force a reset.
 func (s *Service) RevokeOwned(ctx context.Context, username, deviceID string, resetNtfyUser bool) error {
-	d, err := s.Store.Device(ctx, deviceID)
-	if errors.Is(err, store.ErrNotFound) || (err == nil && d.Username != username) {
-		return ErrUnknownDevice
-	} else if err != nil {
+	d, err := s.ownedDevice(ctx, username, deviceID)
+	if err != nil {
 		return err
 	}
 	return s.revoke(ctx, d, resetNtfyUser, false, username)
 }
 
-func (s *Service) revoke(ctx context.Context, d *store.Device, resetNtfyUser, force bool, actor string) error {
+// user is the user named username; a missing one is ErrUnknownUser.
+func (s *Service) user(ctx context.Context, username string) (*model.User, error) {
+	u, err := s.store.UserByName(ctx, username)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, ErrUnknownUser
+	}
+	return u, err
+}
+
+func (s *Service) revoke(ctx context.Context, d *model.Device, resetNtfyUser, force bool, actor string) error {
 	if resetNtfyUser {
 		// Before revoking anything, so a refusal leaves the device intact.
 		if err := s.requestReset(ctx, d.Username, force); err != nil {
@@ -43,10 +52,10 @@ func (s *Service) revoke(ctx context.Context, d *store.Device, resetNtfyUser, fo
 		}
 	}
 	if d.RevokedAt == nil {
-		if err := s.Store.RevokeDevice(ctx, d.ID, time.Now()); err != nil {
+		if err := s.store.RevokeDevice(ctx, d.ID, time.Now()); err != nil {
 			return err
 		}
-		s.Store.Audit(ctx, d.Username, "device_revoked", map[string]any{"device": d.ID, "by": actor, "reset_ntfy_user": resetNtfyUser})
+		s.store.Audit(ctx, d.Username, "device_revoked", map[string]any{"device": d.ID, "by": actor, "reset_ntfy_user": resetNtfyUser})
 	}
 	if err := s.denyPending(ctx, store.ChallengeFilter{DeviceID: d.ID}); err != nil {
 		return err
@@ -59,7 +68,7 @@ func (s *Service) revoke(ctx context.Context, d *store.Device, resetNtfyUser, fo
 			return fmt.Errorf("device revoked but the ntfy user was not reset; re-run to retry: %w", err)
 		}
 	}
-	return s.Store.DeleteDevice(ctx, d.ID)
+	return s.store.DeleteDevice(ctx, d.ID)
 }
 
 // ResetNtfyUser deletes and recreates the ntfy user to invalidate all its tokens (since ntfy lacks
@@ -74,7 +83,7 @@ func (s *Service) ResetNtfyUser(ctx context.Context, username string, force bool
 // requestReset validates (unless forced) that no foreign grants exist, then records the reset as
 // pending.
 func (s *Service) requestReset(ctx context.Context, username string, force bool) error {
-	u, err := s.Store.UserByName(ctx, username)
+	u, err := s.user(ctx, username)
 	if err != nil {
 		return err
 	}
@@ -83,12 +92,12 @@ func (s *Service) requestReset(ctx context.Context, username string, force bool)
 			return err
 		}
 	}
-	return s.Store.SetNtfyResetPending(ctx, username, true)
+	return s.store.SetNtfyResetPending(ctx, username, true)
 }
 
 // finishReset carries out a requested reset and clears it.
 func (s *Service) finishReset(ctx context.Context, username string) error {
-	u, err := s.Store.UserByName(ctx, username)
+	u, err := s.user(ctx, username)
 	if err != nil {
 		return err
 	}
@@ -96,19 +105,19 @@ func (s *Service) finishReset(ctx context.Context, username string) error {
 	if err != nil {
 		return err
 	}
-	if err := s.Store.SetNtfyResetPending(ctx, username, false); err != nil {
+	if err := s.store.SetNtfyResetPending(ctx, username, false); err != nil {
 		return err
 	}
-	s.Store.Audit(ctx, username, "ntfy_user_reset", map[string]any{"devices": granted})
+	s.store.Audit(ctx, username, "ntfy_user_reset", map[string]any{"devices": granted})
 	return nil
 }
 
 func (s *Service) SetUserDisabled(ctx context.Context, username string, disabled bool) error {
-	u, err := s.Store.UserByName(ctx, username)
+	u, err := s.user(ctx, username)
 	if err != nil {
 		return err
 	}
-	if err := s.Store.SetUserDisabled(ctx, u.ID, disabled); err != nil {
+	if err := s.store.SetUserDisabled(ctx, u.ID, disabled); err != nil {
 		return err
 	}
 	if disabled {
@@ -120,17 +129,17 @@ func (s *Service) SetUserDisabled(ctx context.Context, username string, disabled
 	if disabled {
 		ev = "user_disabled"
 	}
-	s.Store.Audit(ctx, username, ev, nil)
+	s.store.Audit(ctx, username, ev, nil)
 	return nil
 }
 
 // DeleteUser revokes every device and removes the user, and the ntfy user unless keepNtfy.
 func (s *Service) DeleteUser(ctx context.Context, username string, keepNtfy bool) error {
-	u, err := s.Store.UserByName(ctx, username)
+	u, err := s.user(ctx, username)
 	if err != nil {
 		return err
 	}
-	devs, err := s.Store.Devices(ctx, u.ID)
+	devs, err := s.store.Devices(ctx, u.ID)
 	if err != nil {
 		return err
 	}
@@ -144,21 +153,21 @@ func (s *Service) DeleteUser(ctx context.Context, username string, keepNtfy bool
 			return err
 		}
 	}
-	if err := s.Store.DeleteUser(ctx, u.ID); err != nil {
+	if err := s.store.DeleteUser(ctx, u.ID); err != nil {
 		return err
 	}
-	s.Store.Audit(ctx, username, "user_deleted", map[string]any{"keep_ntfy_user": keepNtfy})
+	s.store.Audit(ctx, username, "user_deleted", map[string]any{"keep_ntfy_user": keepNtfy})
 	return nil
 }
 
 // Reconcile finishes pending revocations and ntfy user resets independently.
 func (s *Service) Reconcile(ctx context.Context) error {
-	revoked, err := s.Store.RevokedDevices(ctx)
+	revoked, err := s.store.RevokedDevices(ctx)
 	if err != nil {
 		return err
 	}
 	errs := []error{s.removeDevices(ctx, revoked)}
-	resets, err := s.Store.PendingNtfyResets(ctx)
+	resets, err := s.store.PendingNtfyResets(ctx)
 	if err != nil {
 		return errors.Join(append(errs, err)...)
 	}
@@ -172,22 +181,22 @@ func (s *Service) Reconcile(ctx context.Context) error {
 }
 
 // removeDevices removes each device, continuing past failures, which stay for the next run.
-func (s *Service) removeDevices(ctx context.Context, devs []store.Device) error {
+func (s *Service) removeDevices(ctx context.Context, devs []model.Device) error {
 	var errs []error
 	for _, d := range devs {
 		if err := s.removeDevice(ctx, &d); err != nil {
 			errs = append(errs, fmt.Errorf("remove device %s: %w", d.ID, err))
 			continue
 		}
-		s.Store.Audit(ctx, d.Username, "device_purged", map[string]any{"device": d.ID, "revoked": d.RevokedAt != nil})
+		s.store.Audit(ctx, d.Username, "device_purged", map[string]any{"device": d.ID, "revoked": d.RevokedAt != nil})
 	}
 	return errors.Join(errs...)
 }
 
 // removeDevice drops the device's topic grant, then its row.
-func (s *Service) removeDevice(ctx context.Context, d *store.Device) error {
+func (s *Service) removeDevice(ctx context.Context, d *model.Device) error {
 	if err := s.revokeDeviceGrant(ctx, d); err != nil {
 		return err
 	}
-	return s.Store.DeleteDevice(ctx, d.ID)
+	return s.store.DeleteDevice(ctx, d.ID)
 }

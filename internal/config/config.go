@@ -293,6 +293,26 @@ func (c *Config) readSecretFiles() error {
 	return errors.Join(errs...)
 }
 
+// RestartOnly lists the keys of next that differ from c and take effect only on a restart: the
+// listener and database are bound at startup, and the WebAuthn relying party is built from
+// public-url and the webauthn-* keys. Everything else applies to the next request after a reload.
+func (c *Config) RestartOnly(next *Config) []string {
+	var keys []string
+	diff := func(key string, changed bool) {
+		if changed {
+			keys = append(keys, key)
+		}
+	}
+	diff("listen-http", c.ListenHTTP != next.ListenHTTP)
+	diff("database", c.Database != next.Database)
+	diff("public-url", c.PublicURL != next.PublicURL)
+	diff("webauthn-allow-synced", c.WebAuthnAllowSynced != next.WebAuthnAllowSynced)
+	diff("webauthn-require-attestation", c.WebAuthnRequireAttestation != next.WebAuthnRequireAttestation)
+	// Existing devices keep topics under the old prefix, which the shim would then treat as foreign.
+	diff("ntfy-topic-prefix", c.NtfyTopicPrefix != next.NtfyTopicPrefix)
+	return keys
+}
+
 // SecretKeys returns the current key and the previous key (if within duo-key-grace).
 func (c *Config) SecretKeys(now time.Time) []string {
 	keys := []string{c.DuoSecretKey}

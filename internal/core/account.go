@@ -11,7 +11,7 @@ import (
 	"fmt"
 
 	"github.com/babraham123/ntfy-idp-push/internal/config"
-	"github.com/babraham123/ntfy-idp-push/internal/store"
+	"github.com/babraham123/ntfy-idp-push/internal/model"
 	"github.com/babraham123/ntfy-idp-push/internal/token"
 )
 
@@ -22,7 +22,7 @@ func (s *Service) enrollGrants(username string) ([]config.Grant, error) {
 }
 
 // deviceGrants is the read-only grant each unrevoked device of a user should hold.
-func deviceGrants(devs []store.Device) []config.Grant {
+func deviceGrants(devs []model.Device) []config.Grant {
 	var out []config.Grant
 	for _, d := range devs {
 		if d.RevokedAt == nil {
@@ -34,12 +34,12 @@ func deviceGrants(devs []store.Device) []config.Grant {
 
 // applyNtfyAccount ensures the ntfy user exists with grants, ignoring user policy to allow
 // restoring disabled accounts.
-func (s *Service) applyNtfyAccount(ctx context.Context, u *store.User, grants []config.Grant) error {
+func (s *Service) applyNtfyAccount(ctx context.Context, u *model.User, grants []config.Grant) error {
 	if err := s.ensureNtfyUser(ctx, u.Username); err != nil {
 		return err
 	}
 	for _, g := range grants {
-		if err := s.ntfy.AllowAccess(ctx, u.Username, g.Topic, g.Permission); err != nil {
+		if err := s.ntfy().AllowAccess(ctx, u.Username, g.Topic, g.Permission); err != nil {
 			return err
 		}
 	}
@@ -50,13 +50,13 @@ func (s *Service) applyNtfyAccount(ctx context.Context, u *store.User, grants []
 	} else {
 		for _, old := range u.Grants {
 			if !hasTopic(grants, old.Topic) {
-				if err := s.ntfy.ResetAccess(ctx, u.Username, old.Topic); err != nil {
+				if err := s.ntfy().ResetAccess(ctx, u.Username, old.Topic); err != nil {
 					return err
 				}
 			}
 		}
 	}
-	if err := s.Store.SetUserGrants(ctx, u.ID, recorded); err != nil {
+	if err := s.store.SetUserGrants(ctx, u.ID, recorded); err != nil {
 		return err
 	}
 	u.Grants = recorded
@@ -67,17 +67,17 @@ func (s *Service) applyNtfyAccount(ctx context.Context, u *store.User, grants []
 // recreate is set so that every token it had stops working. It returns how many device grants it
 // made. The enroll-access expansion runs before anything is touched, so a refused name leaves ntfy
 // as it was.
-func (s *Service) convergeNtfyAccount(ctx context.Context, u *store.User, recreate bool) (int, error) {
+func (s *Service) convergeNtfyAccount(ctx context.Context, u *model.User, recreate bool) (int, error) {
 	grants, err := s.enrollGrants(u.Username)
 	if err != nil {
 		return 0, err
 	}
-	devs, err := s.Store.Devices(ctx, u.ID)
+	devs, err := s.store.Devices(ctx, u.ID)
 	if err != nil {
 		return 0, err
 	}
 	if recreate {
-		if err := s.ntfy.DeleteUser(ctx, u.Username); err != nil {
+		if err := s.ntfy().DeleteUser(ctx, u.Username); err != nil {
 			return 0, err
 		}
 	}
@@ -86,7 +86,7 @@ func (s *Service) convergeNtfyAccount(ctx context.Context, u *store.User, recrea
 	}
 	dg := deviceGrants(devs)
 	for _, g := range dg {
-		if err := s.ntfy.AllowAccess(ctx, u.Username, g.Topic, g.Permission); err != nil {
+		if err := s.ntfy().AllowAccess(ctx, u.Username, g.Topic, g.Permission); err != nil {
 			return 0, err
 		}
 	}
@@ -94,28 +94,28 @@ func (s *Service) convergeNtfyAccount(ctx context.Context, u *store.User, recrea
 }
 
 // grantDevice gives the device's owner read-only access to its push topic.
-func (s *Service) grantDevice(ctx context.Context, d *store.Device) error {
-	return s.ntfy.AllowAccess(ctx, d.Username, d.NtfyTopic, config.PermReadOnly)
+func (s *Service) grantDevice(ctx context.Context, d *model.Device) error {
+	return s.ntfy().AllowAccess(ctx, d.Username, d.NtfyTopic, config.PermReadOnly)
 }
 
 // revokeDeviceGrant removes the device's topic grant. A missing ntfy user or grant counts as
 // removed.
-func (s *Service) revokeDeviceGrant(ctx context.Context, d *store.Device) error {
-	return s.ntfy.ResetAccess(ctx, d.Username, d.NtfyTopic)
+func (s *Service) revokeDeviceGrant(ctx context.Context, d *model.Device) error {
+	return s.ntfy().ResetAccess(ctx, d.Username, d.NtfyTopic)
 }
 
 func (s *Service) deleteNtfyAccount(ctx context.Context, username string) error {
-	return s.ntfy.DeleteUser(ctx, username)
+	return s.ntfy().DeleteUser(ctx, username)
 }
 
 // checkForeignGrants refuses to reset an account that holds grants the shim did not make, since
 // a reset would silently drop them.
-func (s *Service) checkForeignGrants(ctx context.Context, u *store.User) error {
+func (s *Service) checkForeignGrants(ctx context.Context, u *model.User) error {
 	known, err := s.knownTopics(ctx, u)
 	if err != nil {
 		return err
 	}
-	nu, err := s.ntfy.User(ctx, u.Username)
+	nu, err := s.ntfy().User(ctx, u.Username)
 	if err != nil || nu == nil {
 		return err
 	}
@@ -130,12 +130,12 @@ func (s *Service) checkForeignGrants(ctx context.Context, u *store.User) error {
 // knownTopics is every topic the shim may have granted u: the recorded enroll-access grants and
 // the push topic of every device, revoked ones included, since a revoked device's grant may still
 // be awaiting cleanup.
-func (s *Service) knownTopics(ctx context.Context, u *store.User) (map[string]bool, error) {
+func (s *Service) knownTopics(ctx context.Context, u *model.User) (map[string]bool, error) {
 	known := map[string]bool{}
 	for _, g := range u.Grants {
 		known[g.Topic] = true
 	}
-	devs, err := s.Store.Devices(ctx, u.ID)
+	devs, err := s.store.Devices(ctx, u.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -146,7 +146,7 @@ func (s *Service) knownTopics(ctx context.Context, u *store.User) (map[string]bo
 }
 
 func (s *Service) ensureNtfyUser(ctx context.Context, username string) error {
-	nu, err := s.ntfy.User(ctx, username)
+	nu, err := s.ntfy().User(ctx, username)
 	if err != nil {
 		return err
 	}
@@ -157,7 +157,7 @@ func (s *Service) ensureNtfyUser(ctx context.Context, username string) error {
 		return nil
 	}
 	// Nobody needs the password: the apps sign in with enrollment codes.
-	return s.ntfy.AddUser(ctx, username, token.Random(32))
+	return s.ntfy().AddUser(ctx, username, token.Random(32))
 }
 
 func mergeGrants(a, b []config.Grant) []config.Grant {

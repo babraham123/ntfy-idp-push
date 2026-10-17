@@ -16,6 +16,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/babraham123/ntfy-idp-push/internal/app"
 	"github.com/babraham123/ntfy-idp-push/internal/config"
 	"github.com/babraham123/ntfy-idp-push/internal/core"
 	"github.com/babraham123/ntfy-idp-push/internal/store"
@@ -61,15 +62,20 @@ func buildVersion() string {
 }
 
 func main() {
-	if err := run(os.Args[1:]); err != nil {
+	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	if err := run(os.Args[1:], os.Stdout, log); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
 }
 
-// splitArgs separates flags from positionals so flags may follow positional arguments.
+// splitArgs separates flags from positionals so flags may follow positional arguments. Everything
+// after "--" is positional, which is how a username that starts with "-" is passed.
 func splitArgs(args []string) (flags, pos []string) {
-	for _, a := range args {
+	for i, a := range args {
+		if a == "--" {
+			return flags, append(pos, args[i+1:]...)
+		}
 		if strings.HasPrefix(a, "-") {
 			flags = append(flags, a)
 		} else {
@@ -79,7 +85,8 @@ func splitArgs(args []string) (flags, pos []string) {
 	return flags, pos
 }
 
-func run(args []string) error {
+// run executes one CLI invocation, printing results to out.
+func run(args []string, out io.Writer, log *slog.Logger) error {
 	global := flag.NewFlagSet("ntfy-idp-push", flag.ContinueOnError)
 	global.Usage = func() { fmt.Fprint(os.Stderr, usage) }
 	defaultPath := os.Getenv("NTFY_IDP_PUSH_CONFIG")
@@ -99,11 +106,11 @@ func run(args []string) error {
 	cmd, rest := args[0], args[1:]
 	switch cmd {
 	case "keygen":
-		return keygen(*cfgPath, rest)
+		return keygen(*cfgPath, rest, out)
 	case "healthcheck":
 		return healthcheck(rest)
 	case "version":
-		fmt.Println(buildVersion())
+		fmt.Fprintln(out, buildVersion())
 		return nil
 	}
 	// A missing default config file is ignored if environment variables suffice, but explicit
@@ -118,44 +125,45 @@ func run(args []string) error {
 		return err
 	}
 	if cmd == "serve" {
-		return serve(cfg, path)
+		return serve(cfg, path, log)
 	}
-	svc, closeFn, err := open(cfg)
+	a, err := app.Open(cfg, log)
 	if err != nil {
 		return err
 	}
-	defer closeFn()
+	defer a.Close()
+	svc := a.Svc
 	ctx := context.Background()
 	switch cmd {
 	case "user":
-		return userCmd(ctx, svc, rest)
+		return userCmd(ctx, svc, rest, out)
 	case "device":
-		return deviceCmd(ctx, svc, rest)
+		return deviceCmd(ctx, svc, rest, out)
 	case "enroll-link":
 		if len(rest) != 1 {
 			return errors.New("usage: enroll-link <username>")
 		}
-		_, link, err := svc.CreateEnrollCode(ctx, rest[0], core.EnrollCodeTTL)
+		_, link, _, err := svc.CreateEnrollCode(ctx, rest[0], core.EnrollCodeTTL)
 		if err != nil {
 			return err
 		}
-		fmt.Println(link)
+		fmt.Fprintln(out, link)
 		return nil
 	case "backup":
 		if len(rest) != 1 {
 			return errors.New("usage: backup <path>|-")
 		}
-		return backup(ctx, svc.Store, filepath.Dir(cfg.Database), rest[0])
+		return backup(ctx, a.Store, filepath.Dir(cfg.Database), rest[0], out)
 	case "audit":
 		user := ""
 		if len(rest) > 0 {
 			user = rest[0]
 		}
-		entries, err := svc.Store.AuditLog(ctx, user, 100)
+		entries, err := svc.AuditLog(ctx, user, 100)
 		if err != nil {
 			return err
 		}
-		tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+		tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
 		for _, e := range entries {
 			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", e.TS.Format(time.RFC3339), e.Username, e.Event, e.Detail)
 		}
@@ -165,22 +173,8 @@ func run(args []string) error {
 	return fmt.Errorf("unknown command %q", cmd)
 }
 
-func open(cfg *config.Config) (*core.Service, func(), error) {
-	st, err := store.Open(cfg.Database)
-	if err != nil {
-		return nil, nil, err
-	}
-	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	svc, err := core.New(cfg, st, log)
-	if err != nil {
-		st.Close()
-		return nil, nil, err
-	}
-	return svc, func() { st.Close() }, nil
-}
-
-// backup writes the database copy to path, or stdout for "-" via a temporary file in dir.
-func backup(ctx context.Context, st *store.Store, dir, path string) error {
+// backup writes the database copy to path, or to out for "-" via a temporary file in dir.
+func backup(ctx context.Context, st *store.Store, dir, path string, out io.Writer) error {
 	if path != "-" {
 		return st.Backup(ctx, path)
 	}
@@ -194,30 +188,30 @@ func backup(ctx context.Context, st *store.Store, dir, path string) error {
 		return err
 	}
 	defer f.Close()
-	_, err = io.Copy(os.Stdout, f)
+	_, err = io.Copy(out, f)
 	return err
 }
 
-func keygen(cfgPath string, args []string) error {
+func keygen(cfgPath string, args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("keygen", flag.ContinueOnError)
 	rotate := fs.Bool("rotate", false, "rotate duo-secret-key in the config file")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if !*rotate {
-		fmt.Printf("duo-integration-key: %q\nduo-secret-key: %q\n", config.NewIntegrationKey(), config.NewSecretKey())
+		fmt.Fprintf(out, "duo-integration-key: %q\nduo-secret-key: %q\n", config.NewIntegrationKey(), config.NewSecretKey())
 		return nil
 	}
 	key, err := config.RotateSecretKey(cfgPath, time.Now())
 	if err != nil {
 		return err
 	}
-	fmt.Printf("rotated duo-secret-key in %s; the previous key is accepted for duo-key-grace after a reload.\n", cfgPath)
-	fmt.Printf("set the IdP's secret key to: %s\n", key)
+	fmt.Fprintf(out, "rotated duo-secret-key in %s; the previous key is accepted for duo-key-grace after a reload.\n", cfgPath)
+	fmt.Fprintf(out, "set the IdP's secret key to: %s\n", key)
 	return nil
 }
 
-func userCmd(ctx context.Context, svc *core.Service, args []string) error {
+func userCmd(ctx context.Context, svc *core.Service, args []string, out io.Writer) error {
 	flags, pos := splitArgs(args)
 	if len(pos) == 0 {
 		return errors.New("usage: user list|provision|disable|enable|delete|approve|reset-ntfy [args]")
@@ -234,11 +228,11 @@ func userCmd(ctx context.Context, svc *core.Service, args []string) error {
 		if err != nil {
 			return err
 		}
-		tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+		tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
 		fmt.Fprintln(tw, "USERNAME\tID\tDEVICES\tSTATUS")
 		for _, u := range users {
 			st := "active"
-			if u.DisabledAt != nil {
+			if !u.Enabled() {
 				st = "disabled"
 			}
 			fmt.Fprintf(tw, "%s\t%s\t%d\t%s\n", u.Username, u.ID, u.ActiveDevices, st)
@@ -256,7 +250,7 @@ func userCmd(ctx context.Context, svc *core.Service, args []string) error {
 			return err
 		}
 		for _, g := range u.Grants {
-			fmt.Printf("%s\t%s\n", g.Topic, g.Permission)
+			fmt.Fprintf(out, "%s\t%s\n", g.Topic, g.Permission)
 		}
 		return nil
 	case "disable", "enable":
@@ -269,13 +263,13 @@ func userCmd(ctx context.Context, svc *core.Service, args []string) error {
 		if err := svc.ResetNtfyUser(ctx, arg, *force); err != nil {
 			return err
 		}
-		fmt.Println("ntfy user recreated: every enrolled phone must re-open its ntfy link")
+		fmt.Fprintln(out, "ntfy user recreated: every enrolled phone must re-open its ntfy link")
 		return nil
 	}
 	return fmt.Errorf("unknown user command %q", sub)
 }
 
-func deviceCmd(ctx context.Context, svc *core.Service, args []string) error {
+func deviceCmd(ctx context.Context, svc *core.Service, args []string, out io.Writer) error {
 	flags, pos := splitArgs(args)
 	fs := flag.NewFlagSet("device", flag.ContinueOnError)
 	reset := fs.Bool("reset-ntfy-user", false, "recreate the ntfy user to invalidate all its tokens")
@@ -292,7 +286,7 @@ func deviceCmd(ctx context.Context, svc *core.Service, args []string) error {
 		if err != nil {
 			return err
 		}
-		tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+		tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
 		fmt.Fprintln(tw, "ID\tNAME\tTOPIC\tVERIFIED\tLAST USED\tREVOKED")
 		for _, d := range devs {
 			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", d.ID, d.Name, d.NtfyTopic, fmtTime(d.VerifiedAt), fmtTime(d.LastUsedAt), fmtTime(d.RevokedAt))
@@ -303,7 +297,7 @@ func deviceCmd(ctx context.Context, svc *core.Service, args []string) error {
 			return err
 		}
 		if *reset {
-			fmt.Println("revoked; ntfy user recreated: other enrolled phones must re-open their ntfy link")
+			fmt.Fprintln(out, "revoked; ntfy user recreated: other enrolled phones must re-open their ntfy link")
 		}
 		return nil
 	}

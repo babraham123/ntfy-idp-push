@@ -4,47 +4,108 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
-	"net/url"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 
+	"github.com/babraham123/ntfy-idp-push/internal/model"
 	"github.com/babraham123/ntfy-idp-push/internal/ntfy"
+	"github.com/babraham123/ntfy-idp-push/internal/routes"
 	"github.com/babraham123/ntfy-idp-push/internal/store"
 	"github.com/babraham123/ntfy-idp-push/internal/token"
 	"github.com/babraham123/ntfy-idp-push/internal/webauthn"
 )
 
-// CreateEnrollCode mints a single-use /token/<code> link providing identity for enrollment.
-func (s *Service) CreateEnrollCode(ctx context.Context, username string, ttl time.Duration) (code, link string, err error) {
+// CreateEnrollCode mints a single-use enrollment link that identifies username by itself, valid
+// for ttl.
+func (s *Service) CreateEnrollCode(ctx context.Context, username string, ttl time.Duration) (code, link string, expires time.Time, err error) {
 	if err := ValidUsername(username); err != nil {
-		return "", "", err
+		return "", "", time.Time{}, err
 	}
 	code = token.Random(24)
-	err = s.Store.CreateEnrollCode(ctx, token.Hash(code), store.EnrollCode{Username: username, ExpiresAt: time.Now().Add(ttl)})
+	expires = time.Now().Add(ttl)
+	err = s.store.CreateEnrollCode(ctx, token.Hash(code), model.EnrollCode{Username: username, ExpiresAt: expires})
 	if err != nil {
-		return "", "", err
+		return "", "", time.Time{}, err
 	}
-	s.Store.Audit(ctx, username, "enroll_link", map[string]any{"ttl": ttl.String()})
-	return code, s.EnrollURL(code), nil
+	s.store.Audit(ctx, username, "enroll_link", map[string]any{"ttl": ttl.String()})
+	return code, routes.EnrollURL(s.Config().PublicURL, code), expires, nil
 }
 
-func (s *Service) EnrollURL(code string) string {
-	return s.Config().PublicURL + "/token/" + url.PathEscape(code)
-}
+// EnrollURL is the enrollment page for a code.
+func (s *Service) EnrollURL(code string) string { return routes.EnrollURL(s.Config().PublicURL, code) }
 
 // ResolveEnrollCode returns the username an unused, unexpired code was issued for.
 func (s *Service) ResolveEnrollCode(ctx context.Context, code string) (string, error) {
-	ec, err := s.Store.EnrollCode(ctx, token.Hash(code))
-	if errors.Is(err, store.ErrNotFound) || (err == nil && (ec.UsedAt != nil || !time.Now().Before(ec.ExpiresAt))) {
+	ec, err := s.store.EnrollCode(ctx, token.Hash(code))
+	if errors.Is(err, store.ErrNotFound) || (err == nil && !ec.Usable(time.Now())) {
 		return "", ErrInvalidCode
 	} else if err != nil {
 		return "", err
 	}
 	return ec.Username, nil
+}
+
+// IdPEnrollment is what the IdP needs to show a user who enrolls through it: the code and link
+// the phone uses, and the user ID it polls EnrollmentState with.
+type IdPEnrollment struct {
+	UserID, Username string
+	Code, Link       string
+	ExpiresAt        time.Time
+}
+
+// StartIdPEnrollment provisions username and issues an enrollment code, the IdP-driven way in.
+func (s *Service) StartIdPEnrollment(ctx context.Context, username string) (*IdPEnrollment, error) {
+	u, err := s.Provision(ctx, username)
+	if err != nil {
+		return nil, err
+	}
+	code, link, expires, err := s.CreateEnrollCode(ctx, username, EnrollCodeTTL)
+	if err != nil {
+		return nil, err
+	}
+	return &IdPEnrollment{UserID: u.ID, Username: u.Username, Code: code, Link: link, ExpiresAt: expires}, nil
+}
+
+// EnrollmentState is how far an IdP-driven enrollment has come.
+type EnrollmentState int
+
+const (
+	// EnrollmentInvalid: the code is unknown, expired unused, or its device was revoked.
+	EnrollmentInvalid EnrollmentState = iota
+	// EnrollmentWaiting: no device yet, or one that its owner has not activated.
+	EnrollmentWaiting
+	// EnrollmentDone: the device is active.
+	EnrollmentDone
+)
+
+// EnrollmentState reports the state of the enrollment code issued to userID.
+func (s *Service) EnrollmentState(ctx context.Context, userID, code string) EnrollmentState {
+	ec, err := s.store.EnrollCode(ctx, token.Hash(code))
+	if err != nil {
+		return EnrollmentInvalid
+	}
+	u, err := s.store.UserByName(ctx, ec.Username)
+	if err != nil || u.ID != userID {
+		return EnrollmentInvalid
+	}
+	if ec.DeviceID != "" {
+		d, err := s.store.Device(ctx, ec.DeviceID)
+		switch {
+		case err != nil || d.RevokedAt != nil:
+			return EnrollmentInvalid
+		case d.Active():
+			return EnrollmentDone
+		}
+		// Enrolled but not yet verified: still waiting until the unverified device is purged.
+		return EnrollmentWaiting
+	}
+	if !ec.Usable(time.Now()) {
+		return EnrollmentInvalid
+	}
+	return EnrollmentWaiting
 }
 
 // EnrollRequest says who is enrolling a device. A shim-issued Code identifies the user by itself;
@@ -63,11 +124,6 @@ type pendingEnrollment struct {
 // enrollCeremonyTTL bounds how long the browser has between BeginEnrollment and FinishEnrollment,
 // matching the registration timeout the passkey options carry.
 const enrollCeremonyTTL = 5 * time.Minute
-
-var (
-	ErrEnrollmentExpired = errors.New("registration expired; start again")
-	ErrIdentityChanged   = errors.New("identity changed during enrollment")
-)
 
 // deviceName normalizes what the user typed into the device's display name.
 func deviceName(name string) string {
@@ -95,11 +151,11 @@ func (s *Service) BeginEnrollment(ctx context.Context, r EnrollRequest) (handle 
 		return "", nil, err
 	}
 	name := deviceName(r.DeviceName)
-	u, err := s.Store.EnsureUser(ctx, username, uuid.NewString())
+	u, err := s.store.EnsureUser(ctx, username, uuid.NewString())
 	if err != nil {
 		return "", nil, err
 	}
-	if u.DisabledAt != nil {
+	if !u.Enabled() {
 		return "", nil, ErrUserDisabled
 	}
 	options, session, err := s.rp.BeginRegistration(u, name)
@@ -133,11 +189,9 @@ func (s *Service) takeEnrollment(handle string) *pendingEnrollment {
 }
 
 type Enrollment struct {
-	Device   *store.Device
-	NtfyLink string
-	// Code is nil without ntfy enroll endpoint support. The manual sign-in path is always
-	// offered.
-	Code *ntfy.EnrollCode
+	Device *model.Device
+	// Handoff signs the phone's ntfy app in and subscribes it to the device's topic.
+	Handoff *Handoff
 	// ResultToken lets the result page act for this device for EnrollResultTTL (see EnrolledDevice).
 	ResultToken string
 }
@@ -158,18 +212,20 @@ func (s *Service) FinishEnrollment(ctx context.Context, handle, signedIn string,
 		return nil, ErrIdentityChanged
 	}
 	cfg := s.Config()
-	u, err := s.Store.UserByName(ctx, p.username)
-	if err != nil {
+	u, err := s.store.UserByName(ctx, p.username)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, ErrUnknownUser
+	} else if err != nil {
 		return nil, err
 	}
-	if u.DisabledAt != nil {
+	if !u.Enabled() {
 		return nil, ErrUserDisabled
 	}
 	pk, attestationFormat, err := s.rp.FinishRegistration(u, p.session, attestation)
 	if err != nil {
-		return nil, err
+		return nil, passkeyFailure(err)
 	}
-	dev := &store.Device{ID: uuid.NewString(), UserID: u.ID, Username: p.username, Name: p.name}
+	dev := &model.Device{ID: uuid.NewString(), UserID: u.ID, Username: p.username, Name: p.name}
 	dev.NtfyTopic = cfg.NtfyTopicPrefix + dev.ID
 	pk.DeviceID = dev.ID
 	var codeHash []byte
@@ -177,7 +233,7 @@ func (s *Service) FinishEnrollment(ctx context.Context, handle, signedIn string,
 		codeHash = token.Hash(p.code)
 	}
 	verifyToken, resultToken := token.Random(24), token.Random(24)
-	err = s.Store.CreateEnrollment(ctx, dev, token.Hash(verifyToken), token.Hash(resultToken), &pk, codeHash)
+	err = s.store.CreateEnrollment(ctx, dev, token.Hash(verifyToken), token.Hash(resultToken), &pk, codeHash)
 	if errors.Is(err, store.ErrCodeUnavailable) {
 		return nil, ErrInvalidCode
 	} else if err != nil {
@@ -188,46 +244,68 @@ func (s *Service) FinishEnrollment(ctx context.Context, handle, signedIn string,
 		s.undoEnrollment(context.WithoutCancel(ctx), dev, codeHash)
 		return nil, err
 	}
-	s.Store.Audit(ctx, p.username, "device_enrolled", map[string]any{"device": dev.ID, "name": p.name,
+	s.store.Audit(ctx, p.username, "device_enrolled", map[string]any{"device": dev.ID, "name": p.name,
 		"aaguid": uuidString(pk.AAGUID), "attestation": attestationFormat})
 	res.ResultToken = resultToken
 	return res, nil
 }
 
+// passkeyFailure sorts a webauthn error into policy refusals (which name their reason), malformed
+// responses, and verification failures. Verification detail is logged by the caller, never shown.
+func passkeyFailure(err error) error {
+	switch {
+	case errors.Is(err, webauthn.ErrSynced), errors.Is(err, webauthn.ErrNoUsableCredential),
+		errors.Is(err, webauthn.ErrNoAttestation), errors.Is(err, webauthn.ErrNotUserVerified):
+		return &wrapped{ErrPasskeyPolicy, err}
+	case errors.Is(err, webauthn.ErrMalformed):
+		return &wrapped{ErrMalformed, err}
+	}
+	return &wrapped{ErrPasskeyRejected, err}
+}
+
+// wrapped is a core sentinel with the cause behind it; the message is the sentinel's reason plus the
+// cause's, which for policy and malformed errors is the user-facing reason.
+type wrapped struct{ kind, cause error }
+
+func (w *wrapped) Error() string {
+	if errors.Is(w.kind, ErrPasskeyRejected) {
+		return w.kind.Error()
+	}
+	return w.kind.Error() + ": " + w.cause.Error()
+}
+func (w *wrapped) Is(target error) bool { return errors.Is(w.kind, target) }
+func (w *wrapped) Unwrap() error        { return w.cause }
+
 // EnrolledDevice maps the result token (identity post-enrollment code consumption) to a device.
-func (s *Service) EnrolledDevice(ctx context.Context, resultToken string) (*store.Device, error) {
-	d, err := s.Store.DeviceByResultToken(ctx, token.Hash(resultToken), time.Now(), EnrollResultTTL)
+func (s *Service) EnrolledDevice(ctx context.Context, resultToken string) (*model.Device, error) {
+	d, err := s.store.DeviceByResultToken(ctx, token.Hash(resultToken), time.Now(), EnrollResultTTL)
 	if errors.Is(err, store.ErrNotFound) {
-		return nil, ErrInvalidCode
+		return nil, ErrResultExpired
 	}
 	return d, err
 }
 
 // connectDevice does enrollment's ntfy side: account, topic grant, sign-in code and setup push.
-func (s *Service) connectDevice(ctx context.Context, dev *store.Device, verifyToken string) (*Enrollment, error) {
+func (s *Service) connectDevice(ctx context.Context, dev *model.Device, verifyToken string) (*Enrollment, error) {
 	if _, err := s.Provision(ctx, dev.Username); err != nil {
 		return nil, err
 	}
 	if err := s.grantDevice(ctx, dev); err != nil {
 		return nil, err
 	}
-	code, err := s.MintNtfyCode(ctx, dev.Username)
+	h, err := s.Handoff(ctx, dev.Username, []string{dev.NtfyTopic})
 	if err != nil {
 		return nil, err
 	}
 	if err := s.publishSetup(ctx, dev, verifyToken); err != nil {
 		return nil, err
 	}
-	link := ""
-	if code != nil {
-		link = code.Code
-	}
-	return &Enrollment{Device: dev, NtfyLink: s.NtfyLink(dev.NtfyTopic, dev.Username, link), Code: code}, nil
+	return &Enrollment{Device: dev, Handoff: h}, nil
 }
 
-func (s *Service) publishSetup(ctx context.Context, dev *store.Device, verifyToken string) error {
-	verifyURL := fmt.Sprintf("%s/token/verify/%s?t=%s", s.Config().PublicURL, dev.ID, url.QueryEscape(verifyToken))
-	return s.ntfy.Publish(ctx, &ntfy.Message{
+func (s *Service) publishSetup(ctx context.Context, dev *model.Device, verifyToken string) error {
+	verifyURL := routes.VerifyURL(s.Config().PublicURL, dev.ID, verifyToken)
+	return s.ntfy().Publish(ctx, &ntfy.Message{
 		Topic:    dev.NtfyTopic,
 		Title:    "Finish setup",
 		Message:  "Tap to finish enrolling " + dev.Name + " for sign-in approvals.",
@@ -239,34 +317,42 @@ func (s *Service) publishSetup(ctx context.Context, dev *store.Device, verifyTok
 }
 
 // undoEnrollment rolls back half-built enrollments. Lingering state is cleaned up by Purge later.
-func (s *Service) undoEnrollment(ctx context.Context, dev *store.Device, codeHash []byte) {
+func (s *Service) undoEnrollment(ctx context.Context, dev *model.Device, codeHash []byte) {
 	if err := s.removeDevice(ctx, dev); err != nil {
 		s.Log.Warn("enroll: undo", "device", dev.ID, "err", err)
 	}
 	if codeHash != nil {
-		if err := s.Store.ReleaseEnrollCode(ctx, codeHash); err != nil {
+		if err := s.store.ReleaseEnrollCode(ctx, codeHash); err != nil {
 			s.Log.Warn("enroll: release code", "device", dev.ID, "err", err)
 		}
 	}
 }
 
-// ResendSetupPush republishes the setup push for unverified devices.
+// ResendSetupPush republishes the setup push for username's device while it awaits setup.
 func (s *Service) ResendSetupPush(ctx context.Context, deviceID, username string) error {
-	d, err := s.Store.Device(ctx, deviceID)
-	if errors.Is(err, store.ErrNotFound) || (err == nil && d.Username != username) {
-		return ErrInvalidCode
-	} else if err != nil {
+	d, err := s.ownedDevice(ctx, username, deviceID)
+	if err != nil {
 		return err
 	}
 	verifyToken := token.Random(24)
-	ok, err := s.Store.SetVerifyToken(ctx, d.ID, token.Hash(verifyToken))
+	ok, err := s.store.SetVerifyToken(ctx, d.ID, token.Hash(verifyToken))
 	if err != nil {
 		return err
 	}
 	if !ok {
-		return ErrInvalidCode
+		return ErrSetupDone
 	}
 	return s.publishSetup(ctx, d, verifyToken)
+}
+
+// ownedDevice is username's device deviceID. Another user's device is ErrUnknownDevice, the same
+// as one that does not exist.
+func (s *Service) ownedDevice(ctx context.Context, username, deviceID string) (*model.Device, error) {
+	d, err := s.store.Device(ctx, deviceID)
+	if errors.Is(err, store.ErrNotFound) || (err == nil && d.Username != username) {
+		return nil, ErrUnknownDevice
+	}
+	return d, err
 }
 
 func uuidString(b []byte) string {
@@ -276,44 +362,17 @@ func uuidString(b []byte) string {
 	return ""
 }
 
-// VerifyDevice activates a device once its owner opened the test push.
+// VerifyDevice activates a device once its owner opened the setup push.
 func (s *Service) VerifyDevice(ctx context.Context, deviceID, verifyToken string) error {
-	ok, err := s.Store.VerifyDevice(ctx, deviceID, token.Hash(verifyToken))
+	ok, err := s.store.VerifyDevice(ctx, deviceID, token.Hash(verifyToken))
 	if err != nil {
 		return err
 	}
 	if !ok {
-		return ErrInvalidCode
+		return ErrSetupLinkUsed
 	}
-	if d, err := s.Store.Device(ctx, deviceID); err == nil {
-		s.Store.Audit(ctx, d.Username, "device_verified", map[string]any{"device": deviceID})
+	if d, err := s.store.Device(ctx, deviceID); err == nil {
+		s.store.Audit(ctx, d.Username, "device_verified", map[string]any{"device": deviceID})
 	}
 	return nil
-}
-
-// EnrollStatus reports IdP-driven enrollment progress: waiting, success or invalid.
-func (s *Service) EnrollStatus(ctx context.Context, userID, code string) string {
-	ec, err := s.Store.EnrollCode(ctx, token.Hash(code))
-	if err != nil {
-		return "invalid"
-	}
-	u, err := s.Store.UserByName(ctx, ec.Username)
-	if err != nil || u.ID != userID {
-		return "invalid"
-	}
-	if ec.DeviceID != "" {
-		d, err := s.Store.Device(ctx, ec.DeviceID)
-		switch {
-		case err != nil || d.RevokedAt != nil:
-			return "invalid"
-		case d.VerifiedAt != nil:
-			return "success"
-		}
-		// Enrolled but not yet verified: still waiting until the unverified device is purged.
-		return "waiting"
-	}
-	if !time.Now().Before(ec.ExpiresAt) {
-		return "invalid"
-	}
-	return "waiting"
 }

@@ -8,74 +8,15 @@ import (
 	"time"
 
 	"github.com/babraham123/ntfy-idp-push/internal/config"
+	"github.com/babraham123/ntfy-idp-push/internal/model"
 )
-
-type User struct {
-	ID         string
-	Username   string
-	Grants     []config.Grant // ntfy grants the shim applied from enroll-access
-	DisabledAt *time.Time
-	CreatedAt  time.Time
-}
-
-type Device struct {
-	ID         string
-	UserID     string
-	Username   string
-	Name       string
-	NtfyTopic  string
-	VerifiedAt *time.Time
-	CreatedAt  time.Time
-	LastUsedAt *time.Time
-	RevokedAt  *time.Time
-}
-
-type Passkey struct {
-	CredID         []byte
-	DeviceID       string
-	CredentialJSON []byte
-	AAGUID         []byte
-	SignCount      uint32
-}
-
-type ChallengeState string
-
-const (
-	StatePending ChallengeState = "pending"
-	StateAllow   ChallengeState = "allow"
-	StateDeny    ChallengeState = "deny"
-	StateFraud   ChallengeState = "fraud"
-	StateTimeout ChallengeState = "timeout"
-)
-
-type Challenge struct {
-	ID              string
-	Username        string
-	DeviceID        string
-	Nonce           []byte
-	IPAddr          string
-	TargetURL       string
-	DisplayUsername string
-	State           ChallengeState
-	DenyTokenHash   []byte
-	CreatedAt       time.Time
-	ExpiresAt       time.Time
-	DecidedAt       *time.Time
-}
-
-type EnrollCode struct {
-	Username  string
-	DeviceID  string // set for IdP-driven enrollment (/auth/v2/enroll)
-	ExpiresAt time.Time
-	UsedAt    *time.Time
-}
 
 // ---- users
 
 const userCols = `id, username, ntfy_grants_json, disabled_at, created_at`
 
-func scanUser(row interface{ Scan(...any) error }) (*User, error) {
-	var u User
+func scanUser(row interface{ Scan(...any) error }) (*model.User, error) {
+	var u model.User
 	var grants string
 	var disabled sql.NullInt64
 	var created int64
@@ -93,21 +34,21 @@ func scanUser(row interface{ Scan(...any) error }) (*User, error) {
 	return &u, nil
 }
 
-func (s *Store) UserByName(ctx context.Context, username string) (*User, error) {
+func (s *Store) UserByName(ctx context.Context, username string) (*model.User, error) {
 	return scanUser(s.db.QueryRowContext(ctx, `SELECT `+userCols+` FROM users WHERE username = ?`, username))
 }
 
-func (s *Store) UserByID(ctx context.Context, id string) (*User, error) {
+func (s *Store) UserByID(ctx context.Context, id string) (*model.User, error) {
 	return scanUser(s.db.QueryRowContext(ctx, `SELECT `+userCols+` FROM users WHERE id = ?`, id))
 }
 
-func (s *Store) Users(ctx context.Context) ([]User, error) {
+func (s *Store) Users(ctx context.Context) ([]model.User, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT `+userCols+` FROM users ORDER BY username`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []User
+	var out []model.User
 	for rows.Next() {
 		u, err := scanUser(rows)
 		if err != nil {
@@ -119,7 +60,7 @@ func (s *Store) Users(ctx context.Context) ([]User, error) {
 }
 
 // EnsureUser returns the user, creating it with id when missing.
-func (s *Store) EnsureUser(ctx context.Context, username, id string) (*User, error) {
+func (s *Store) EnsureUser(ctx context.Context, username, id string) (*model.User, error) {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO users (id, username, created_at) VALUES (?,?,?) ON CONFLICT(username) DO NOTHING`,
 		id, username, unix(time.Now()))
 	if err != nil {
@@ -179,23 +120,21 @@ func (s *Store) DeleteUser(ctx context.Context, userID string) error {
 
 const deviceCols = `d.id, d.user_id, u.username, d.name, d.ntfy_topic, d.verified_at, d.created_at, d.last_used_at, d.revoked_at`
 
-// Device states, over a devices row aliased d.
+// Device states over a devices row aliased d, matching model.Device.Active and Pending.
 const (
-	// activeDevice can receive and approve logins: set up on the phone and not revoked.
-	activeDevice = `d.verified_at IS NOT NULL AND d.revoked_at IS NULL`
-	// pendingDevice is still awaiting setup on the phone.
+	activeDevice  = `d.verified_at IS NOT NULL AND d.revoked_at IS NULL`
 	pendingDevice = `d.verified_at IS NULL AND d.revoked_at IS NULL`
 )
 
-func (s *Store) queryDevices(ctx context.Context, where string, args ...any) ([]Device, error) {
+func (s *Store) queryDevices(ctx context.Context, where string, args ...any) ([]model.Device, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT `+deviceCols+` FROM devices d JOIN users u ON u.id = d.user_id `+where, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []Device
+	var out []model.Device
 	for rows.Next() {
-		var d Device
+		var d model.Device
 		var verified, lastUsed, revoked sql.NullInt64
 		var created int64
 		if err := rows.Scan(&d.ID, &d.UserID, &d.Username, &d.Name, &d.NtfyTopic, &verified, &created, &lastUsed, &revoked); err != nil {
@@ -208,8 +147,8 @@ func (s *Store) queryDevices(ctx context.Context, where string, args ...any) ([]
 	return out, rows.Err()
 }
 
-func (s *Store) Device(ctx context.Context, id string) (*Device, error) {
-	ds, err := s.queryDevices(ctx, `WHERE d.id = ?`, id)
+func (s *Store) oneDevice(ctx context.Context, where string, args ...any) (*model.Device, error) {
+	ds, err := s.queryDevices(ctx, where, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -219,16 +158,42 @@ func (s *Store) Device(ctx context.Context, id string) (*Device, error) {
 	return &ds[0], nil
 }
 
+func (s *Store) Device(ctx context.Context, id string) (*model.Device, error) {
+	return s.oneDevice(ctx, `WHERE d.id = ?`, id)
+}
+
+// DevicePasskeys returns the device with the passkeys that may approve for it.
+func (s *Store) DevicePasskeys(ctx context.Context, id string) (*model.Device, []model.Passkey, error) {
+	d, err := s.Device(ctx, id)
+	if err != nil {
+		return nil, nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT cred_id, device_id, credential_json, aaguid, sign_count FROM passkeys WHERE device_id = ?`, id)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	var pks []model.Passkey
+	for rows.Next() {
+		var p model.Passkey
+		if err := rows.Scan(&p.CredID, &p.DeviceID, &p.CredentialJSON, &p.AAGUID, &p.SignCount); err != nil {
+			return nil, nil, err
+		}
+		pks = append(pks, p)
+	}
+	return d, pks, rows.Err()
+}
+
 // Devices lists a user's devices in every state, most recently used first.
-func (s *Store) Devices(ctx context.Context, userID string) ([]Device, error) {
+func (s *Store) Devices(ctx context.Context, userID string) ([]model.Device, error) {
 	return s.queryDevices(ctx, `WHERE d.user_id = ? ORDER BY COALESCE(d.last_used_at, d.verified_at, d.created_at) DESC, d.created_at DESC`, userID)
 }
 
 var ErrCodeUnavailable = errors.New("enrollment code used or expired")
 
-// CreateEnrollment atomically claims the codeHash and inserts the device/passkey (returns
-// ErrCodeUnavailable on failure).
-func (s *Store) CreateEnrollment(ctx context.Context, d *Device, verifyTokenHash, resultTokenHash []byte, p *Passkey, codeHash []byte) error {
+// CreateEnrollment atomically claims the codeHash (when set) and inserts the device with its
+// passkey; a code that is no longer usable fails the whole insert with ErrCodeUnavailable.
+func (s *Store) CreateEnrollment(ctx context.Context, d *model.Device, verifyTokenHash, resultTokenHash []byte, p *model.Passkey, codeHash []byte) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -258,15 +223,8 @@ func (s *Store) CreateEnrollment(ctx context.Context, d *Device, verifyTokenHash
 }
 
 // DeviceByResultToken returns the unrevoked device enrolled within ttl matching tokenHash.
-func (s *Store) DeviceByResultToken(ctx context.Context, tokenHash []byte, now time.Time, ttl time.Duration) (*Device, error) {
-	ds, err := s.queryDevices(ctx, `WHERE d.result_token_hash = ? AND d.created_at > ? AND d.revoked_at IS NULL`, tokenHash, unix(now.Add(-ttl)))
-	if err != nil {
-		return nil, err
-	}
-	if len(ds) == 0 {
-		return nil, ErrNotFound
-	}
-	return &ds[0], nil
+func (s *Store) DeviceByResultToken(ctx context.Context, tokenHash []byte, now time.Time, ttl time.Duration) (*model.Device, error) {
+	return s.oneDevice(ctx, `WHERE d.result_token_hash = ? AND d.created_at > ? AND d.revoked_at IS NULL`, tokenHash, unix(now.Add(-ttl)))
 }
 
 // SetVerifyToken replaces the verify token of a device still awaiting setup. It reports whether it did.
@@ -291,9 +249,21 @@ func (s *Store) VerifyDevice(ctx context.Context, id string, tokenHash []byte) (
 	return n == 1, nil
 }
 
-func (s *Store) TouchDevice(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE devices SET last_used_at = ? WHERE id = ?`, unix(time.Now()), id)
-	return err
+// RecordApproval notes that the device just approved a login: it becomes the most recently used
+// and its passkey record carries the authenticator's new sign count.
+func (s *Store) RecordApproval(ctx context.Context, deviceID string, pk model.Passkey) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `UPDATE devices SET last_used_at = ? WHERE id = ?`, unix(time.Now()), deviceID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE passkeys SET credential_json = ?, sign_count = ? WHERE cred_id = ?`, pk.CredentialJSON, pk.SignCount, pk.CredID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // RevokeDevice marks the device revoked and deletes its passkeys, so it can approve nothing more.
@@ -317,43 +287,19 @@ func (s *Store) DeleteDevice(ctx context.Context, id string) error {
 	return err
 }
 
-// ---- passkeys
-
-func (s *Store) Passkeys(ctx context.Context, deviceID string) ([]Passkey, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT cred_id, device_id, credential_json, aaguid, sign_count FROM passkeys WHERE device_id = ?`, deviceID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []Passkey
-	for rows.Next() {
-		var p Passkey
-		if err := rows.Scan(&p.CredID, &p.DeviceID, &p.CredentialJSON, &p.AAGUID, &p.SignCount); err != nil {
-			return nil, err
-		}
-		out = append(out, p)
-	}
-	return out, rows.Err()
-}
-
-func (s *Store) UpdatePasskey(ctx context.Context, credID, credentialJSON []byte, signCount uint32) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE passkeys SET credential_json = ?, sign_count = ? WHERE cred_id = ?`, credentialJSON, signCount, credID)
-	return err
-}
-
 // ---- challenges
 
-func (s *Store) CreateChallenge(ctx context.Context, c *Challenge) error {
+func (s *Store) CreateChallenge(ctx context.Context, c *model.Challenge) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO challenges
 		(id, username, device_id, nonce, ipaddr, target_url, display_username, state, deny_token_hash, created_at, expires_at)
 		VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-		c.ID, c.Username, c.DeviceID, c.Nonce, c.IPAddr, c.TargetURL, c.DisplayUsername, string(StatePending), c.DenyTokenHash,
+		c.ID, c.Username, c.DeviceID, c.Nonce, c.IPAddr, c.TargetURL, c.DisplayUsername, string(model.StatePending), c.DenyTokenHash,
 		unix(c.CreatedAt), unix(c.ExpiresAt))
 	return err
 }
 
-func (s *Store) Challenge(ctx context.Context, id string) (*Challenge, error) {
-	var c Challenge
+func (s *Store) Challenge(ctx context.Context, id string) (*model.Challenge, error) {
+	var c model.Challenge
 	var state string
 	var created, expires int64
 	var decided sql.NullInt64
@@ -366,48 +312,53 @@ func (s *Store) Challenge(ctx context.Context, id string) (*Challenge, error) {
 	} else if err != nil {
 		return nil, err
 	}
-	c.State = ChallengeState(state)
+	c.State = model.ChallengeState(state)
 	c.CreatedAt, c.ExpiresAt, c.DecidedAt = time.Unix(created, 0), time.Unix(expires, 0), fromUnix(decided)
 	return &c, nil
 }
 
-// Reasons the store refuses to decide a challenge as allowed.
-var (
-	ErrDeviceInactive = errors.New("device revoked or not active")
-	ErrUserDisabled   = errors.New("user disabled")
+// Refusal says why DecideChallenge did not record an allow.
+type Refusal int
+
+const (
+	// NotRefused: the challenge was decided, or was simply no longer pending.
+	NotRefused Refusal = iota
+	// DeviceInactive: the device was revoked, removed or never set up.
+	DeviceInactive
+	// UserDisabled: the device's owner is disabled.
+	UserDisabled
 )
 
 // DecideChallenge moves a pending challenge to state, once, and reports whether it did. An allow
 // additionally requires, in the same statement, that the device is active and the user enabled,
-// closing the race with revokes and disables; a refused allow returns ErrDeviceInactive or
-// ErrUserDisabled, or false alone when the challenge is simply no longer pending.
-func (s *Store) DecideChallenge(ctx context.Context, id string, state ChallengeState, now time.Time) (bool, error) {
+// closing the race with revokes and disables; the Refusal says which condition failed.
+func (s *Store) DecideChallenge(ctx context.Context, id string, state model.ChallengeState, now time.Time) (bool, Refusal, error) {
 	cond := ` AND expires_at > ?`
 	args := []any{string(state), unix(now), id, unix(now)}
 	switch state {
-	case StateTimeout:
+	case model.StateTimeout:
 		cond, args = ``, args[:3]
-	case StateAllow:
+	case model.StateAllow:
 		cond += ` AND EXISTS (SELECT 1 FROM devices d JOIN users u ON u.id = d.user_id WHERE d.id = challenges.device_id
 			AND ` + activeDevice + ` AND u.disabled_at IS NULL)`
 	}
 	res, err := s.db.ExecContext(ctx, `UPDATE challenges SET state = ?, decided_at = ? WHERE id = ? AND state = 'pending'`+cond, args...)
 	if err != nil {
-		return false, err
+		return false, NotRefused, err
 	}
 	if n, _ := res.RowsAffected(); n == 1 {
-		return true, nil
+		return true, NotRefused, nil
 	}
-	if state != StateAllow {
-		return false, nil
+	if state != model.StateAllow {
+		return false, NotRefused, nil
 	}
-	return false, s.allowRefusal(ctx, id, now)
+	r, err := s.allowRefusal(ctx, id, now)
+	return false, r, err
 }
 
-// allowRefusal says why an allow did not apply: nil when the challenge is no longer pending,
-// otherwise which eligibility condition failed. The device is checked first, as a deleted device
+// allowRefusal says why an allow did not apply. The device is checked first, as a deleted device
 // also leaves no user to judge.
-func (s *Store) allowRefusal(ctx context.Context, id string, now time.Time) error {
+func (s *Store) allowRefusal(ctx context.Context, id string, now time.Time) (Refusal, error) {
 	var pending bool
 	var active, enabled sql.NullBool
 	err := s.db.QueryRowContext(ctx, `SELECT c.state = 'pending' AND c.expires_at > ?, `+activeDevice+`, u.disabled_at IS NULL
@@ -415,16 +366,16 @@ func (s *Store) allowRefusal(ctx context.Context, id string, now time.Time) erro
 		WHERE c.id = ?`, unix(now), id).Scan(&pending, &active, &enabled)
 	switch {
 	case errors.Is(err, sql.ErrNoRows), err == nil && !pending:
-		return nil
+		return NotRefused, nil
 	case err != nil:
-		return err
+		return NotRefused, err
 	case !active.Valid || !active.Bool:
-		return ErrDeviceInactive
+		return DeviceInactive, nil
 	case !enabled.Valid || !enabled.Bool:
-		return ErrUserDisabled
+		return UserDisabled, nil
 	}
 	// Eligible at this read: the allow lost a race that has since resolved; treat as gone.
-	return nil
+	return NotRefused, nil
 }
 
 // ChallengeFilter selects pending challenges by device, username, or expiry (zero value selects
@@ -466,7 +417,7 @@ func (s *Store) PendingChallengeIDs(ctx context.Context, f ChallengeFilter) ([]s
 
 // ---- enrollment codes
 
-func (s *Store) CreateEnrollCode(ctx context.Context, codeHash []byte, e EnrollCode) error {
+func (s *Store) CreateEnrollCode(ctx context.Context, codeHash []byte, e model.EnrollCode) error {
 	var dev any
 	if e.DeviceID != "" {
 		dev = e.DeviceID
@@ -476,8 +427,8 @@ func (s *Store) CreateEnrollCode(ctx context.Context, codeHash []byte, e EnrollC
 	return err
 }
 
-func (s *Store) EnrollCode(ctx context.Context, codeHash []byte) (*EnrollCode, error) {
-	var e EnrollCode
+func (s *Store) EnrollCode(ctx context.Context, codeHash []byte) (*model.EnrollCode, error) {
+	var e model.EnrollCode
 	var dev sql.NullString
 	var expires int64
 	var used sql.NullInt64

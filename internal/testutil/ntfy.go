@@ -26,6 +26,9 @@ type FakeNtfy struct {
 	AdminRole string
 	// AnonymousRead simulates a server that lets anyone poll any topic.
 	AnonymousRead bool
+	// AdminToken is the token the server currently accepts for admin calls; rotate it to make the
+	// shim's configured token stale.
+	AdminToken string
 
 	mu        sync.Mutex
 	failures  map[string]int // "METHOD /path" -> calls left to fail with 500
@@ -41,6 +44,7 @@ func NewFakeNtfy(t *testing.T) *FakeNtfy {
 	f := &FakeNtfy{
 		EnrollSupported: true,
 		AdminRole:       "admin",
+		AdminToken:      AdminToken,
 		users:           map[string]*ntfy.User{"idp-push": {Username: "idp-push", Role: "admin"}},
 		pubCh:           make(chan ntfy.Message, 100),
 		codes:           map[string]string{},
@@ -53,13 +57,13 @@ func NewFakeNtfy(t *testing.T) *FakeNtfy {
 }
 
 func (f *FakeNtfy) serve(w http.ResponseWriter, r *http.Request) {
-	admin := r.Header.Get("Authorization") == "Bearer "+AdminToken
 	var body map[string]string
 	if r.Body != nil && r.Header.Get("Content-Type") == "application/json" && r.URL.Path != "/" {
 		_ = json.NewDecoder(r.Body).Decode(&body)
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	admin := r.Header.Get("Authorization") == "Bearer "+f.AdminToken
 	if key := r.Method + " " + r.URL.Path; f.failures[key] > 0 {
 		f.failures[key]--
 		http.Error(w, `{"code":50001}`, http.StatusInternalServerError)

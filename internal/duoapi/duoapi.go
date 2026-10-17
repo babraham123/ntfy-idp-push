@@ -15,7 +15,8 @@ import (
 	"time"
 
 	"github.com/babraham123/ntfy-idp-push/internal/core"
-	"github.com/babraham123/ntfy-idp-push/internal/store"
+	"github.com/babraham123/ntfy-idp-push/internal/model"
+	"github.com/babraham123/ntfy-idp-push/internal/routes"
 )
 
 const maxBody = 64 << 10
@@ -143,8 +144,31 @@ func (h *Handler) check(w http.ResponseWriter, r *http.Request, _ params) {
 	writeOK(w, map[string]any{"time": h.now().Unix()})
 }
 
-func deny(msg string) map[string]any {
+// deny is the Duo response for a login that was refused before or instead of a push, worded for
+// the IdP's login screen from the core failure behind it.
+func deny(err error) map[string]any {
+	msg := "Login request denied."
+	switch {
+	case errors.Is(err, core.ErrPushDisabled):
+		msg = "Push authentication is disabled"
+	case errors.Is(err, core.ErrUserDisabled):
+		msg = "user disabled"
+	case errors.Is(err, core.ErrUnknownUser):
+		msg = "Unknown user"
+	case errors.Is(err, core.ErrUnknownDevice), errors.Is(err, core.ErrNotOwner):
+		msg = "Unknown device"
+	case errors.Is(err, core.ErrEnrollmentRequired):
+		msg = "Enrollment required"
+	}
 	return map[string]any{"result": "deny", "status": "deny", "status_msg": msg}
+}
+
+// statusMsg is the Duo wording of a classified core failure in a FAIL response.
+func statusMsg(err error) string {
+	if errors.Is(err, core.ErrUserDisabled) {
+		return "user disabled"
+	}
+	return err.Error()
 }
 
 func userRef(p params) core.UserRef {
@@ -171,12 +195,8 @@ func (h *Handler) preauth(w http.ResponseWriter, r *http.Request, p params) {
 		return
 	}
 	switch {
-	case errors.Is(res.Deny, core.ErrPushDisabled):
-		writeOK(w, deny("Push authentication is disabled"))
-	case errors.Is(res.Deny, core.ErrUserDisabled):
-		writeOK(w, deny("user disabled"))
 	case res.Deny != nil:
-		writeOK(w, deny("Enrollment required"))
+		writeOK(w, deny(res.Deny))
 	case res.EnrollURL != "":
 		writeOK(w, map[string]any{"result": "enroll", "status_msg": "Enroll an authentication device to proceed",
 			"enroll_portal_url": res.EnrollURL})
@@ -195,7 +215,7 @@ func (h *Handler) auth(w http.ResponseWriter, r *http.Request, p params) {
 		return
 	}
 	if f := p.get("factor"); f != "push" && f != "auto" {
-		writeOK(w, deny("Only push is supported"))
+		writeOK(w, map[string]any{"result": "deny", "status": "deny", "status_msg": "Only push is supported"})
 		return
 	}
 	// The response blocks until push is answered. The deadline is set here to pick up a
@@ -206,11 +226,16 @@ func (h *Handler) auth(w http.ResponseWriter, r *http.Request, p params) {
 		return
 	}
 	ref := userRef(p)
+	// Duo's device=auto is core's default: the most recently used device.
+	device := p.get("device")
+	if device == "auto" {
+		device = ""
+	}
 	state, err := h.svc.Authenticate(r.Context(), core.AuthRequest{
-		User: ref, Device: p.get("device"), IPAddr: p.get("ipaddr"), TargetURL: pushInfo(p.get("pushinfo"), "target url"),
+		User: ref, Device: device, IPAddr: p.get("ipaddr"), TargetURL: pushInfo(p.get("pushinfo"), "target url"),
 		DisplayUsername: p.get("display_username"), Timeout: timeout,
 	})
-	if state == "" {
+	if err != nil && core.KindOf(err) == core.Internal {
 		h.internal(w, err)
 		return
 	}
@@ -218,23 +243,14 @@ func (h *Handler) auth(w http.ResponseWriter, r *http.Request, p params) {
 		h.log.Info("duo api: auth not approved", "user", ref, "state", state, "err", err)
 	}
 	switch state {
-	case store.StateAllow:
+	case model.StateAllow:
 		writeOK(w, map[string]any{"result": "allow", "status": "allow", "status_msg": "Success. Logging you in..."})
-	case store.StateFraud:
+	case model.StateFraud:
 		writeOK(w, map[string]any{"result": "deny", "status": "fraud", "status_msg": "Login request reported as fraudulent."})
-	case store.StateTimeout:
+	case model.StateTimeout:
 		writeOK(w, map[string]any{"result": "deny", "status": "timeout", "status_msg": "Login timed out."})
 	default:
-		msg := "Login request denied."
-		switch {
-		case errors.Is(err, core.ErrUnknownUser):
-			msg = "Unknown user"
-		case errors.Is(err, core.ErrUnknownDevice), errors.Is(err, core.ErrNotOwner):
-			msg = "Unknown device"
-		case errors.Is(err, core.ErrUserDisabled):
-			msg = "user disabled"
-		}
-		writeOK(w, deny(msg))
+		writeOK(w, deny(err))
 	}
 }
 
@@ -254,31 +270,25 @@ func (h *Handler) enroll(w http.ResponseWriter, r *http.Request, p params) {
 		writeFail(w, http.StatusBadRequest, 40001, "Missing required request parameters", "username")
 		return
 	}
-	if err := core.ValidUsername(username); err != nil {
+	e, err := h.svc.StartIdPEnrollment(ctx, username)
+	switch {
+	case errors.Is(err, core.ErrInvalidName):
 		writeFail(w, http.StatusBadRequest, 40002, "Invalid request parameters", "username")
 		return
-	}
-	u, err := h.svc.Provision(ctx, username)
-	if errors.Is(err, core.ErrUserDisabled) {
-		writeFail(w, http.StatusBadRequest, 40002, "Invalid request parameters", "user disabled")
+	case err != nil && core.KindOf(err) != core.Internal:
+		writeFail(w, http.StatusBadRequest, 40002, "Invalid request parameters", statusMsg(err))
 		return
-	} else if err != nil {
-		h.internal(w, err)
-		return
-	}
-	ttl := core.EnrollCodeTTL
-	code, link, err := h.svc.CreateEnrollCode(ctx, username, ttl)
-	if err != nil {
+	case err != nil:
 		h.internal(w, err)
 		return
 	}
 	writeOK(w, map[string]any{
-		"activation_barcode": h.svc.Config().PublicURL + "/token/qr?value=" + url.QueryEscape(link),
-		"activation_code":    code,
-		"activation_url":     link,
-		"expiration":         h.now().Add(ttl).Unix(),
-		"user_id":            u.ID,
-		"username":           u.Username,
+		"activation_barcode": routes.QRURL(h.svc.Config().PublicURL, e.Link),
+		"activation_code":    e.Code,
+		"activation_url":     e.Link,
+		"expiration":         e.ExpiresAt.Unix(),
+		"user_id":            e.UserID,
+		"username":           e.Username,
 	})
 }
 
@@ -287,7 +297,14 @@ func (h *Handler) enrollStatus(w http.ResponseWriter, r *http.Request, p params)
 		writeFail(w, http.StatusBadRequest, 40001, "Missing required request parameters", "user_id, activation_code")
 		return
 	}
-	writeOK(w, h.svc.EnrollStatus(r.Context(), p.get("user_id"), p.get("activation_code")))
+	writeOK(w, enrollStatus[h.svc.EnrollmentState(r.Context(), p.get("user_id"), p.get("activation_code"))])
+}
+
+// enrollStatus is Duo's wording of each enrollment state.
+var enrollStatus = map[core.EnrollmentState]string{
+	core.EnrollmentWaiting: "waiting",
+	core.EnrollmentDone:    "success",
+	core.EnrollmentInvalid: "invalid",
 }
 
 func (h *Handler) internal(w http.ResponseWriter, err error) {

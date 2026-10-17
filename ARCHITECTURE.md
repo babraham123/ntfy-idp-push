@@ -26,15 +26,18 @@ The server also provisions ntfy accounts (`/provision`, `user provision`) withou
 
 ```
 cmd/ntfy-idp-push/   CLI: serve, keygen, user, device, enroll-link, audit, healthcheck
-internal/config/     YAML + NTFY_IDP_PUSH_* env + <key>-file secrets; validation; enroll-access rules
-internal/duoapi/     Duo Auth API: signature verification (v2/v5), replay guard, preauth/auth/enroll
-internal/core/       provisioning, enrollment, login (eligibility, challenges), revocation, purge, startup checks
+internal/app/        assembles store, core, handlers, server timeouts, purge and reload loops; serve and the harness both build from it
+internal/config/     YAML + NTFY_IDP_PUSH_* env + <key>-file secrets; validation; enroll-access rules; which keys need a restart
+internal/duoapi/     Duo Auth API: signature verification (v2/v5), replay guard; renames core's results into Duo's vocabulary
+internal/core/       the running configuration; provisioning, enrollment, login (eligibility, challenges), revocation, purge, startup checks; the failure vocabulary adapters map
+internal/model/      the records core reasons about and store persists (user, device, passkey, challenge, enrollment code)
+internal/routes/     the public URL scheme: path prefixes and the links core pushes, built and parsed in one place
 internal/webauthn/   passkey registration/assertion over stored passkeys (wraps go-webauthn); synced-passkey (BE flag) policy
 internal/web/        enrollment, approval, provisioning and device pages; identity from the proxy's header
 internal/ntfy/       ntfy admin, publish and token client
 internal/store/      SQLite (modernc.org/sqlite, pure Go), migrations
 internal/token/      random secrets and the hashes stored in their place
-internal/testutil/   integration harness: fake ntfy, software authenticator, test client as the proxy
+internal/testutil/   integration harness over app: fake ntfy, software authenticator, test client as the proxy
 ```
 
 ## Data model
@@ -100,7 +103,7 @@ Disabling a user or enabling the `push-disabled: true` kill switch causes preaut
    }
    ```
 2. `/challenge/<id>` displays the request. It calls `navigator.credentials.get()` using the nonce as the challenge, the device's passkeys as `allowCredentials`, and requires user verification.
-3. `POST /challenge/<id>/assert` verifies origin, RP ID, nonce, UP+UV, device credential ownership, and the BE flag (unless `webauthn-allow-synced`). State becomes `allow`.
+3. `POST /challenge/<id>/assert` verifies origin, RP ID, nonce, UP+UV, device credential ownership, and the BE flag (unless `webauthn-allow-synced`); a refused assertion is 403. State becomes `allow`.
 4. `POST /challenge/<id>/deny` with the deny token yields `deny`; "This wasn't me" yields `fraud`.
 5. The blocked `auth` wakes and responds to the IdP. The push is then deleted from the device (ntfy `DELETE /<topic>/<sequence_id>`).
 
@@ -151,7 +154,11 @@ All actions are audited (`audit`).
 
 ## Configuration
 
-See [`deploy/server.yml`](deploy/server.yml). Configuration mirrors ntfy's `server.yml`. Set keys via `NTFY_IDP_PUSH_<KEY>`. Secrets (`duo-secret-key`, `duo-secret-key-previous`, `ntfy-admin-token`) support `<key>-file` or `NTFY_IDP_PUSH_<KEY>_FILE`. `SIGHUP` reloads request-scoped config (keys, kill switch, `enroll-access`, `push-timeout`, `trusted-proxies`, `identity-header`, secret files). The listener, database, and WebAuthn settings require a restart.
+See [`deploy/server.yml`](deploy/server.yml). Configuration mirrors ntfy's `server.yml`. Set keys via `NTFY_IDP_PUSH_<KEY>`. Secrets (`duo-secret-key`, `duo-secret-key-previous`, `ntfy-admin-token`) support `<key>-file` or `NTFY_IDP_PUSH_<KEY>_FILE`. `SIGHUP` re-reads the configuration and applies it to the next request: keys, kill switch, `enroll-access`, `push-timeout`, `trusted-proxies`, `identity-header`, and the ntfy connection (`ntfy-base-url`, `ntfy-admin-token`, so a rotated token file takes effect without a restart). Keys bound at startup (`listen-http`, `database`, `public-url`, `webauthn-*`, `ntfy-topic-prefix`) refuse the whole reload: the running configuration stays and the log names the keys.
+
+### Failures
+
+Every exported core operation fails with one of a closed set of errors, each of one kind: *refused* (policy: disabled user, revoked device, kill switch, passkey policy or verification, wrong deny token), *gone* (an expired code, link, handle or challenge), *not found* (unknown user or device), *invalid* (bad input), or *internal* (anything else). web maps the kind to a status once (403, 410, 404, 400, 500) and shows core's reason; duoapi maps it to Duo's `status_msg` once. Internal errors are logged and never echoed to clients.
 
 `enroll-access` rules use `<topic-pattern>:<access>` matching ntfy's syntax, `*` wildcards, and `${user}` expansion. Validation rejects patterns matching the push topic prefix, `everyone`/`*`, duplicate pattern rules, and `default-topics` unreadable under ntfy's applied rules.
 
@@ -176,7 +183,7 @@ Optional upstream ntfy features utilized (degrades gracefully without):
 
 ## Testing
 
-Integration tests execute `duo_api_golang` (v2 form and v5 JSON signing) against the server using a fake ntfy (v2.30 error contract) and a software WebAuthn authenticator; the test client connects from the configured trusted proxy address and sets the identity header as forward-auth would. They cover enrollment, push, passkey approval, deny, fraud, timeout, revocation recovery, provisioning, proxy identity (untrusted peers, forged headers on bypassed routes), and config loading. Forms simulate browser submissions, matching referrer policy Origins.
+Integration tests execute `duo_api_golang` (v2 form and v5 JSON signing) against the handler `app` assembles for `serve`, using a fake ntfy (v2.30 error contract) and a software WebAuthn authenticator; the test client connects from the configured trusted proxy address and sets the identity header as forward-auth would. They cover enrollment, push, passkey approval, deny, fraud, timeout, revocation recovery, provisioning, proxy identity (untrusted peers, forged headers on bypassed routes), config reload (token rotation, refused restart-only keys), the CLI, and config loading. Tests read state through core; the harness's store handle only fabricates what another process would have left. Forms simulate browser submissions, matching referrer policy Origins.
 Live tests for `internal/ntfy` require a real ntfy server via `NTFY_IDP_PUSH_TEST_NTFY_URL`/`_TOKEN`.
 
 ## Other IdPs

@@ -16,8 +16,8 @@ import (
 
 	"github.com/babraham123/ntfy-idp-push/internal/config"
 	"github.com/babraham123/ntfy-idp-push/internal/core"
+	"github.com/babraham123/ntfy-idp-push/internal/model"
 	"github.com/babraham123/ntfy-idp-push/internal/ntfy"
-	"github.com/babraham123/ntfy-idp-push/internal/store"
 	"github.com/babraham123/ntfy-idp-push/internal/testutil"
 	"github.com/babraham123/ntfy-idp-push/internal/token"
 )
@@ -289,9 +289,7 @@ func TestDisableAndKillSwitch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	next := *h.Cfg
-	next.PushDisabled = true
-	h.Svc.Reload(&next)
+	h.Reload(t, func(c *config.Config) { c.PushDisabled = true })
 	pre, _ = duo.Preauth(authapi.PreauthUsername("alice"))
 	if pre.Response.Result != "deny" {
 		t.Fatalf("preauth with push disabled: %+v", pre.Response)
@@ -321,12 +319,17 @@ func TestPreauth(t *testing.T) {
 
 	older := h.Enroll(t, "alice", testutil.NewAuthenticator(t, testutil.PublicURL))
 	newer := h.Enroll(t, "alice", testutil.NewAuthenticator(t, testutil.PublicURL))
-	// Device times have one-second resolution; using older afterwards makes it the most recent.
+	// Device times have one-second resolution; approving a login on older afterwards makes it the
+	// most recent.
 	time.Sleep(1100 * time.Millisecond)
-	if err := h.Store.TouchDevice(ctx, older.DeviceID); err != nil {
-		t.Fatal(err)
+	used := authCall(h, "alice", older.DeviceID)
+	if st := approve(t, h, older.Auth, h.Ntfy.NextPublish(t).Click); st != 200 {
+		t.Fatalf("approve: %d", st)
 	}
-	u, _ := h.Store.UserByName(ctx, "alice")
+	if r := wait(t, used); r.Response.Result != "allow" {
+		t.Fatalf("auth %+v", r.Response)
+	}
+	u, _, _ := h.Svc.DevicesOf(ctx, "alice")
 	for _, ref := range []core.UserRef{{Username: "alice"}, {ID: u.ID}} {
 		res := preauth(ref)
 		if len(res.Devices) != 2 || res.Devices[0].ID != older.DeviceID || res.Devices[1].ID != newer.DeviceID {
@@ -348,14 +351,11 @@ func TestPreauth(t *testing.T) {
 		t.Fatalf("disabled user: %+v", res)
 	}
 
-	next := *h.Cfg
-	next.EnrollPortalURL = ""
-	h.Svc.Reload(&next)
+	h.Reload(t, func(c *config.Config) { c.EnrollPortalURL = "" })
 	if res := preauth(core.UserRef{Username: "nobody"}); !errors.Is(res.Deny, core.ErrEnrollmentRequired) {
 		t.Fatalf("unknown user without enroll-portal-url: %+v", res)
 	}
-	next.PushDisabled = true
-	h.Svc.Reload(&next)
+	h.Reload(t, func(c *config.Config) { c.PushDisabled = true })
 	if res := preauth(core.UserRef{Username: "nobody"}); !errors.Is(res.Deny, core.ErrPushDisabled) {
 		t.Fatalf("kill switch: %+v", res)
 	}
@@ -376,7 +376,7 @@ func TestRevokeDevice(t *testing.T) {
 	if resp.StatusCode != 303 {
 		t.Fatalf("revoke: %d", resp.StatusCode)
 	}
-	if _, err := h.Svc.Store.Device(context.Background(), dev.DeviceID); err == nil {
+	if h.HasDevice(t, "alice", dev.DeviceID) {
 		t.Fatal("device row kept after a successful revoke")
 	}
 	if r := wait(t, res); r.Response.Result != "deny" {
@@ -439,8 +439,8 @@ func TestRevokeWithNtfyReset(t *testing.T) {
 		t.Fatal("reset with a foreign grant must be refused without --force")
 	}
 	// The refusal left the device in place.
-	if _, err := h.Svc.Store.Device(ctx, lost.DeviceID); err != nil {
-		t.Fatalf("device removed despite refusal: %v", err)
+	if !h.HasDevice(t, "alice", lost.DeviceID) {
+		t.Fatal("device removed despite refusal")
 	}
 	if err := h.Svc.RevokeDevice(ctx, lost.DeviceID, true, true, "test"); err != nil {
 		t.Fatal(err)
@@ -470,7 +470,7 @@ func TestSyncedPasskeyRefused(t *testing.T) {
 	a.Flags |= testutil.FlagBE | testutil.FlagBS
 	token, opts, _ := h.BeginEnroll(t, "alice", "", "Synced")
 	resp, b := h.Do(t, testutil.Request{Method: "POST", Path: "/enroll/finish?token=" + url.QueryEscape(token), Body: a.Create(t, opts), User: "alice"})
-	if resp.StatusCode != 400 || !strings.Contains(string(b), "synced") {
+	if resp.StatusCode != 403 || !strings.Contains(string(b), "synced") {
 		t.Fatalf("synced passkey: %d %s", resp.StatusCode, b)
 	}
 
@@ -482,9 +482,9 @@ func TestRequireAttestationRefusesNone(t *testing.T) {
 	h := testutil.NewHarness(t, func(c *config.Config) { c.WebAuthnRequireAttestation = true })
 	a := testutil.NewAuthenticator(t, testutil.PublicURL)
 	token, opts, _ := h.BeginEnroll(t, "alice", "", "Phone")
-	resp, _ := h.Do(t, testutil.Request{Method: "POST", Path: "/enroll/finish?token=" + url.QueryEscape(token), Body: a.Create(t, opts), User: "alice"})
-	if resp.StatusCode != 400 {
-		t.Fatalf("attestation none accepted: %d", resp.StatusCode)
+	resp, b := h.Do(t, testutil.Request{Method: "POST", Path: "/enroll/finish?token=" + url.QueryEscape(token), Body: a.Create(t, opts), User: "alice"})
+	if resp.StatusCode != 403 || !strings.Contains(string(b), "attestation") {
+		t.Fatalf("attestation none accepted: %d %s", resp.StatusCode, b)
 	}
 }
 
@@ -604,7 +604,7 @@ func TestEnrollmentWithoutNtfyEnrollEndpoint(t *testing.T) {
 
 func TestEnrollLinkSingleUse(t *testing.T) {
 	h := testutil.NewHarness(t, nil)
-	code, link, err := h.Svc.CreateEnrollCode(context.Background(), "erin", core.EnrollCodeTTL)
+	code, link, _, err := h.Svc.CreateEnrollCode(context.Background(), "erin", core.EnrollCodeTTL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -638,7 +638,7 @@ func TestDeleteUser(t *testing.T) {
 	if pre.Response.Result != "enroll" {
 		t.Fatalf("preauth after delete: %+v", pre.Response)
 	}
-	entries, _ := h.Svc.Store.AuditLog(ctx, "alice", 100)
+	entries, _ := h.Svc.AuditLog(ctx, "alice", 100)
 	events := map[string]bool{}
 	for _, e := range entries {
 		events[e.Event] = true
@@ -707,18 +707,18 @@ func TestCleanupWhenNtfyUserAlreadyGone(t *testing.T) {
 	if err := h.Svc.RevokeDevice(ctx, first.DeviceID, false, false, "test"); err != nil {
 		t.Fatalf("revoke: %v", err)
 	}
-	if _, err := h.Svc.Store.Device(ctx, first.DeviceID); err == nil {
+	if h.HasDevice(t, "alice", first.DeviceID) {
 		t.Fatal("device row kept")
 	}
 	h.Svc.Purge(ctx)
-	if _, err := h.Svc.Store.Device(ctx, stale.DeviceID); err == nil {
+	if h.HasDevice(t, "alice", stale.DeviceID) {
 		t.Fatal("purge did not finish the revoke")
 	}
 	if err := h.Svc.DeleteUser(ctx, "alice", false); err != nil {
 		t.Fatalf("delete user: %v", err)
 	}
-	if _, err := h.Svc.Store.UserByName(ctx, "alice"); err == nil {
-		t.Fatal("user row kept")
+	if _, _, err := h.Svc.DevicesOf(ctx, "alice"); !errors.Is(err, core.ErrUnknownUser) {
+		t.Fatalf("user row kept: %v", err)
 	}
 }
 
@@ -727,10 +727,10 @@ func TestPurgeTimesOutOrphanedPush(t *testing.T) {
 	ctx := context.Background()
 	h := testutil.NewHarness(t, nil)
 	dev := h.Enroll(t, "alice", testutil.NewAuthenticator(t, testutil.PublicURL))
-	// Stored directly: no auth call in this process waits on them.
-	orphan := func(ttl time.Duration) *store.Challenge {
+	// Left by a process that is gone: no auth call here waits on them.
+	orphan := func(ttl time.Duration) *model.Challenge {
 		now := time.Now()
-		c := &store.Challenge{ID: token.Random(16), Username: "alice", DeviceID: dev.DeviceID, Nonce: []byte("n"),
+		c := &model.Challenge{ID: token.Random(16), Username: "alice", DeviceID: dev.DeviceID, Nonce: []byte("n"),
 			DenyTokenHash: token.Hash("deny"), CreatedAt: now, ExpiresAt: now.Add(ttl)}
 		if err := h.Store.CreateChallenge(ctx, c); err != nil {
 			t.Fatal(err)
@@ -740,11 +740,11 @@ func TestPurgeTimesOutOrphanedPush(t *testing.T) {
 	expired, live := orphan(-time.Second), orphan(time.Minute)
 
 	h.Svc.Purge(ctx)
-	if c, _ := h.Store.Challenge(ctx, expired.ID); c.State != store.StateTimeout {
-		t.Fatalf("expired challenge %s", c.State)
+	if _, err := h.Svc.PendingChallenge(ctx, expired.ID); !errors.Is(err, core.ErrGone) {
+		t.Fatalf("expired challenge still pending: %v", err)
 	}
-	if c, _ := h.Store.Challenge(ctx, live.ID); c.State != store.StatePending {
-		t.Fatalf("unexpired challenge %s", c.State)
+	if _, err := h.Svc.PendingChallenge(ctx, live.ID); err != nil {
+		t.Fatalf("unexpired challenge: %v", err)
 	}
 	if got := h.Ntfy.Deleted(); len(got) != 1 || got[0] != dev.Topic+"/"+expired.ID {
 		t.Fatalf("deleted pushes %v", got)
@@ -754,9 +754,7 @@ func TestPurgeTimesOutOrphanedPush(t *testing.T) {
 func TestAuthOutlastsWriteTimeoutAfterReload(t *testing.T) {
 	h := testutil.NewHarness(t, nil)
 	dev := h.Enroll(t, "alice", testutil.NewAuthenticator(t, testutil.PublicURL))
-	next := *h.Cfg
-	next.PushTimeout = config.Duration(20 * time.Second)
-	h.Svc.Reload(&next)
+	h.Reload(t, func(c *config.Config) { c.PushTimeout = config.Duration(20 * time.Second) })
 
 	res := authCall(h, "alice", dev.DeviceID)
 	m := h.Ntfy.NextPublish(t)
@@ -792,9 +790,7 @@ func TestPendingLoginBlockedByLaterDisable(t *testing.T) {
 		dev := h.Enroll(t, "alice", testutil.NewAuthenticator(t, testutil.PublicURL))
 		res := authCall(h, "alice", dev.DeviceID)
 		m := h.Ntfy.NextPublish(t)
-		next := *h.Cfg
-		next.PushDisabled = true
-		h.Svc.Reload(&next)
+		h.Reload(t, func(c *config.Config) { c.PushDisabled = true })
 		if r := wait(t, res); r.Response.Result != "deny" {
 			t.Fatalf("auth after kill switch: %+v", r.Response)
 		}
@@ -803,14 +799,14 @@ func TestPendingLoginBlockedByLaterDisable(t *testing.T) {
 		}
 	})
 	t.Run("disabled by another process", func(t *testing.T) {
-		// A disabled user (even via direct DB change without denying pending logins)
-		// prevents valid passkey or CLI break-glass approvals.
+		// Disabled by another process straight in the database, so this one denied no pending
+		// logins: valid passkey and CLI break-glass approvals are still refused.
 		h := testutil.NewHarness(t, func(c *config.Config) { c.PushTimeout = config.Duration(2 * time.Second) })
 		dev := h.Enroll(t, "alice", testutil.NewAuthenticator(t, testutil.PublicURL))
 		authCall(h, "alice", dev.DeviceID)
 		m := h.Ntfy.NextPublish(t)
-		u, _ := h.Svc.Store.UserByName(ctx, "alice")
-		if err := h.Svc.Store.SetUserDisabled(ctx, u.ID, true); err != nil {
+		u, _, _ := h.Svc.DevicesOf(ctx, "alice")
+		if err := h.Store.SetUserDisabled(ctx, u.ID, true); err != nil {
 			t.Fatal(err)
 		}
 		if st := approve(t, h, dev.Auth, m.Click); st != 403 {
@@ -882,7 +878,7 @@ func TestRevokeResumesAfterNtfyFailure(t *testing.T) {
 	if h.Ntfy.Grant("alice", lost.Topic) != "" {
 		t.Fatal("topic grant left after retry")
 	}
-	if _, err := h.Svc.Store.Device(ctx, lost.DeviceID); err == nil {
+	if h.HasDevice(t, "alice", lost.DeviceID) {
 		t.Fatal("device row left after retry")
 	}
 
@@ -902,7 +898,7 @@ func TestRevokeResumesAfterNtfyFailure(t *testing.T) {
 	h.Ntfy.FailNext("DELETE", "/v1/users/access", 1)
 	_ = h.Svc.RevokeDevice(ctx, third.DeviceID, false, false, "test")
 	h.Svc.Purge(ctx)
-	if _, err := h.Svc.Store.Device(ctx, third.DeviceID); err == nil || h.Ntfy.Grant("alice", third.Topic) != "" {
+	if h.HasDevice(t, "alice", third.DeviceID) || h.Ntfy.Grant("alice", third.Topic) != "" {
 		t.Fatal("purge did not finish the revoke")
 	}
 }
@@ -925,7 +921,7 @@ func TestPurgeFinishesInterruptedReset(t *testing.T) {
 	}
 	h.Ntfy.FailNext("POST", "/v1/users", 1)
 	h.Svc.Purge(ctx)
-	if _, err := h.Svc.Store.Device(ctx, lost.DeviceID); err == nil {
+	if h.HasDevice(t, "alice", lost.DeviceID) {
 		t.Fatal("purge did not finish the revoke")
 	}
 	h.Svc.Purge(ctx)
@@ -981,7 +977,7 @@ func TestResetWhileUserDisabled(t *testing.T) {
 	if pending, _ := h.Store.PendingNtfyResets(ctx); len(pending) != 0 {
 		t.Fatalf("resets still pending: %v", pending)
 	}
-	if _, err := h.Svc.Store.Device(ctx, lost.DeviceID); err == nil {
+	if h.HasDevice(t, "alice", lost.DeviceID) {
 		t.Fatal("device row kept")
 	}
 
@@ -1027,7 +1023,7 @@ func TestResetRefusesForeignGrantUnderPushPrefix(t *testing.T) {
 func TestFailedEnrollmentKeepsCodeUsable(t *testing.T) {
 	ctx := context.Background()
 	h := testutil.NewHarness(t, nil)
-	code, _, err := h.Svc.CreateEnrollCode(ctx, "erin", core.EnrollCodeTTL)
+	code, _, _, err := h.Svc.CreateEnrollCode(ctx, "erin", core.EnrollCodeTTL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1036,12 +1032,8 @@ func TestFailedEnrollmentKeepsCodeUsable(t *testing.T) {
 	if status == 200 {
 		t.Fatal("enrollment succeeded while ntfy failed")
 	}
-	u, err := h.Svc.Store.UserByName(ctx, "erin")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if devs, _ := h.Svc.Store.Devices(ctx, u.ID); len(devs) != 0 {
-		t.Fatalf("half-built device left: %+v", devs)
+	if _, devs, err := h.Svc.DevicesOf(ctx, "erin"); err != nil || len(devs) != 0 {
+		t.Fatalf("half-built device left: %+v %v", devs, err)
 	}
 	for _, g := range h.Ntfy.User("erin").Grants {
 		if strings.HasPrefix(g.Topic, "push-") {

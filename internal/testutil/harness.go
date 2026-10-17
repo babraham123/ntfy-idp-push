@@ -2,6 +2,7 @@ package testutil
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"html"
@@ -18,12 +19,11 @@ import (
 	duoapigo "github.com/duosecurity/duo_api_golang"
 	"github.com/duosecurity/duo_api_golang/authapi"
 
+	"github.com/babraham123/ntfy-idp-push/internal/app"
 	"github.com/babraham123/ntfy-idp-push/internal/config"
 	"github.com/babraham123/ntfy-idp-push/internal/core"
-	"github.com/babraham123/ntfy-idp-push/internal/duoapi"
 	"github.com/babraham123/ntfy-idp-push/internal/ntfy"
 	"github.com/babraham123/ntfy-idp-push/internal/store"
-	"github.com/babraham123/ntfy-idp-push/internal/web"
 )
 
 const (
@@ -32,9 +32,9 @@ const (
 	PublicURL = "https://push.test"
 )
 
-// Harness is the whole shim on an httptest TLS server with a fake ntfy behind it. The test client
-// connects from loopback, which the config lists as the trusted proxy, so Request.User plays the
-// proxy's forward-auth step.
+// Harness is the whole shim, assembled as serve assembles it, on an httptest TLS server with a
+// fake ntfy behind it. The test client connects from loopback, which the config lists as the
+// trusted proxy, so Request.User plays the proxy's forward-auth step.
 type Harness struct {
 	Cfg    *config.Config
 	Svc    *core.Service
@@ -43,8 +43,10 @@ type Harness struct {
 	// Host is what Duo clients put in the Host header and sign (duo-hostname).
 	Host   string
 	Client *http.Client
-	Store  *store.Store
-	log    *slog.Logger
+	// Store is the database other processes (the CLI, an earlier server) share with this one;
+	// tests use it to leave the state such a process would, never to read what core can tell them.
+	Store *store.Store
+	log   *slog.Logger
 }
 
 // NewHarness starts the shim. mutate may adjust the config before validation.
@@ -106,18 +108,44 @@ func NewHarness(t *testing.T, mutate func(*config.Config)) *Harness {
 	return h
 }
 
-// serve builds the service from h.Cfg on h.Store and routes the server to it.
+// serve builds the shim from h.Cfg on h.Store and routes the server to it.
 func (h *Harness) serve(t *testing.T) {
 	t.Helper()
-	svc, err := core.New(h.Cfg, h.Store, h.log)
+	a, err := app.Build(h.Cfg, h.Store, h.log)
 	if err != nil {
 		t.Fatal(err)
 	}
-	mux := http.NewServeMux()
-	duoapi.New(svc, h.log).Register(mux)
-	web.New(svc, h.log).Register(mux)
-	h.Server.Config.Handler = web.SecurityHeaders(mux)
-	h.Svc = svc
+	h.Server.Config.Handler = a.Handler
+	h.Svc = a.Svc
+}
+
+// Reload applies a changed config as SIGHUP would.
+func (h *Harness) Reload(t *testing.T, mutate func(*config.Config)) {
+	t.Helper()
+	next := *h.Cfg
+	mutate(&next)
+	if err := next.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Svc.Reload(&next); err != nil {
+		t.Fatal(err)
+	}
+	h.Cfg = &next
+}
+
+// HasDevice reports whether user still has a device row for id, in any state.
+func (h *Harness) HasDevice(t *testing.T, user, id string) bool {
+	t.Helper()
+	_, devs, err := h.Svc.DevicesOf(context.Background(), user)
+	if err != nil {
+		return false
+	}
+	for _, d := range devs {
+		if d.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 // Restart rebuilds the service on the same database with a changed config, as a restart would.

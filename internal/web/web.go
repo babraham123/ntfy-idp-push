@@ -6,13 +6,11 @@ import (
 	"embed"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"html/template"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -21,7 +19,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/babraham123/ntfy-idp-push/internal/core"
-	"github.com/babraham123/ntfy-idp-push/internal/store"
+	"github.com/babraham123/ntfy-idp-push/internal/routes"
 )
 
 //go:embed templates/*.html static/*
@@ -55,33 +53,34 @@ func New(svc *core.Service, log *slog.Logger) *Server {
 }
 
 func (s *Server) Register(mux *http.ServeMux) {
-	mux.Handle("GET /static/", http.FileServerFS(assets))
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "ok\n") })
+	mux.Handle("GET "+routes.Static, http.FileServerFS(assets))
+	mux.HandleFunc("GET "+routes.Health, func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "ok\n") })
 
-	mux.Handle("GET /enroll", s.limit(s.enrollPage))
-	mux.Handle("POST /enroll/begin", s.limit(s.sameOrigin(s.enrollBegin)))
-	mux.Handle("POST /enroll/finish", s.limit(s.sameOrigin(s.enrollFinish)))
+	enroll, tok, ch := routes.Enroll, routes.Token, routes.Challenge
+	mux.Handle("GET "+enroll, s.limit(s.enrollPage))
+	mux.Handle("POST "+enroll+"/begin", s.limit(s.sameOrigin(s.enrollBegin)))
+	mux.Handle("POST "+enroll+"/finish", s.limit(s.sameOrigin(s.enrollFinish)))
 
-	mux.Handle("GET /token/{code}", s.limit(s.tokenPage))
-	mux.Handle("POST /token/begin", s.limit(s.sameOrigin(s.tokenBegin)))
-	mux.Handle("POST /token/finish", s.limit(s.sameOrigin(s.tokenFinish)))
-	mux.Handle("GET /token/verify/{device}", s.limit(s.verifyPage))
-	mux.Handle("POST /token/verify/{device}", s.limit(s.sameOrigin(s.verifyDevice)))
-	mux.Handle("POST /token/resend", s.limit(s.sameOrigin(s.enrollResend)))
-	mux.Handle("POST /token/password", s.limit(s.sameOrigin(s.enrollPassword)))
-	mux.HandleFunc("GET /token/qr", s.enrollQR)
+	mux.Handle("GET "+tok+"/{code}", s.limit(s.tokenPage))
+	mux.Handle("POST "+tok+"/begin", s.limit(s.sameOrigin(s.tokenBegin)))
+	mux.Handle("POST "+tok+"/finish", s.limit(s.sameOrigin(s.tokenFinish)))
+	mux.Handle("GET "+tok+"/verify/{device}", s.limit(s.verifyPage))
+	mux.Handle("POST "+tok+"/verify/{device}", s.limit(s.sameOrigin(s.verifyDevice)))
+	mux.Handle("POST "+tok+"/resend", s.limit(s.sameOrigin(s.enrollResend)))
+	mux.Handle("POST "+tok+"/password", s.limit(s.sameOrigin(s.enrollPassword)))
+	mux.HandleFunc("GET "+tok+"/qr", s.enrollQR)
 
-	mux.Handle("GET /challenge/{id}", s.limit(s.approvePage))
-	mux.Handle("GET /challenge/{id}/options", s.limit(s.assertionOptions))
-	mux.Handle("POST /challenge/{id}/assert", s.limit(s.sameOrigin(s.assert)))
+	mux.Handle("GET "+ch+"/{id}", s.limit(s.approvePage))
+	mux.Handle("GET "+ch+"/{id}/options", s.limit(s.assertionOptions))
+	mux.Handle("POST "+ch+"/{id}/assert", s.limit(s.sameOrigin(s.assert)))
 	// Called by the ntfy app's http action, which sends no Origin; the deny token authorizes it.
-	mux.Handle("POST /challenge/{id}/deny", s.limit(s.deny))
-	mux.Handle("POST /challenge/{id}/fraud", s.limit(s.sameOrigin(s.fraud)))
+	mux.Handle("POST "+ch+"/{id}/deny", s.limit(s.deny))
+	mux.Handle("POST "+ch+"/{id}/fraud", s.limit(s.sameOrigin(s.fraud)))
 
-	mux.HandleFunc("GET /provision", s.provisionPage)
-	mux.Handle("POST /provision/password", s.sameOrigin(s.provisionPassword))
-	mux.HandleFunc("GET /devices", s.devicesPage)
-	mux.Handle("POST /devices/{id}/revoke", s.sameOrigin(s.revoke))
+	mux.HandleFunc("GET "+routes.Provision, s.provisionPage)
+	mux.Handle("POST "+routes.Provision+"/password", s.sameOrigin(s.provisionPassword))
+	mux.HandleFunc("GET "+routes.Devices, s.devicesPage)
+	mux.Handle("POST "+routes.Devices+"/{id}/revoke", s.sameOrigin(s.revoke))
 }
 
 // SecurityHeaders sets the headers every response carries, Duo API and static files included.
@@ -96,7 +95,7 @@ func SecurityHeaders(next http.Handler) http.Handler {
 	})
 }
 
-// ---- helpers
+// ---- responses
 
 func (s *Server) render(w http.ResponseWriter, status int, name string, data any) {
 	var buf bytes.Buffer
@@ -126,9 +125,65 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-func jsonError(w http.ResponseWriter, status int, msg string) {
-	writeJSON(w, status, map[string]string{"error": msg})
+// status maps a core failure kind to the HTTP status every handler answers with.
+func status(k core.Kind) int {
+	switch k {
+	case core.Refused:
+		return http.StatusForbidden
+	case core.Gone:
+		return http.StatusGone
+	case core.NotFound:
+		return http.StatusNotFound
+	case core.Invalid:
+		return http.StatusBadRequest
+	}
+	return http.StatusInternalServerError
 }
+
+// failure is what the client learns about err: core's own reason for a classified failure, and
+// nothing but the status for an internal one, which is logged instead.
+func (s *Server) failure(err error, what string) (int, string) {
+	k := core.KindOf(err)
+	if k == core.Internal {
+		s.log.Error(what, "err", err)
+		return http.StatusInternalServerError, "internal error"
+	}
+	return status(k), err.Error()
+}
+
+// jsonFail answers a fetch() call with err.
+func (s *Server) jsonFail(w http.ResponseWriter, err error, what string) {
+	st, msg := s.failure(err, what)
+	writeJSON(w, st, map[string]string{"error": msg})
+}
+
+// pageFail answers a page request with err.
+func (s *Server) pageFail(w http.ResponseWriter, err error, what string) {
+	st, msg := s.failure(err, what)
+	title := "Error"
+	switch status := st; status {
+	case http.StatusGone:
+		title = "Link expired"
+	case http.StatusForbidden:
+		title = "Not allowed"
+	case http.StatusNotFound:
+		title = "Not found"
+	case http.StatusBadRequest:
+		title = "Bad request"
+	}
+	s.message(w, st, title, strings.ToUpper(msg[:1])+msg[1:]+".")
+}
+
+// readJSON decodes a fetch() body into v, answering 400 itself when it cannot.
+func readJSON(w http.ResponseWriter, r *http.Request, v any) bool {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxBody)).Decode(v); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad request"})
+		return false
+	}
+	return true
+}
+
+// ---- request identity
 
 // sameOrigin refuses cross-site state changes from browsers.
 func (s *Server) sameOrigin(next http.HandlerFunc) http.HandlerFunc {
@@ -230,14 +285,14 @@ func qrDataURL(content string) (template.URL, error) {
 // split carried the code as ?code=; they are forwarded to /token/{code} for one release.
 func (s *Server) enrollPage(w http.ResponseWriter, r *http.Request) {
 	if code := r.URL.Query().Get("code"); code != "" {
-		http.Redirect(w, r, "/token/"+url.PathEscape(code), http.StatusFound)
+		http.Redirect(w, r, routes.EnrollURL("", code), http.StatusFound)
 		return
 	}
 	user, ok := s.signedIn(w, r)
 	if !ok {
 		return
 	}
-	s.render(w, http.StatusOK, "enroll.html", map[string]string{"User": user, "Base": "/enroll"})
+	s.render(w, http.StatusOK, "enroll.html", map[string]string{"User": user, "Base": routes.Enroll})
 }
 
 // tokenPage is the token route: a shim-issued enrollment code is the whole credential.
@@ -245,10 +300,10 @@ func (s *Server) tokenPage(w http.ResponseWriter, r *http.Request) {
 	code := r.PathValue("code")
 	user, err := s.svc.ResolveEnrollCode(r.Context(), code)
 	if err != nil {
-		s.message(w, http.StatusGone, "Link expired", "This enrollment link is invalid or has expired. Ask for a new one.")
+		s.pageFail(w, err, "enroll: code")
 		return
 	}
-	s.render(w, http.StatusOK, "enroll.html", map[string]string{"User": user, "Code": code, "Base": "/token"})
+	s.render(w, http.StatusOK, "enroll.html", map[string]string{"User": user, "Code": code, "Base": routes.Token})
 }
 
 func (s *Server) enrollBegin(w http.ResponseWriter, r *http.Request) {
@@ -257,8 +312,7 @@ func (s *Server) enrollBegin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct{ Name string }
-	if err := json.NewDecoder(io.LimitReader(r.Body, maxBody)).Decode(&in); err != nil {
-		jsonError(w, http.StatusBadRequest, "bad request")
+	if !readJSON(w, r, &in) {
 		return
 	}
 	s.beginEnrollment(w, r, core.EnrollRequest{Username: user, DeviceName: in.Name})
@@ -266,28 +320,20 @@ func (s *Server) enrollBegin(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) tokenBegin(w http.ResponseWriter, r *http.Request) {
 	var in struct{ Name, Code string }
-	if err := json.NewDecoder(io.LimitReader(r.Body, maxBody)).Decode(&in); err != nil {
-		jsonError(w, http.StatusBadRequest, "bad request")
+	if !readJSON(w, r, &in) {
 		return
 	}
 	if in.Code == "" {
-		s.codeExpired(w)
+		s.jsonFail(w, core.ErrInvalidCode, "")
 		return
 	}
 	s.beginEnrollment(w, r, core.EnrollRequest{Code: in.Code, DeviceName: in.Name})
 }
 
-func (s *Server) codeExpired(w http.ResponseWriter) {
-	jsonError(w, http.StatusGone, "This enrollment link is invalid or has expired. Ask for a new one.")
-}
-
 func (s *Server) beginEnrollment(w http.ResponseWriter, r *http.Request, req core.EnrollRequest) {
 	handle, opts, err := s.svc.BeginEnrollment(r.Context(), req)
-	if errors.Is(err, core.ErrInvalidCode) {
-		s.codeExpired(w)
-		return
-	} else if err != nil {
-		jsonError(w, http.StatusBadRequest, err.Error())
+	if err != nil {
+		s.jsonFail(w, err, "enroll: begin")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"token": handle, "options": opts})
@@ -310,83 +356,71 @@ func (s *Server) tokenFinish(w http.ResponseWriter, r *http.Request) {
 func (s *Server) finishEnrollment(w http.ResponseWriter, r *http.Request, signedIn string) {
 	handle := r.URL.Query().Get("token")
 	res, err := s.svc.FinishEnrollment(r.Context(), handle, signedIn, io.LimitReader(r.Body, maxBody))
-	switch {
-	case errors.Is(err, core.ErrIdentityChanged):
-		jsonError(w, http.StatusForbidden, err.Error())
+	if err != nil {
+		s.log.Warn("enroll: finish", "err", err)
+		s.jsonFail(w, err, "enroll: finish")
 		return
-	case err != nil:
-		s.log.Warn("enroll", "err", err)
-		jsonError(w, http.StatusBadRequest, err.Error())
+	}
+	link := res.Handoff.Links[0].URL
+	qr, err := qrDataURL(link)
+	if err != nil {
+		s.jsonFail(w, err, "enroll: qr")
 		return
 	}
 	var codeExpires int64
-	if res.Code != nil {
-		codeExpires = res.Code.Expires
-	}
-	qr, err := qrDataURL(res.NtfyLink)
-	if err != nil {
-		jsonError(w, http.StatusInternalServerError, err.Error())
-		return
+	if res.Handoff.HasCode() {
+		codeExpires = res.Handoff.CodeExpires.Unix()
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"device":       res.Device.ID,
 		"topic":        res.Device.NtfyTopic,
 		"username":     res.Device.Username,
-		"ntfy_link":    res.NtfyLink,
-		"has_code":     res.Code != nil,
+		"ntfy_link":    link,
+		"has_code":     res.Handoff.HasCode(),
 		"code_expires": codeExpires,
 		"qr":           qr,
 		"result_token": res.ResultToken,
 	})
 }
 
-// enrolledFrom resolves the result token posted by the enrollment result page.
-func (s *Server) enrolledFrom(w http.ResponseWriter, r *http.Request) (*store.Device, bool) {
+// enrolledFrom resolves the result token posted by the enrollment result page to the device's
+// ID and owner.
+func (s *Server) enrolledFrom(w http.ResponseWriter, r *http.Request) (deviceID, username string, ok bool) {
 	var in struct{ Token string }
-	if err := json.NewDecoder(io.LimitReader(r.Body, maxBody)).Decode(&in); err != nil {
-		jsonError(w, http.StatusBadRequest, "bad request")
-		return nil, false
+	if !readJSON(w, r, &in) {
+		return "", "", false
 	}
 	d, err := s.svc.EnrolledDevice(r.Context(), in.Token)
-	if errors.Is(err, core.ErrInvalidCode) {
-		jsonError(w, http.StatusGone, "this page has expired; enroll again")
-		return nil, false
-	} else if err != nil {
-		s.log.Error("enroll: result token", "err", err)
-		jsonError(w, http.StatusInternalServerError, "internal error")
-		return nil, false
+	if err != nil {
+		s.jsonFail(w, err, "enroll: result token")
+		return "", "", false
 	}
-	return d, true
+	return d.ID, d.Username, true
 }
 
 func (s *Server) enrollResend(w http.ResponseWriter, r *http.Request) {
-	d, ok := s.enrolledFrom(w, r)
+	id, user, ok := s.enrolledFrom(w, r)
 	if !ok {
 		return
 	}
-	if err := s.svc.ResendSetupPush(r.Context(), d.ID, d.Username); errors.Is(err, core.ErrInvalidCode) {
-		jsonError(w, http.StatusGone, "this phone is already set up or was removed")
-		return
-	} else if err != nil {
-		s.log.Error("enroll: resend", "device", d.ID, "err", err)
-		jsonError(w, http.StatusBadGateway, "could not send the setup notification")
+	if err := s.svc.ResendSetupPush(r.Context(), id, user); err != nil {
+		s.jsonFail(w, err, "enroll: resend")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"result": "sent"})
 }
 
 func (s *Server) enrollPassword(w http.ResponseWriter, r *http.Request) {
-	d, ok := s.enrolledFrom(w, r)
+	_, user, ok := s.enrolledFrom(w, r)
 	if !ok {
 		return
 	}
-	password, err := s.svc.SetNtfyPassword(r.Context(), d.Username)
+	password, err := s.svc.SetNtfyPassword(r.Context(), user)
 	if err != nil {
-		s.log.Error("enroll: ntfy password", "user", d.Username, "err", err)
-		jsonError(w, http.StatusBadGateway, "could not set an ntfy password")
+		s.jsonFail(w, err, "enroll: ntfy password")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"username": d.Username, "password": password})
+	writeJSON(w, http.StatusOK, map[string]string{"username": user, "password": password})
 }
 
 func (s *Server) verifyPage(w http.ResponseWriter, r *http.Request) {
@@ -396,7 +430,7 @@ func (s *Server) verifyPage(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) verifyDevice(w http.ResponseWriter, r *http.Request) {
 	if err := s.svc.VerifyDevice(r.Context(), r.PathValue("device"), r.FormValue("t")); err != nil {
-		s.message(w, http.StatusGone, "Link expired", "This setup link was already used or is invalid.")
+		s.pageFail(w, err, "enroll: verify")
 		return
 	}
 	s.message(w, http.StatusOK, "Phone ready", "This phone will now receive sign-in requests. You can close this page.")
@@ -406,11 +440,8 @@ func (s *Server) verifyDevice(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) approvePage(w http.ResponseWriter, r *http.Request) {
 	c, err := s.svc.PendingChallenge(r.Context(), r.PathValue("id"))
-	if errors.Is(err, core.ErrGone) {
-		s.message(w, http.StatusGone, "Request closed", "This sign-in request was already answered or has expired.")
-		return
-	} else if err != nil {
-		s.message(w, http.StatusInternalServerError, "Error", "Something went wrong.")
+	if err != nil {
+		s.pageFail(w, err, "approve: page")
 		return
 	}
 	s.render(w, http.StatusOK, "approve.html", map[string]any{
@@ -421,55 +452,36 @@ func (s *Server) approvePage(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) assertionOptions(w http.ResponseWriter, r *http.Request) {
 	opts, err := s.svc.AssertionOptions(r.Context(), r.PathValue("id"))
-	if errors.Is(err, core.ErrGone) {
-		jsonError(w, http.StatusGone, err.Error())
-		return
-	} else if errors.Is(err, core.ErrPasskeyPolicy) {
-		jsonError(w, http.StatusForbidden, err.Error())
-		return
-	} else if err != nil {
-		jsonError(w, http.StatusInternalServerError, "internal error")
+	if err != nil {
+		s.jsonFail(w, err, "approve: options")
 		return
 	}
 	writeJSON(w, http.StatusOK, opts)
 }
 
 func (s *Server) assert(w http.ResponseWriter, r *http.Request) {
-	err := s.svc.Approve(r.Context(), r.PathValue("id"), io.LimitReader(r.Body, maxBody))
-	switch {
-	case errors.Is(err, core.ErrGone):
-		jsonError(w, http.StatusGone, err.Error())
-	case errors.Is(err, core.ErrUserDisabled), errors.Is(err, core.ErrPushDisabled), errors.Is(err, core.ErrDeviceRevoked),
-		errors.Is(err, core.ErrPasskeyPolicy):
+	if err := s.svc.Approve(r.Context(), r.PathValue("id"), io.LimitReader(r.Body, maxBody)); err != nil {
 		s.log.Warn("approve", "challenge", r.PathValue("id"), "err", err)
-		jsonError(w, http.StatusForbidden, err.Error())
-	case err != nil:
-		s.log.Warn("approve", "challenge", r.PathValue("id"), "err", err)
-		jsonError(w, http.StatusForbidden, "passkey verification failed")
-	default:
-		writeJSON(w, http.StatusOK, map[string]string{"result": "allow"})
+		s.jsonFail(w, err, "approve")
+		return
 	}
+	writeJSON(w, http.StatusOK, map[string]string{"result": "allow"})
 }
 
 func (s *Server) deny(w http.ResponseWriter, r *http.Request) {
 	denyToken, _ := io.ReadAll(io.LimitReader(r.Body, 1024))
-	err := s.svc.Deny(r.Context(), r.PathValue("id"), strings.TrimSpace(string(denyToken)))
-	switch {
-	case errors.Is(err, core.ErrGone):
-		http.Error(w, "gone", http.StatusGone)
-	case errors.Is(err, core.ErrBadToken):
-		http.Error(w, "forbidden", http.StatusForbidden)
-	case err != nil:
-		http.Error(w, "internal error", http.StatusInternalServerError)
-	default:
-		io.WriteString(w, "denied\n")
+	if err := s.svc.Deny(r.Context(), r.PathValue("id"), strings.TrimSpace(string(denyToken))); err != nil {
+		st, msg := s.failure(err, "deny")
+		http.Error(w, msg, st)
+		return
 	}
+	io.WriteString(w, "denied\n")
 }
 
 // fraud lets push holders report it. This endpoint can only deny logins, never approve them.
 func (s *Server) fraud(w http.ResponseWriter, r *http.Request) {
 	if err := s.svc.ReportFraud(r.Context(), r.PathValue("id"), s.clientIP(r)); err != nil {
-		jsonError(w, http.StatusGone, "request already closed")
+		s.jsonFail(w, err, "fraud")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"result": "fraud"})
@@ -480,18 +492,14 @@ func (s *Server) fraud(w http.ResponseWriter, r *http.Request) {
 // enrollQR renders QR codes only for shim-issued enrollment codes (preventing general-purpose QR
 // abuse).
 func (s *Server) enrollQR(w http.ResponseWriter, r *http.Request) {
-	value := r.URL.Query().Get("value")
-	prefix := s.svc.Config().PublicURL + "/token/"
-	code := ""
-	if strings.HasPrefix(value, prefix) {
-		code, _ = url.PathUnescape(value[len(prefix):])
-	}
-	if code == "" || strings.Contains(code, "/") {
+	code := routes.EnrollCode(s.svc.Config().PublicURL, r.URL.Query().Get("value"))
+	if code == "" {
 		http.NotFound(w, r)
 		return
 	}
 	if _, err := s.svc.ResolveEnrollCode(r.Context(), code); err != nil {
-		http.NotFound(w, r)
+		st, msg := s.failure(err, "enroll: qr")
+		http.Error(w, msg, st)
 		return
 	}
 	png, err := qrcode.Encode(s.svc.EnrollURL(code), qrcode.Medium, 320)
