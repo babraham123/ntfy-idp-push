@@ -616,10 +616,11 @@ func TestProvisionRefusesUsernameThatReachesPushTopics(t *testing.T) {
 
 func TestEnrollLinkSingleUse(t *testing.T) {
 	h := testutil.NewHarness(t, nil)
-	_, link, _, err := h.Svc.CreateEnrollCode(context.Background(), "erin", core.EnrollCodeTTL)
+	l, err := h.Svc.CreateEnrollLink(context.Background(), "erin", core.EnrollCodeTTL)
 	if err != nil {
 		t.Fatal(err)
 	}
+	link := l.URL
 	if _, st, b := h.FinishEnroll(t, "", link, testutil.NewAuthenticator(t, testutil.PublicURL)); st != 200 {
 		t.Fatalf("finish: %d %s", st, b)
 	}
@@ -1021,10 +1022,11 @@ func TestResetRefusesForeignGrantUnderPushPrefix(t *testing.T) {
 func TestFailedEnrollmentKeepsCodeUsable(t *testing.T) {
 	ctx := context.Background()
 	h := testutil.NewHarness(t, nil)
-	_, link, _, err := h.Svc.CreateEnrollCode(ctx, "erin", core.EnrollCodeTTL)
+	l, err := h.Svc.CreateEnrollLink(ctx, "erin", core.EnrollCodeTTL)
 	if err != nil {
 		t.Fatal(err)
 	}
+	link := l.URL
 	h.Ntfy.FailNext("POST", "/", 1) // the setup push
 	failed, status, _ := h.FinishEnroll(t, "", link, testutil.NewAuthenticator(t, testutil.PublicURL))
 	if status == 200 {

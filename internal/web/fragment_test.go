@@ -27,10 +27,11 @@ func TestTokenSecretsTravelInFragment(t *testing.T) {
 		return resp.StatusCode, string(b)
 	}
 
-	_, link, _, err := h.Svc.CreateEnrollCode(ctx, "erin", core.EnrollCodeTTL)
+	l, err := h.Svc.CreateEnrollLink(ctx, "erin", core.EnrollCodeTTL)
 	if err != nil {
 		t.Fatal(err)
 	}
+	link := l.URL
 	path, code := testutil.Fragment(t, link)
 	active := func(deviceID string) bool {
 		t.Helper()

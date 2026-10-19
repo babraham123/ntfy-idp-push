@@ -566,17 +566,13 @@ func (s *Server) fraud(w http.ResponseWriter, r *http.Request) {
 // enrollQR renders QR codes only for shim-issued enrollment codes (preventing general-purpose QR
 // abuse).
 func (s *Server) enrollQR(w http.ResponseWriter, r *http.Request) {
-	code := routes.EnrollCode(s.svc.Config().PublicURL, r.URL.Query().Get("value"))
-	if code == "" {
-		http.NotFound(w, r)
-		return
-	}
-	if _, err := s.svc.ResolveEnrollCode(r.Context(), code); err != nil {
+	content, err := s.svc.EnrollBarcode(r.Context(), r.URL.Query().Get("value"))
+	if err != nil {
 		st, msg := s.failure(err, "enroll: qr")
 		http.Error(w, msg, st)
 		return
 	}
-	png, err := qrcode.Encode(s.svc.EnrollURL(code), qrcode.Medium, 320)
+	png, err := qrcode.Encode(content, qrcode.Medium, 320)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return

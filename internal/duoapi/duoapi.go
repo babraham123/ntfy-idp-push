@@ -18,7 +18,6 @@ import (
 
 	"github.com/babraham123/ntfy-idp-push/internal/core"
 	"github.com/babraham123/ntfy-idp-push/internal/model"
-	"github.com/babraham123/ntfy-idp-push/internal/routes"
 )
 
 const maxBody = 64 << 10
@@ -292,9 +291,9 @@ func (h *Handler) enroll(w http.ResponseWriter, r *http.Request, p params) {
 		return
 	}
 	writeOK(w, map[string]any{
-		"activation_barcode": routes.QRURL(h.svc.Config().PublicURL, e.Link),
+		"activation_barcode": e.BarcodeURL,
 		"activation_code":    e.Code,
-		"activation_url":     e.Link,
+		"activation_url":     e.URL,
 		"expiration":         e.ExpiresAt.Unix(),
 		"user_id":            e.UserID,
 		"username":           e.Username,

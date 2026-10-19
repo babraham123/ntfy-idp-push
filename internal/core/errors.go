@@ -37,6 +37,7 @@ var (
 	// NotFound: the named user or device does not exist for the caller.
 	ErrUnknownUser   = errors.New("unknown user")
 	ErrUnknownDevice = errors.New("unknown device")
+	ErrNoEnrollLink  = errors.New("not an enrollment link")
 
 	// Invalid: the input itself is unacceptable.
 	ErrInvalidName  = errors.New("invalid username")
@@ -60,7 +61,7 @@ const (
 var kinds = map[Kind][]error{
 	Refused:  {ErrUserDisabled, ErrPushDisabled, ErrDeviceRevoked, ErrNotOwner, ErrForeignGrants, ErrIdentityChanged, ErrPasskeyPolicy, ErrPasskeyRejected, ErrBadToken, ErrEnrollmentRequired, ErrTooManyPushes, ErrNotInDirectory, ErrNoDirectory, ErrDirectoryConfigured, ErrNoEmail},
 	Gone:     {ErrGone, ErrInvalidCode, ErrEnrollmentExpired, ErrResultExpired, ErrSetupLinkUsed, ErrSetupDone},
-	NotFound: {ErrUnknownUser, ErrUnknownDevice},
+	NotFound: {ErrUnknownUser, ErrUnknownDevice, ErrNoEnrollLink},
 	Invalid:  {ErrInvalidName, ErrInvalidEmail, ErrMalformed},
 }
 

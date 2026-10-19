@@ -18,27 +18,54 @@ import (
 	"github.com/babraham123/ntfy-idp-push/internal/webauthn"
 )
 
-// CreateEnrollCode mints a single-use enrollment link that identifies username by itself, valid
-// for ttl.
-func (s *Service) CreateEnrollCode(ctx context.Context, username string, ttl time.Duration) (code, link string, expires time.Time, err error) {
-	if err := ValidUsername(username); err != nil {
-		return "", "", time.Time{}, err
-	}
-	code = token.Random(24)
-	expires = time.Now().Add(ttl)
-	err = s.store.CreateEnrollCode(ctx, token.Hash(code), model.EnrollCode{Username: username, ExpiresAt: expires})
-	if err != nil {
-		return "", "", time.Time{}, err
-	}
-	s.store.Audit(ctx, username, "enroll_link", map[string]any{"ttl": ttl.String()})
-	return code, routes.EnrollURL(s.Config().PublicURL, code), expires, nil
+// EnrollLink is a single-use enrollment link that identifies its user by itself: the page URL the
+// phone opens, with the code in its fragment; the URL of a QR image of it for a screen the phone
+// scans; and when it stops working. The code is the credential; the URLs are how it travels.
+type EnrollLink struct {
+	Code       string
+	URL        string
+	BarcodeURL string
+	ExpiresAt  time.Time
 }
 
-// EnrollURL is the enrollment page for a code.
-func (s *Service) EnrollURL(code string) string { return routes.EnrollURL(s.Config().PublicURL, code) }
+// CreateEnrollLink mints an enrollment link for username, valid for ttl.
+func (s *Service) CreateEnrollLink(ctx context.Context, username string, ttl time.Duration) (*EnrollLink, error) {
+	if err := ValidUsername(username); err != nil {
+		return nil, err
+	}
+	code := token.Random(24)
+	expires := time.Now().Add(ttl)
+	err := s.store.CreateEnrollCode(ctx, token.Hash(code), model.EnrollCode{Username: username, ExpiresAt: expires})
+	if err != nil {
+		return nil, err
+	}
+	s.store.Audit(ctx, username, "enroll_link", map[string]any{"ttl": ttl.String()})
+	return s.enrollLink(code, expires), nil
+}
 
-// ResolveEnrollCode returns the username an unused, unexpired code was issued for.
-func (s *Service) ResolveEnrollCode(ctx context.Context, code string) (string, error) {
+func (s *Service) enrollLink(code string, expires time.Time) *EnrollLink {
+	public := s.Config().PublicURL
+	u := routes.EnrollURL(public, code)
+	return &EnrollLink{Code: code, URL: u, BarcodeURL: routes.QRURL(public, u), ExpiresAt: expires}
+}
+
+// EnrollBarcode is what the QR image for a presented enrollment link encodes: the link itself,
+// when it is one the shim issued and its code is still usable. Only such links get a barcode, so
+// the QR route cannot be used to encode anything else. A link that is not the shim's is
+// ErrNoEnrollLink; one whose code is used or expired is ErrInvalidCode.
+func (s *Service) EnrollBarcode(ctx context.Context, link string) (string, error) {
+	code := routes.EnrollCode(s.Config().PublicURL, link)
+	if code == "" {
+		return "", ErrNoEnrollLink
+	}
+	if _, err := s.resolveEnrollCode(ctx, code); err != nil {
+		return "", err
+	}
+	return routes.EnrollURL(s.Config().PublicURL, code), nil
+}
+
+// resolveEnrollCode returns the username an unused, unexpired code was issued for.
+func (s *Service) resolveEnrollCode(ctx context.Context, code string) (string, error) {
 	ec, err := s.store.EnrollCode(ctx, token.Hash(code))
 	if errors.Is(err, store.ErrNotFound) || (err == nil && !ec.Usable(time.Now())) {
 		return "", ErrInvalidCode
@@ -48,25 +75,24 @@ func (s *Service) ResolveEnrollCode(ctx context.Context, code string) (string, e
 	return ec.Username, nil
 }
 
-// IdPEnrollment is what the IdP needs to show a user who enrolls through it: the code and link
-// the phone uses, and the user ID it uses to poll EnrollmentState.
+// IdPEnrollment is what the IdP needs to show a user who enrolls through it: the link the phone
+// uses, and the user ID it uses to poll EnrollmentState.
 type IdPEnrollment struct {
 	UserID, Username string
-	Code, Link       string
-	ExpiresAt        time.Time
+	EnrollLink
 }
 
-// StartIdPEnrollment provisions username and issues an enrollment code, the IdP-driven way in.
+// StartIdPEnrollment provisions username and issues an enrollment link, the IdP-driven way in.
 func (s *Service) StartIdPEnrollment(ctx context.Context, username string) (*IdPEnrollment, error) {
 	u, err := s.provision(ctx, s.ntfy().Accounts(), username)
 	if err != nil {
 		return nil, err
 	}
-	code, link, expires, err := s.CreateEnrollCode(ctx, username, EnrollCodeTTL)
+	l, err := s.CreateEnrollLink(ctx, username, EnrollCodeTTL)
 	if err != nil {
 		return nil, err
 	}
-	return &IdPEnrollment{UserID: u.ID, Username: u.Username, Code: code, Link: link, ExpiresAt: expires}, nil
+	return &IdPEnrollment{UserID: u.ID, Username: u.Username, EnrollLink: *l}, nil
 }
 
 // EnrollmentState is how far an IdP-driven enrollment has come.
@@ -143,7 +169,7 @@ func deviceName(name string) string {
 func (s *Service) BeginEnrollment(ctx context.Context, r EnrollRequest) (handle string, options json.RawMessage, err error) {
 	username := r.Username
 	if r.Code != "" {
-		if username, err = s.ResolveEnrollCode(ctx, r.Code); err != nil {
+		if username, err = s.resolveEnrollCode(ctx, r.Code); err != nil {
 			return "", nil, err
 		}
 	}

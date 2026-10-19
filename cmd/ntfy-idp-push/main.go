@@ -156,11 +156,11 @@ func run(args []string, out io.Writer, log *slog.Logger) error {
 		if len(rest) != 1 {
 			return errors.New("usage: enroll-link <username>")
 		}
-		_, link, _, err := svc.CreateEnrollCode(ctx, rest[0], core.EnrollCodeTTL)
+		l, err := svc.CreateEnrollLink(ctx, rest[0], core.EnrollCodeTTL)
 		if err != nil {
 			return err
 		}
-		fmt.Fprintln(out, link)
+		fmt.Fprintln(out, l.URL)
 		return nil
 	case "backup":
 		if len(rest) != 1 {
