@@ -22,8 +22,8 @@ type SyncCounts struct {
 	Created, Welcomed, Deleted, Updated int
 }
 
-// Sync runs one directory sync round. A directory that fails or lists nobody skips the round and
-// changes nothing, since deletes cannot be undone and a broken directory would delete everyone.
+// Sync runs one directory sync round. A directory that fails skips the round and changes nothing,
+// since deletes cannot be undone and a broken directory would delete everyone.
 // The round first reconciles accounts: it creates listed people, records profiles, and deletes
 // users the directory no longer lists or marks disabled. Only then does it send owed welcomes, so
 // a slow or failing mail server never holds up a deletion. A failure for one user does not stop

@@ -2,7 +2,6 @@ package directory
 
 import (
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -88,8 +87,8 @@ func TestFileGroupFilter(t *testing.T) {
 	} {
 		got, err := listFile(t, path, c.group)
 		if c.want == nil {
-			if !errors.Is(err, ErrEmpty) {
-				t.Errorf("group %q: got %v, %v; want ErrEmpty", c.group, got, err)
+			if err != nil || len(got) != 0 {
+				t.Errorf("group %q: got %v, %v; want nobody", c.group, got, err)
 			}
 			continue
 		}
@@ -109,17 +108,17 @@ func TestFileEmptyOrBroken(t *testing.T) {
 		"empty users":      "users: {}\n",
 		"only invalid ids": "users:\n  everyone: {}\n  \"a b\": {}\n",
 	} {
-		if got, err := listFile(t, writeDB(t, content), ""); !errors.Is(err, ErrEmpty) {
-			t.Errorf("%s: got %v, %v; want ErrEmpty", name, got, err)
+		if got, err := listFile(t, writeDB(t, content), ""); err != nil || len(got) != 0 {
+			t.Errorf("%s: got %v, %v; want nobody", name, got, err)
 		}
 	}
-	// A broken or missing file is an error the sync must not mistake for an empty directory.
+	// A broken or missing file is an error, not an empty directory.
 	for name, path := range map[string]string{
 		"malformed": writeDB(t, "users: [\n"),
 		"missing":   filepath.Join(t.TempDir(), "absent.yml"),
 	} {
-		if _, err := listFile(t, path, ""); err == nil || errors.Is(err, ErrEmpty) {
-			t.Errorf("%s: got %v, want a non-ErrEmpty error", name, err)
+		if _, err := listFile(t, path, ""); err == nil {
+			t.Errorf("%s: listed without error", name)
 		}
 	}
 }

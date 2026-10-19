@@ -12,8 +12,7 @@ import (
 var _ directory.Source = (*FakeDirectory)(nil)
 
 // FakeDirectory is a directory.Source listing whatever the test set, with the real sources'
-// contract: sorted by username, and directory.ErrEmpty instead of an empty list. The zero value
-// lists nobody.
+// contract: sorted by username. The zero value lists nobody.
 type FakeDirectory struct {
 	mu     sync.Mutex
 	people []directory.Person
@@ -42,9 +41,6 @@ func (f *FakeDirectory) List(ctx context.Context) ([]directory.Person, error) {
 	defer f.mu.Unlock()
 	if f.err != nil {
 		return nil, f.err
-	}
-	if len(f.people) == 0 {
-		return nil, directory.ErrEmpty
 	}
 	out := slices.Clone(f.people)
 	slices.SortFunc(out, func(a, b directory.Person) int { return strings.Compare(a.Username, b.Username) })

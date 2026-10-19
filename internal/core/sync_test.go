@@ -290,8 +290,8 @@ func TestSyncListsNtfyUsersOnce(t *testing.T) {
 	wantSyncCounts(t, h, 0, 0, 0, 0)
 }
 
-// A directory that fails or lists nobody changes nothing: deleting everyone on a broken directory
-// could not be undone.
+// A directory that fails changes nothing: deleting everyone on a broken directory could not be
+// undone. One that lists nobody is believed, and deletes everyone.
 func TestSyncSkipsBrokenDirectory(t *testing.T) {
 	ctx := context.Background()
 	h := testutil.NewHarness(t, nil)
@@ -299,27 +299,34 @@ func TestSyncSkipsBrokenDirectory(t *testing.T) {
 	if err := h.Svc.Sync(ctx); err != nil {
 		t.Fatal(err)
 	}
-	for _, broken := range []func(){
-		func() { h.Dir.Set() },
-		func() { h.Dir.Fail(errors.New("ldap: connection refused")) },
-	} {
-		broken()
-		err := h.Svc.Sync(ctx)
-		if err == nil {
-			t.Fatal("sync with a broken directory succeeded")
-		}
-		if got := lastAudit(t, h, "sync_skipped")["error"]; got != err.Error() {
-			t.Fatalf("sync_skipped error %q, want %q", got, err)
-		}
-		if u := userNamed(t, h, "carol"); !u.Enabled() || h.Ntfy.User("carol") == nil {
-			t.Fatal("a skipped round removed or disabled a user")
-		}
-		if pre := preauthResult(t, h, "carol"); pre.Response.Result != "enroll" {
-			t.Fatalf("preauth after a skipped round: %+v", pre.Response)
-		}
+	h.Dir.Fail(errors.New("ldap: connection refused"))
+	err := h.Svc.Sync(ctx)
+	if err == nil {
+		t.Fatal("sync with a broken directory succeeded")
+	}
+	if got := lastAudit(t, h, "sync_skipped")["error"]; got != err.Error() {
+		t.Fatalf("sync_skipped error %q, want %q", got, err)
+	}
+	if u := userNamed(t, h, "carol"); !u.Enabled() || h.Ntfy.User("carol") == nil {
+		t.Fatal("a skipped round removed or disabled a user")
+	}
+	if pre := preauthResult(t, h, "carol"); pre.Response.Result != "enroll" {
+		t.Fatalf("preauth after a skipped round: %+v", pre.Response)
 	}
 	if n := auditCount(t, h, "", "sync"); n != 1 {
 		t.Fatalf("%d sync rounds audited, want only the first", n)
+	}
+
+	h.Dir.Fail(nil)
+	h.Dir.Set()
+	if err := h.Svc.Sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := h.Svc.DevicesOf(ctx, "carol"); !errors.Is(err, core.ErrUnknownUser) {
+		t.Fatalf("carol after an empty round: %v", err)
+	}
+	if h.Ntfy.User("carol") != nil {
+		t.Fatal("an empty round kept the ntfy user")
 	}
 }
 

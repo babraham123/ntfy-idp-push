@@ -217,8 +217,8 @@ func TestLDAPEmptyAndFailures(t *testing.T) {
 		"only nameless":   {ldapBase, &fakeLDAP{pages: [][]*ldap.Entry{{entry("cn=x", map[string][]string{"cn": {"x"}})}}}},
 		"nobody in group": {cfg, nobodyInGroup},
 	} {
-		if got, err := newFakeSource(t, c.cfg, c.f).List(context.Background()); !errors.Is(err, ErrEmpty) {
-			t.Errorf("%s: got %v, %v; want ErrEmpty", name, got, err)
+		if got, err := newFakeSource(t, c.cfg, c.f).List(context.Background()); err != nil || len(got) != 0 {
+			t.Errorf("%s: got %v, %v; want nobody", name, got, err)
 		}
 	}
 
@@ -234,13 +234,13 @@ func TestLDAPEmptyAndFailures(t *testing.T) {
 		{entry("uid=a,ou=one", map[string][]string{"uid": {"a"}, "mail": {"a@one"}})},
 		{entry("uid=a,ou=two", map[string][]string{"uid": {"a"}, "mail": {"a@two"}})},
 	}}
-	if _, err := newFakeSource(t, ldapBase, dup).List(context.Background()); err == nil || errors.Is(err, ErrEmpty) {
+	if _, err := newFakeSource(t, ldapBase, dup).List(context.Background()); err == nil {
 		t.Errorf("duplicate username: got %v", err)
 	}
 
 	dialFail := newFakeSource(t, ldapBase, nil)
 	dialFail.(*ldapSource).dial = func(context.Context) (ldapConn, error) { return nil, errors.New("connection refused") }
-	if _, err := dialFail.List(context.Background()); err == nil || errors.Is(err, ErrEmpty) {
+	if _, err := dialFail.List(context.Background()); err == nil {
 		t.Errorf("dial failure: got %v", err)
 	}
 }

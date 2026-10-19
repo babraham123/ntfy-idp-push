@@ -52,10 +52,6 @@ type LDAPConfig struct {
 	GroupDN              string // keeps only members of this group; empty keeps everyone
 }
 
-// ErrEmpty is what List returns instead of an empty list: a directory that suddenly lists nobody is
-// far more likely misconfigured or broken than emptied, and the sync must not disable everyone.
-var ErrEmpty = errors.New("directory returned no users")
-
 // New builds the Source cfg.Type names.
 func New(cfg Config) (Source, error) {
 	switch cfg.Type {
@@ -79,14 +75,10 @@ func validUsername(u string) bool {
 	return usernameRe.MatchString(u) && u != "everyone"
 }
 
-// finish applies the rules every source shares: entries core could never provision are dropped, a
-// username listed twice fails the whole list because either entry might be the impostor, and an
-// empty result is ErrEmpty.
+// finish applies the rules every source shares: entries core could never provision are dropped, and
+// a username listed twice fails the whole list because either entry might be the impostor.
 func finish(people []Person) ([]Person, error) {
 	people = slices.DeleteFunc(people, func(p Person) bool { return !validUsername(p.Username) })
-	if len(people) == 0 {
-		return nil, ErrEmpty
-	}
 	slices.SortFunc(people, func(a, b Person) int { return strings.Compare(a.Username, b.Username) })
 	for i := 1; i < len(people); i++ {
 		if people[i].Username == people[i-1].Username {

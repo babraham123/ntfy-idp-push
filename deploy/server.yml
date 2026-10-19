@@ -48,7 +48,7 @@ database: "/var/lib/ntfy-idp-push/db.sqlite"
 # The user directory controls who has an ntfy account. Every directory-sync-interval (and once at
 # startup), the shim lists the directory. New people get an account and a welcome email with their
 # ntfy password. People absent from the directory or marked disabled are deleted, with their devices
-# and ntfy account. A directory that errors or lists nobody skips the round.
+# and ntfy account. A directory that errors skips the round.
 directory-type: "ldap"                  # ldap | file; required
 directory-sync-interval: "15m"
 
