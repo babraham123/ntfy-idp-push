@@ -1,6 +1,7 @@
 package duoapi_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha1"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	duoapigo "github.com/duosecurity/duo_api_golang"
+	"github.com/skip2/go-qrcode"
 
 	"github.com/babraham123/ntfy-idp-push/internal/config"
 	"github.com/babraham123/ntfy-idp-push/internal/duoapi"
@@ -344,6 +346,11 @@ func TestV5JSONEnrollAndStatus(t *testing.T) {
 	if r.Username != "carol" || r.UserID == "" || r.ActivationCode == "" || r.Expiration <= time.Now().Unix() {
 		t.Fatalf("enroll response: %+v", r)
 	}
+	// The phone's link carries the code in its fragment, and the barcode is a QR of that link.
+	if r.ActivationURL != testutil.PublicURL+"/token/#"+r.ActivationCode ||
+		r.ActivationBarcode != testutil.PublicURL+"/token/qr?value="+url.QueryEscape(r.ActivationURL) {
+		t.Fatalf("activation links: %+v", r)
+	}
 	// The ntfy account exists (provisioned) but nothing push-related yet.
 	if h.Ntfy.User("carol") == nil {
 		t.Fatal("ntfy user not provisioned")
@@ -367,8 +374,12 @@ func TestV5JSONEnrollAndStatus(t *testing.T) {
 
 	// The barcode renders only for the issued URL.
 	resp, png := h.Do(t, testutil.Request{Method: "GET", Path: testutil.LocalPath(t, r.ActivationBarcode)})
-	if resp.StatusCode != 200 || resp.Header.Get("Content-Type") != "image/png" || len(png) == 0 {
-		t.Fatalf("barcode: %d %s", resp.StatusCode, resp.Header.Get("Content-Type"))
+	want, err := qrcode.Encode(r.ActivationURL, qrcode.Medium, 320)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 || resp.Header.Get("Content-Type") != "image/png" || !bytes.Equal(png, want) {
+		t.Fatalf("barcode: %d %s, QR of the activation URL: %v", resp.StatusCode, resp.Header.Get("Content-Type"), bytes.Equal(png, want))
 	}
 	resp, _ = h.Do(t, testutil.Request{Method: "GET", Path: "/token/qr?value=" + url.QueryEscape("https://evil.example/")})
 	if resp.StatusCode != 404 {
@@ -376,9 +387,8 @@ func TestV5JSONEnrollAndStatus(t *testing.T) {
 	}
 
 	// The phone scans the code and enrolls on the token routes, without any IdP session.
-	code := strings.TrimPrefix(r.ActivationURL, testutil.PublicURL+"/token/")
 	a := testutil.NewAuthenticator(t, testutil.PublicURL)
-	token, opts, st := h.BeginEnroll(t, "", code, "Phone")
+	token, opts, st := h.BeginEnroll(t, "", r.ActivationURL, "Phone")
 	if st != 200 {
 		t.Fatalf("begin: %d", st)
 	}
@@ -395,7 +405,7 @@ func TestV5JSONEnrollAndStatus(t *testing.T) {
 	}
 
 	// The code is single-use.
-	if _, _, st := h.BeginEnroll(t, "", code, "Again"); st == 200 {
+	if _, _, st := h.BeginEnroll(t, "", r.ActivationURL, "Again"); st == 200 {
 		t.Fatal("enrollment code reused")
 	}
 

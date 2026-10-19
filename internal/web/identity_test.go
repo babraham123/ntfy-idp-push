@@ -88,17 +88,18 @@ func TestTokenRoutesIgnoreIdentity(t *testing.T) {
 		t.Fatalf("identity ceremony finished on /token: %d", resp.StatusCode)
 	}
 
-	// A code ceremony runs entirely on /token, forged header or not, and the page names the code's
-	// user rather than the header's.
-	code, link, _, err := h.Svc.CreateEnrollCode(context.Background(), "erin", core.EnrollCodeTTL)
+	// A code ceremony runs entirely on /token, forged header or not, and enrolls the code's user
+	// rather than the header's. The page names neither: it never sees the code.
+	_, link, _, err := h.Svc.CreateEnrollCode(context.Background(), "erin", core.EnrollCodeTTL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, page := h.Do(t, testutil.Request{Method: "GET", Path: testutil.LocalPath(t, link), Header: forged})
-	if resp.StatusCode != 200 || !strings.Contains(string(page), "<strong>erin</strong>") || !strings.Contains(string(page), `data-base="/token"`) {
+	path, _ := testutil.Fragment(t, link)
+	resp, page := h.Do(t, testutil.Request{Method: "GET", Path: path, Header: forged})
+	if resp.StatusCode != 200 || strings.Contains(string(page), "alice") || !strings.Contains(string(page), `data-base="/token"`) {
 		t.Fatalf("token page: %d %s", resp.StatusCode, page)
 	}
-	_, st, b := h.FinishEnroll(t, "", code, testutil.NewAuthenticator(t, testutil.PublicURL))
+	_, st, b := h.FinishEnroll(t, "", link, testutil.NewAuthenticator(t, testutil.PublicURL))
 	if st != 200 {
 		t.Fatalf("enroll by code: %d %s", st, b)
 	}

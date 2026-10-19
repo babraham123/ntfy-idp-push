@@ -66,7 +66,11 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.Handle("POST "+enroll+"/begin", s.limit(s.sameOrigin(s.enrollBegin)))
 	mux.Handle("POST "+enroll+"/finish", s.limit(s.sameOrigin(s.enrollFinish)))
 
-	mux.Handle("GET "+tok+"/{code}", s.limit(s.tokenPage))
+	// Token pages are never redirected: a redirect could lose the fragment their secret rides in.
+	mux.Handle("GET "+tok+"/{$}", s.limit(s.tokenPage))
+	mux.Handle("GET "+tok+"/", s.limit(s.staleLink))
+	// Without it, the mux would redirect /token to the subtree.
+	mux.Handle("GET "+tok, s.limit(s.staleLink))
 	mux.Handle("POST "+tok+"/begin", s.limit(s.sameOrigin(s.tokenBegin)))
 	mux.Handle("POST "+tok+"/finish", s.limit(s.sameOrigin(s.tokenFinish)))
 	mux.Handle("GET "+tok+"/verify/{device}", s.limit(s.verifyPage))
@@ -121,7 +125,12 @@ func (s *Server) render(w http.ResponseWriter, status int, name string, data any
 }
 
 func (s *Server) message(w http.ResponseWriter, status int, title, text string) {
-	s.render(w, status, "message.html", map[string]string{"Title": title, "Text": text})
+	s.render(w, status, "message.html", messageData(title, text))
+}
+
+// messageData is what the "message" template shows.
+func messageData(title, text string) map[string]string {
+	return map[string]string{"Title": title, "Text": text}
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -165,6 +174,12 @@ func (s *Server) jsonFail(w http.ResponseWriter, err error, what string) {
 
 // pageFail answers a page request with err.
 func (s *Server) pageFail(w http.ResponseWriter, err error, what string) {
+	st, data := s.failMessage(err, what)
+	s.render(w, st, "message.html", data)
+}
+
+// failMessage is the status and message a page shows for err.
+func (s *Server) failMessage(err error, what string) (int, map[string]string) {
 	st, msg := s.failure(err, what)
 	title := "Error"
 	switch status := st; status {
@@ -177,7 +192,7 @@ func (s *Server) pageFail(w http.ResponseWriter, err error, what string) {
 	case http.StatusBadRequest:
 		title = "Bad request"
 	}
-	s.message(w, st, title, strings.ToUpper(msg[:1])+msg[1:]+".")
+	return st, messageData(title, strings.ToUpper(msg[:1])+msg[1:]+".")
 }
 
 // readJSON decodes a fetch() body into v, answering 400 itself when it cannot.
@@ -365,15 +380,19 @@ func (s *Server) enrollPage(w http.ResponseWriter, r *http.Request) {
 	s.render(w, http.StatusOK, "enroll.html", map[string]string{"User": user, "Base": routes.Enroll, "Platform": platform(r)})
 }
 
-// tokenPage is the token route: a shim-issued enrollment code is the whole credential.
+// tokenPage is the token route: a shim-issued enrollment code is the whole credential. The code is
+// in the link's fragment, which the server never sees, so the page cannot name the user; it posts
+// the code with /token/begin and shows the invalid-link message it carries when there is none or
+// begin finds it gone.
 func (s *Server) tokenPage(w http.ResponseWriter, r *http.Request) {
-	code := r.PathValue("code")
-	user, err := s.svc.ResolveEnrollCode(r.Context(), code)
-	if err != nil {
-		s.pageFail(w, err, "enroll: code")
-		return
-	}
-	s.render(w, http.StatusOK, "enroll.html", map[string]string{"User": user, "Code": code, "Base": routes.Token, "Platform": platform(r)})
+	_, invalid := s.failMessage(core.ErrInvalidCode, "")
+	s.render(w, http.StatusOK, "enroll.html", map[string]any{"User": "", "Base": routes.Token, "Platform": platform(r), "Invalid": invalid})
+}
+
+// staleLink answers every other GET on /token, links that put a code in the path among them, with
+// the invalid-link page. It never reads the path.
+func (s *Server) staleLink(w http.ResponseWriter, r *http.Request) {
+	s.pageFail(w, core.ErrInvalidCode, "")
 }
 
 func (s *Server) enrollBegin(w http.ResponseWriter, r *http.Request) {
@@ -477,12 +496,14 @@ func (s *Server) enrollResend(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) verifyPage(w http.ResponseWriter, r *http.Request) {
-	// A GET only renders a form: link previews and prefetchers must not verify the device.
-	s.render(w, http.StatusOK, "verify.html", map[string]string{"Device": r.PathValue("device"), "Token": r.URL.Query().Get("t")})
+	// A GET only renders a form: link previews and prefetchers must not verify the device. The token
+	// is in the link's fragment; the page copies it into the form.
+	s.render(w, http.StatusOK, "verify.html", map[string]string{"Device": r.PathValue("device")})
 }
 
 func (s *Server) verifyDevice(w http.ResponseWriter, r *http.Request) {
-	if err := s.svc.VerifyDevice(r.Context(), r.PathValue("device"), r.FormValue("t")); err != nil {
+	// Only the form body counts: a token in the query string is one a log may have recorded.
+	if err := s.svc.VerifyDevice(r.Context(), r.PathValue("device"), r.PostFormValue("t")); err != nil {
 		s.pageFail(w, err, "enroll: verify")
 		return
 	}

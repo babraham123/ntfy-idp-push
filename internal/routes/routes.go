@@ -19,26 +19,29 @@ const (
 	Health    = "/healthz"
 )
 
-// EnrollURL is the single-use enrollment page for code.
-func EnrollURL(public, code string) string { return public + Token + "/" + url.PathEscape(code) }
+// EnrollURL is the single-use enrollment link for code. The code rides in the fragment, which
+// browsers never send: it stays out of the proxy's access log, Referers and the page request, and
+// the page posts it itself.
+func EnrollURL(public, code string) string { return public + Token + "/#" + url.PathEscape(code) }
 
 // EnrollCode is the inverse of EnrollURL: the code an enrollment URL under public carries, or ""
 // when u is not one.
 func EnrollCode(public, u string) string {
-	prefix := public + Token + "/"
+	prefix := EnrollURL(public, "")
 	if !strings.HasPrefix(u, prefix) {
 		return ""
 	}
 	code, err := url.PathUnescape(u[len(prefix):])
-	if err != nil || code == "" || strings.ContainsAny(code, "/?#") {
+	if err != nil {
 		return ""
 	}
 	return code
 }
 
-// VerifyURL activates deviceID; the setup push carries it.
+// VerifyURL activates deviceID; the setup push carries it. The token rides in the fragment, as
+// EnrollURL's code does.
 func VerifyURL(public, deviceID, verifyToken string) string {
-	return public + Token + "/verify/" + url.PathEscape(deviceID) + "?t=" + url.QueryEscape(verifyToken)
+	return public + Token + "/verify/" + url.PathEscape(deviceID) + "#t=" + url.QueryEscape(verifyToken)
 }
 
 // ApproveURL is the approve page for a challenge; the login push opens it.

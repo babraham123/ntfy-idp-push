@@ -1,8 +1,9 @@
 {{template "head" "Finish setup"}}
 <h1>Finish setup</h1>
 <p>Activate this phone for sign-in approvals?</p>
-<form method="post" action="/token/verify/{{.Device}}">
-  <input type="hidden" name="t" value="{{.Token}}">
+<form method="post" action="/token/verify/{{.Device}}" id="verify">
+  <input type="hidden" name="t" value="">
   <button type="submit">Activate</button>
 </form>
+<script src="/static/app.js" referrerpolicy="no-referrer"></script>
 {{template "foot"}}

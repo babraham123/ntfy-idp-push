@@ -1,4 +1,5 @@
 {{template "head" .Title}}
-<h1>{{.Title}}</h1>
-<p>{{.Text}}</p>
+{{template "message-body" .}}
 {{template "foot"}}
+{{define "message-body"}}<h1>{{.Title}}</h1>
+<p>{{.Text}}</p>{{end}}

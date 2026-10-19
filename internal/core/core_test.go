@@ -544,14 +544,14 @@ func TestUnverifiedDeviceHidden(t *testing.T) {
 	}
 	// The verify link is single-use and bound to its token.
 	m := h.Ntfy.NextPublish(t)
-	u, _ := url.Parse(m.Click)
-	resp, _ = h.Do(t, testutil.Request{Method: "POST", Path: u.Path + "?t=wrong"})
+	path, _ := testutil.Fragment(t, m.Click)
+	form := map[string]string{"Content-Type": "application/x-www-form-urlencoded"}
+	resp, _ = h.Do(t, testutil.Request{Method: "POST", Path: path, Body: []byte("t=wrong"), Header: form})
 	if resp.StatusCode != 410 {
 		t.Fatalf("wrong verify token: %d", resp.StatusCode)
 	}
 	h.VerifyFromPush(t, m)
-	resp, _ = h.Do(t, testutil.Request{Method: "POST", Path: u.Path + "?" + u.RawQuery})
-	if resp.StatusCode != 410 {
+	if resp, _ := h.SubmitVerify(t, m); resp.StatusCode != 410 {
 		t.Fatalf("verify reuse: %d", resp.StatusCode)
 	}
 }
@@ -605,23 +605,16 @@ func TestProvisionRefusesUsernameThatReachesPushTopics(t *testing.T) {
 
 func TestEnrollLinkSingleUse(t *testing.T) {
 	h := testutil.NewHarness(t, nil)
-	code, link, _, err := h.Svc.CreateEnrollCode(context.Background(), "erin", core.EnrollCodeTTL)
+	_, link, _, err := h.Svc.CreateEnrollCode(context.Background(), "erin", core.EnrollCodeTTL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, _ := h.Do(t, testutil.Request{Method: "GET", Path: testutil.LocalPath(t, link)})
-	if resp.StatusCode != 200 {
-		t.Fatalf("enroll page: %d", resp.StatusCode)
+	if _, st, b := h.FinishEnroll(t, "", link, testutil.NewAuthenticator(t, testutil.PublicURL)); st != 200 {
+		t.Fatalf("finish: %d %s", st, b)
 	}
-	a := testutil.NewAuthenticator(t, testutil.PublicURL)
-	token, opts, _ := h.BeginEnroll(t, "", code, "Phone")
-	resp, _ = h.Do(t, testutil.Request{Method: "POST", Path: "/token/finish?token=" + url.QueryEscape(token), Body: a.Create(t, opts)})
-	if resp.StatusCode != 200 {
-		t.Fatalf("finish: %d", resp.StatusCode)
-	}
-	resp, _ = h.Do(t, testutil.Request{Method: "GET", Path: testutil.LocalPath(t, link)})
-	if resp.StatusCode != 410 {
-		t.Fatalf("used link: %d", resp.StatusCode)
+	// A used code surfaces at begin, the page's first call.
+	if _, _, st := h.BeginEnroll(t, "", link, "Again"); st != 410 {
+		t.Fatalf("used link: %d", st)
 	}
 }
 
@@ -1024,12 +1017,12 @@ func TestResetRefusesForeignGrantUnderPushPrefix(t *testing.T) {
 func TestFailedEnrollmentKeepsCodeUsable(t *testing.T) {
 	ctx := context.Background()
 	h := testutil.NewHarness(t, nil)
-	code, _, _, err := h.Svc.CreateEnrollCode(ctx, "erin", core.EnrollCodeTTL)
+	_, link, _, err := h.Svc.CreateEnrollCode(ctx, "erin", core.EnrollCodeTTL)
 	if err != nil {
 		t.Fatal(err)
 	}
 	h.Ntfy.FailNext("POST", "/", 1) // the setup push
-	failed, status, _ := h.FinishEnroll(t, "", code, testutil.NewAuthenticator(t, testutil.PublicURL))
+	failed, status, _ := h.FinishEnroll(t, "", link, testutil.NewAuthenticator(t, testutil.PublicURL))
 	if status == 200 {
 		t.Fatal("enrollment succeeded while ntfy failed")
 	}
@@ -1041,7 +1034,7 @@ func TestFailedEnrollmentKeepsCodeUsable(t *testing.T) {
 			t.Fatalf("topic grant left: %+v (failed device %q)", g, failed.DeviceID)
 		}
 	}
-	e, status, b := h.FinishEnroll(t, "", code, testutil.NewAuthenticator(t, testutil.PublicURL))
+	e, status, b := h.FinishEnroll(t, "", link, testutil.NewAuthenticator(t, testutil.PublicURL))
 	if status != 200 {
 		t.Fatalf("retry with the same code: %d %s", status, b)
 	}
@@ -1073,7 +1066,7 @@ func TestEnrollmentResultResend(t *testing.T) {
 		t.Fatalf("resend: %d", resp.StatusCode)
 	}
 	second := h.Ntfy.NextPublish(t)
-	if resp, _ := h.SubmitForm(t, testutil.LocalPath(t, first.Click), "", "/token/verify/", nil); resp.StatusCode != 410 {
+	if resp, _ := h.SubmitVerify(t, first); resp.StatusCode != 410 {
 		t.Fatalf("superseded setup link: %d", resp.StatusCode)
 	}
 	h.VerifyFromPush(t, second)

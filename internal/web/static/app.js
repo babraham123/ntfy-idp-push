@@ -22,8 +22,32 @@ async function postJSON(url, body) {
     credentials: "same-origin",
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || res.statusText);
+  if (!res.ok) throw Object.assign(new Error(data.error || res.statusText), { status: res.status });
   return data;
+}
+
+// takeFragment returns what the link carries after "#" and drops it from the address bar and
+// history at once. Token links keep their secret there because browsers never send the fragment:
+// not with the page request, not in a Referer, so no proxy log records it.
+function takeFragment() {
+  const frag = location.hash.slice(1);
+  if (frag) history.replaceState(null, "", location.pathname);
+  return frag;
+}
+
+function decodeFragment(s) {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return "";
+  }
+}
+
+// showInvalid replaces the page with the invalid-link message the server rendered into it, the
+// page the server itself answers a dead link with.
+function showInvalid(tpl) {
+  document.querySelector("main").replaceChildren(tpl.content.cloneNode(true));
+  document.title = tpl.dataset.title;
 }
 
 function creationOptions(o) {
@@ -74,7 +98,12 @@ function assertionJSON(cred) {
 }
 
 const enrollForm = document.getElementById("enroll");
-if (enrollForm) {
+// Only the /token page carries the invalid-link message: its code comes from the fragment.
+const invalidLink = document.getElementById("invalid");
+const enrollCode = invalidLink ? decodeFragment(takeFragment()) : "";
+if (invalidLink && !enrollCode) {
+  showInvalid(invalidLink);
+} else if (enrollForm) {
   enrollForm.addEventListener("submit", async (e) => {
     e.preventDefault();
     const button = enrollForm.querySelector("button");
@@ -84,7 +113,14 @@ if (enrollForm) {
       const name = enrollForm.elements.name.value;
       // /enroll routes carry the proxy's identity; /token routes carry the enrollment code.
       const base = enrollForm.dataset.base;
-      const begin = await postJSON(base + "/begin", { name, code: enrollForm.dataset.code });
+      let begin;
+      try {
+        begin = await postJSON(base + "/begin", { name, code: enrollCode });
+      } catch (err) {
+        // begin answers 410 only for a code that is unknown, used or expired: the link is dead.
+        if (invalidLink && err.status === 410) return showInvalid(invalidLink);
+        throw err;
+      }
       const cred = await navigator.credentials.create(creationOptions(begin.options));
       status("Registering…");
       const done = await postJSON(base + "/finish?token=" + encodeURIComponent(begin.token), attestationJSON(cred));
@@ -105,6 +141,7 @@ function showResult(done) {
   fill("ntfy-link", (el) => { el.href = done.ntfy_link; });
   fill("ntfy-server", (el) => { el.textContent = done.server; });
   fill("ntfy-topic", (el) => { el.textContent = done.topic; });
+  fill("ntfy-user", (el) => { el.textContent = done.username; });
   const qr = document.getElementById("qr");
   if (qr) qr.src = done.qr;
   const copyable = { server: done.server, topic: done.topic };
@@ -131,6 +168,12 @@ function wireResult(token) {
       status(err.message);
     }
   });
+}
+
+const verifyForm = document.getElementById("verify");
+if (verifyForm) {
+  // The setup push carries the verify token as "#t=<token>"; the Activate form posts it.
+  verifyForm.elements.t.value = new URLSearchParams(takeFragment()).get("t") || "";
 }
 
 const approve = document.getElementById("approve");

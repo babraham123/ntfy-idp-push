@@ -83,7 +83,7 @@ func TestConfigPath(t *testing.T) {
 func TestEnrollLinkAndBackup(t *testing.T) {
 	dir := env(t)
 	out, err := cli(t, "enroll-link", "alice")
-	if err != nil || !strings.HasPrefix(out, "https://push.test/token/") {
+	if err != nil || !strings.HasPrefix(out, "https://push.test/token/#") {
 		t.Fatalf("enroll-link: %q %v", out, err)
 	}
 	if out, err := cli(t, "audit", "alice"); err != nil || !strings.Contains(out, "enroll_link") {

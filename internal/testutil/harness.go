@@ -255,22 +255,45 @@ type Enrolled struct {
 	Auth        *Authenticator
 }
 
-// enrollBase picks the route family: /token with an enrollment code, /enroll with the proxy's
-// identity.
-func enrollBase(code string) string {
-	if code != "" {
-		return "/token"
+// Fragment splits an issued link as a browser does: the local path it requests, and the raw
+// fragment (location.hash without "#") it keeps to itself for the page's script.
+func Fragment(t *testing.T, link string) (path, fragment string) {
+	t.Helper()
+	u, err := url.Parse(link)
+	if err != nil {
+		t.Fatal(err)
 	}
-	return "/enroll"
+	path = LocalPath(t, link)
+	path, _, _ = strings.Cut(path, "#")
+	return path, u.EscapedFragment()
 }
 
-// BeginEnroll runs /enroll/begin or /token/begin and returns the registration token and creation
-// options.
-func (h *Harness) BeginEnroll(t *testing.T, user, code, name string) (string, json.RawMessage, int) {
+// enrollBase picks the route family: /token for an issued enrollment link, whose code it reads
+// from the fragment as app.js does, or /enroll with the proxy's identity when link is "".
+func enrollBase(t *testing.T, link string) (base, code string) {
 	t.Helper()
+	if link == "" {
+		return "/enroll", ""
+	}
+	path, frag := Fragment(t, link)
+	if path != "/token/" {
+		t.Fatalf("enrollment link %q does not open /token/", link)
+	}
+	code, err := url.PathUnescape(frag)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return "/token", code
+}
+
+// BeginEnroll runs /enroll/begin, or /token/begin with the code of the enrollment link, and returns
+// the registration token and creation options.
+func (h *Harness) BeginEnroll(t *testing.T, user, link, name string) (string, json.RawMessage, int) {
+	t.Helper()
+	base, code := enrollBase(t, link)
 	body, _ := json.Marshal(map[string]string{"name": name, "code": code})
-	req := Request{Method: "POST", Path: enrollBase(code) + "/begin", Body: body}
-	if code == "" {
+	req := Request{Method: "POST", Path: base + "/begin", Body: body}
+	if link == "" {
 		req.User = user
 	}
 	resp, b := h.Do(t, req)
@@ -284,14 +307,15 @@ func (h *Harness) BeginEnroll(t *testing.T, user, code, name string) (string, js
 
 // FinishEnroll simulates web enrollment passkey steps and returns the outcome, skipping device
 // verification.
-func (h *Harness) FinishEnroll(t *testing.T, user, code string, a *Authenticator) (Enrolled, int, []byte) {
+func (h *Harness) FinishEnroll(t *testing.T, user, link string, a *Authenticator) (Enrolled, int, []byte) {
 	t.Helper()
-	token, opts, status := h.BeginEnroll(t, user, code, "Pixel")
+	token, opts, status := h.BeginEnroll(t, user, link, "Pixel")
 	if status != 200 {
 		t.Fatalf("enroll begin: %d", status)
 	}
-	req := Request{Method: "POST", Path: enrollBase(code) + "/finish?token=" + url.QueryEscape(token), Body: a.Create(t, opts)}
-	if code == "" {
+	base, _ := enrollBase(t, link)
+	req := Request{Method: "POST", Path: base + "/finish?token=" + url.QueryEscape(token), Body: a.Create(t, opts)}
+	if link == "" {
 		req.User = user
 	}
 	resp, b := h.Do(t, req)
@@ -321,13 +345,25 @@ func (h *Harness) Enroll(t *testing.T, user string, a *Authenticator) Enrolled {
 // VerifyFromPush simulates a user tapping the setup push and clicking Activate.
 func (h *Harness) VerifyFromPush(t *testing.T, m ntfy.Message) {
 	t.Helper()
-	if m.Title != "Finish setup" {
-		t.Fatalf("expected the setup push, got %q", m.Title)
-	}
-	resp, b := h.SubmitForm(t, LocalPath(t, m.Click), "", "/token/verify/", nil)
+	resp, b := h.SubmitVerify(t, m)
 	if resp.StatusCode != 200 {
 		t.Fatalf("verify: %d %s", resp.StatusCode, b)
 	}
+}
+
+// SubmitVerify opens the setup push's link and clicks Activate, with the token app.js copies from
+// the fragment into the form.
+func (h *Harness) SubmitVerify(t *testing.T, m ntfy.Message) (*http.Response, []byte) {
+	t.Helper()
+	if m.Title != "Finish setup" {
+		t.Fatalf("expected the setup push, got %q", m.Title)
+	}
+	path, frag := Fragment(t, m.Click)
+	q, err := url.ParseQuery(frag)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return h.SubmitForm(t, path, "", "/token/verify/", url.Values{"t": {q.Get("t")}})
 }
 
 var (

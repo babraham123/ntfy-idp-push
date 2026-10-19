@@ -360,6 +360,9 @@ func uuidString(b []byte) string {
 
 // VerifyDevice activates a device once its owner opened the setup push.
 func (s *Service) VerifyDevice(ctx context.Context, deviceID, verifyToken string) error {
+	if verifyToken == "" {
+		return ErrSetupLinkUsed
+	}
 	ok, err := s.store.VerifyDevice(ctx, deviceID, token.Hash(verifyToken))
 	if err != nil {
 		return err

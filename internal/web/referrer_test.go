@@ -10,10 +10,11 @@ import (
 	"github.com/babraham123/ntfy-idp-push/internal/testutil"
 )
 
-// Token pages (/token/<code>, /token/verify/<device>?t=…) carry their whole credential in the URL,
-// and the page-wide policy is same-origin so form posts keep their Origin. Every same-origin
-// subresource therefore opts out of Referer by itself, or the proxy's access log would record the
-// code with each asset request; the data: icon keeps browsers from fetching /favicon.ico the same way.
+// Token and challenge pages name their device or challenge in the path (their secrets ride in the
+// fragment, which no Referer carries), and the page-wide policy is same-origin so form posts keep
+// their Origin. Every same-origin subresource therefore opts out of Referer by itself, or the
+// proxy's access log would record the page URL with each asset request; the data: icon keeps
+// browsers from fetching /favicon.ico the same way.
 func TestSubresourcesSendNoReferrer(t *testing.T) {
 	h := testutil.NewHarness(t, nil)
 	tag := regexp.MustCompile(`(?s)<(?:link|script|img|iframe|source|video|audio|object|embed)\b[^>]*>`)
@@ -28,8 +29,8 @@ func TestSubresourcesSendNoReferrer(t *testing.T) {
 		}
 	}
 	// Rendered pages prove the layout really emits the icon; the template sources cover pages that
-	// need a live challenge or code to render.
-	for _, page := range []string{"/enroll", "/devices"} {
+	// need a live challenge to render.
+	for _, page := range []string{"/enroll", "/devices", "/token/", "/token/verify/dev"} {
 		resp, b := h.Do(t, testutil.Request{Method: "GET", Path: page, User: "alice"})
 		if resp.StatusCode != 200 {
 			t.Fatalf("%s: %d %s", page, resp.StatusCode, b)

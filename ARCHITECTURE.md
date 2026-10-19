@@ -112,7 +112,7 @@ Disabling a user or enabling the `push-disabled: true` kill switch causes preaut
 4. `POST /challenge/<id>/deny` with the deny token yields `deny`; "This wasn't me" yields `fraud`.
 5. The blocked `auth` wakes and responds to the IdP. The push is then deleted from the device (ntfy `DELETE /<topic>/<sequence_id>`).
 
-Challenges are single-use; decisions or expiries return 410 for `/challenge/<id>`. State-changing browser POSTs require an `Origin` matching the shim and are bounded to 64 KiB. The ntfy app's `http` action omits `Origin`, so `/challenge/<id>/deny` relies on the deny token for authorization. Pages enforce `Referrer-Policy: same-origin`, not `no-referrer`: with `no-referrer`, browsers send `Origin: null` on form posts and the Activate and Revoke forms would be refused. Asset tags carry `referrerpolicy="no-referrer"` and the layout declares a `data:` icon, so a token URL never reaches the proxy's log as a Referer. HTML pages use `Cache-Control: no-store`, as they carry per-user content and token-bearing links, and a CSP that allows only same-origin scripts, forms and bases. Every response carries `X-Frame-Options: DENY` and `X-Robots-Tag: noindex` so a leaked approve or enrollment link is never indexed. `/static/` serves only the embedded files by name (no listing), with an ETag and a one-hour cache.
+Challenges are single-use; decisions or expiries return 410 for `/challenge/<id>`. State-changing browser POSTs require an `Origin` matching the shim and are bounded to 64 KiB. The ntfy app's `http` action omits `Origin`, so `/challenge/<id>/deny` relies on the deny token for authorization. Pages enforce `Referrer-Policy: same-origin`, not `no-referrer`: with `no-referrer`, browsers send `Origin: null` on form posts and the Activate and Revoke forms would be refused. Asset tags carry `referrerpolicy="no-referrer"` and the layout declares a `data:` icon, so a token URL never reaches the proxy's log as a Referer. Enrollment codes and verify tokens travel only in the URL fragment (`/token/#<code>`, `/token/verify/<device>#t=<token>`), which the page script posts in the request body, and `/token/` pages are never redirected. HTML pages use `Cache-Control: no-store`, as they carry per-user content and token-bearing links, and a CSP that allows only same-origin scripts, forms and bases. Every response carries `X-Frame-Options: DENY` and `X-Robots-Tag: noindex` so a leaked approve or enrollment link is never indexed. `/static/` serves only the embedded files by name (no listing), with an ETag and a one-hour cache.
 
 Unauthenticated routes (`/token/`, `/challenge/`) are rate limited per client address (IPv6 per /64), 20 burst and 1/s sustained, with the table of clients capped. Duo API rejections answer with Duo's error code only, the reason going to a sampled log line.
 
@@ -128,13 +128,13 @@ The directory decides who has an account: `directory-type: ldap` (a paged search
 
 ## Enrollment
 
-Entry points: `enroll-portal-url` (via preauth) to `/enroll` behind the proxy's forward-auth; or `enroll-link <user>`, generating a single-use `/token/<code>` link (valid 5 minutes) to bootstrap users lacking a second factor. Both render the same page; it posts to `/enroll/begin` and `/enroll/finish` (identity routes) or `/token/begin` and `/token/finish` (code routes). A ceremony begun on one family cannot be finished on the other.
+Entry points: `enroll-portal-url` (via preauth) to `/enroll` behind the proxy's forward-auth; or `enroll-link <user>`, generating a single-use `/token/#<code>` link (valid 5 minutes) to bootstrap users lacking a second factor. Both render the same page; it posts to `/enroll/begin` and `/enroll/finish` (identity routes) or `/token/begin` and `/token/finish` (code routes). A ceremony begun on one family cannot be finished on the other.
 
 1. **Passkey**: `navigator.credentials.create()` requires a platform authenticator, user verification, and direct attestation. Synced passkeys (BE flag) are rejected unless `webauthn-allow-synced`; a passkey with no attestation statement (`fmt: none`) is rejected unless `webauthn-require-attestation: false`.
 2. **ntfy account**: Provisioned as described in Provisioning.
 3. **Topic grant**: `PUT /v1/users/access` grants read-only access to the device's topic.
 4. **Link**: The result page hands out the device topic as `ntfy://<host>/<topic>?user=<u>` (plus `secure=false` for a plain-HTTP ntfy), laid out by User-Agent. Android gets the tap link, with the server URL and topic to add by hand if the app does not subscribe. iOS gets the server URL and topic with copy buttons and the manual steps (+, "Use another server", Subscribe), because the ntfy iOS app does not open `ntfy://` links. Desktops get a QR of the link plus both. The link carries no credentials: the phone's ntfy app must already be signed in with the credentials from the welcome email. The page also offers "Resend setup push".
-5. **Test push**: Sends a "Finish setup" action to `/token/verify/<device>` to activate the device. Unverified devices are hidden from preauth and purged after 24 hours.
+5. **Test push**: Sends a "Finish setup" action to `/token/verify/<device>#t=<token>` to activate the device. Unverified devices are hidden from preauth and purged after 24 hours.
 
 Execution order: verify attestation (read-only), claim the code and insert the unverified device/passkey in one transaction, then execute remote steps. Failed remote steps rollback the device and release the code for retry. Crashes leave unverified devices for the 24-hour purge.
 
@@ -145,7 +145,7 @@ IdPs must require a second factor on the identity routes to prevent attackers fr
 
 ### IdP-driven enrollment
 
-authentik calls `enroll`, displays `activation_barcode` (`/token/qr?value=<activation url>`, generated only for shim-issued codes), and polls `enroll_status`. Phones scan the code and enroll via `/token/<code>` without an IdP session; the code serves as proof. Used codes persist for the unverified device's lifetime to accommodate IdP polling.
+authentik calls `enroll`, displays `activation_barcode` (`/token/qr?value=<activation url>`, generated only for shim-issued codes), and polls `enroll_status`. Phones scan the code and enroll via `/token/#<code>` without an IdP session; the code serves as proof. Used codes persist for the unverified device's lifetime to accommodate IdP polling.
 
 ## Revocation
 
