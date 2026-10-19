@@ -32,6 +32,8 @@ import (
 // is kept.
 var ErrRestartRequired = errors.New("restart required")
 
+var errNotFound = store.ErrNotFound
+
 const (
 	EnrollCodeTTL      = 5 * time.Minute
 	UnverifiedTTL      = 24 * time.Hour

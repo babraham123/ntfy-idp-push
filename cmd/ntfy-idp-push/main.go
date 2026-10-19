@@ -271,11 +271,8 @@ func userCmd(ctx context.Context, svc *core.Service, args []string, out io.Write
 		} else {
 			u, err = svc.ProvisionFromDirectory(ctx, arg)
 		}
-		switch {
-		case errors.Is(err, core.ErrDirectoryConfigured):
-			return fmt.Errorf("--email refused: %w", err)
-		case errors.Is(err, core.ErrNoDirectory):
-			return fmt.Errorf("%w: user provision needs --email <addr>", err)
+		if hint, ok := provisionHints[core.ReasonOf(err)]; ok {
+			return fmt.Errorf("%w (%s)", err, hint)
 		}
 		if u != nil {
 			for _, g := range u.Grants {
@@ -309,6 +306,12 @@ func userCmd(ctx context.Context, svc *core.Service, args []string, out io.Write
 		return nil
 	}
 	return fmt.Errorf("unknown user command %q", sub)
+}
+
+// provisionHints is what user provision adds to the refusals an operator can act on, by reason.
+var provisionHints = map[core.Reason]string{
+	core.ErrDirectoryConfigured.Reason: "--email refused",
+	core.ErrNoDirectory.Reason:         "user provision needs --email <addr>",
 }
 
 func deviceCmd(ctx context.Context, svc *core.Service, args []string, out io.Writer) error {

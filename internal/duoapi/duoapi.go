@@ -150,31 +150,36 @@ func (h *Handler) check(w http.ResponseWriter, r *http.Request, _ params) {
 	writeOK(w, map[string]any{"time": h.now().Unix()})
 }
 
-// deny is the Duo response for a login that was refused before or instead of a push, worded for
-// the IdP's login screen from the core failure behind it.
+// denyMessages is Duo's wording, on the IdP's login screen, of each core refusal that denies a
+// login before or instead of a push. Any other refusal is denied without a reason.
+var denyMessages = map[core.Reason]string{
+	core.ErrPushDisabled.Reason:       "Push authentication is disabled",
+	core.ErrUserDisabled.Reason:       "user disabled",
+	core.ErrUnknownUser.Reason:        "Unknown user",
+	core.ErrUnknownDevice.Reason:      "Unknown device",
+	core.ErrNotOwner.Reason:           "Unknown device",
+	core.ErrEnrollmentRequired.Reason: "Enrollment required",
+	core.ErrTooManyPushes.Reason:      "Too many sign-in requests",
+}
+
+// deny is the Duo response for a login refused with err.
 func deny(err error) map[string]any {
-	msg := "Login request denied."
-	switch {
-	case errors.Is(err, core.ErrPushDisabled):
-		msg = "Push authentication is disabled"
-	case errors.Is(err, core.ErrUserDisabled):
-		msg = "user disabled"
-	case errors.Is(err, core.ErrUnknownUser):
-		msg = "Unknown user"
-	case errors.Is(err, core.ErrUnknownDevice), errors.Is(err, core.ErrNotOwner):
-		msg = "Unknown device"
-	case errors.Is(err, core.ErrEnrollmentRequired):
-		msg = "Enrollment required"
-	case errors.Is(err, core.ErrTooManyPushes):
-		msg = "Too many sign-in requests"
+	msg, ok := denyMessages[core.ReasonOf(err)]
+	if !ok {
+		msg = "Login request denied."
 	}
 	return map[string]any{"result": "deny", "status": "deny", "status_msg": msg}
 }
 
-// statusMsg is the Duo wording of a classified core failure in a FAIL response.
-func statusMsg(err error) string {
-	if errors.Is(err, core.ErrUserDisabled) {
-		return "user disabled"
+// enrollDetails is the message_detail of a refused enroll, by reason; Duo names the parameter at
+// fault, so an unacceptable username is reported as "username". Other refusals carry core's text.
+var enrollDetails = map[core.Reason]string{
+	core.ErrInvalidName.Reason: "username",
+}
+
+func enrollDetail(err error) string {
+	if d, ok := enrollDetails[core.ReasonOf(err)]; ok {
+		return d
 	}
 	return err.Error()
 }
@@ -198,13 +203,13 @@ func (h *Handler) preauth(w http.ResponseWriter, r *http.Request, p params) {
 		return
 	}
 	res, err := h.svc.Preauth(r.Context(), userRef(p))
-	if err != nil {
+	if err != nil && core.KindOf(err) == core.Internal {
 		h.internal(w, err)
 		return
 	}
 	switch {
-	case res.Deny != nil:
-		writeOK(w, deny(res.Deny))
+	case err != nil:
+		writeOK(w, deny(err))
 	case res.EnrollURL != "":
 		writeOK(w, map[string]any{"result": "enroll", "status_msg": "Enroll an authentication device to proceed",
 			"enroll_portal_url": res.EnrollURL})
@@ -280,11 +285,8 @@ func (h *Handler) enroll(w http.ResponseWriter, r *http.Request, p params) {
 	}
 	e, err := h.svc.StartIdPEnrollment(ctx, username)
 	switch {
-	case errors.Is(err, core.ErrInvalidName):
-		writeFail(w, http.StatusBadRequest, 40002, "Invalid request parameters", "username")
-		return
 	case err != nil && core.KindOf(err) != core.Internal:
-		writeFail(w, http.StatusBadRequest, 40002, "Invalid request parameters", statusMsg(err))
+		writeFail(w, http.StatusBadRequest, 40002, "Invalid request parameters", enrollDetail(err))
 		return
 	case err != nil:
 		h.internal(w, err)

@@ -181,10 +181,8 @@ func (s *Service) PendingChallenge(ctx context.Context, id string) (*model.Chall
 // Deny denies with the token from the push's Deny action.
 func (s *Service) Deny(ctx context.Context, id, denyToken string) error {
 	c, err := s.store.Challenge(ctx, id)
-	if errors.Is(err, store.ErrNotFound) {
-		return ErrGone
-	} else if err != nil {
-		return err
+	if err != nil {
+		return notFound(err, ErrGone)
 	}
 	if subtle.ConstantTimeCompare(c.DenyTokenHash, token.Hash(denyToken)) != 1 {
 		return ErrBadToken

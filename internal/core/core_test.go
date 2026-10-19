@@ -356,7 +356,14 @@ func TestPreauth(t *testing.T) {
 		}
 		return res
 	}
-	if res := preauth(core.UserRef{Username: "nobody"}); res.EnrollURL != testutil.PublicURL+"/enroll" || res.Deny != nil {
+	refused := func(ref core.UserRef) error {
+		t.Helper()
+		if _, err := h.Svc.Preauth(ctx, ref); err != nil {
+			return err
+		}
+		return nil
+	}
+	if res := preauth(core.UserRef{Username: "nobody"}); res.EnrollURL != testutil.PublicURL+"/enroll" {
 		t.Fatalf("unknown user: %+v", res)
 	}
 
@@ -390,17 +397,17 @@ func TestPreauth(t *testing.T) {
 	if r := wait(t, pending); r.Response.Result != "deny" {
 		t.Fatalf("pending auth after disable: %+v", r.Response)
 	}
-	if res := preauth(core.UserRef{Username: "alice"}); !errors.Is(res.Deny, core.ErrUserDisabled) {
-		t.Fatalf("disabled user: %+v", res)
+	if err := refused(core.UserRef{Username: "alice"}); !errors.Is(err, core.ErrUserDisabled) {
+		t.Fatalf("disabled user: %v", err)
 	}
 
 	h.Reload(t, func(c *config.Config) { c.EnrollPortalURL = "" })
-	if res := preauth(core.UserRef{Username: "nobody"}); !errors.Is(res.Deny, core.ErrEnrollmentRequired) {
-		t.Fatalf("unknown user without enroll-portal-url: %+v", res)
+	if err := refused(core.UserRef{Username: "nobody"}); !errors.Is(err, core.ErrEnrollmentRequired) {
+		t.Fatalf("unknown user without enroll-portal-url: %v", err)
 	}
 	h.Reload(t, func(c *config.Config) { c.PushDisabled = true })
-	if res := preauth(core.UserRef{Username: "nobody"}); !errors.Is(res.Deny, core.ErrPushDisabled) {
-		t.Fatalf("kill switch: %+v", res)
+	if err := refused(core.UserRef{Username: "nobody"}); !errors.Is(err, core.ErrPushDisabled) {
+		t.Fatalf("kill switch: %v", err)
 	}
 }
 

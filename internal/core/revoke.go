@@ -27,10 +27,8 @@ type Revocation struct {
 // RevokeDevice cuts off a phone's topic grant, and with r.ResetNtfyUser every token of its owner.
 func (s *Service) RevokeDevice(ctx context.Context, deviceID string, r Revocation) error {
 	d, err := s.store.Device(ctx, deviceID)
-	if errors.Is(err, store.ErrNotFound) {
-		return ErrUnknownDevice
-	} else if err != nil {
-		return err
+	if err != nil {
+		return notFound(err, ErrUnknownDevice)
 	}
 	return s.revoke(ctx, s.ntfy().Accounts(), d, r)
 }

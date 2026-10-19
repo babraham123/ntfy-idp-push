@@ -276,33 +276,17 @@ func passkeyFailure(err error) error {
 	switch {
 	case errors.Is(err, webauthn.ErrSynced), errors.Is(err, webauthn.ErrNoUsableCredential),
 		errors.Is(err, webauthn.ErrNoAttestation), errors.Is(err, webauthn.ErrNotUserVerified):
-		return &wrapped{ErrPasskeyPolicy, err}
+		return ErrPasskeyPolicy.because(err, true)
 	case errors.Is(err, webauthn.ErrMalformed):
-		return &wrapped{ErrMalformed, err}
+		return ErrMalformed.because(err, true)
 	}
-	return &wrapped{ErrPasskeyRejected, err}
+	return ErrPasskeyRejected.because(err, false)
 }
-
-// wrapped is a core sentinel with the cause behind it; the message is the sentinel's reason plus the
-// cause's, which for policy and malformed errors is the user-facing reason.
-type wrapped struct{ kind, cause error }
-
-func (w *wrapped) Error() string {
-	if errors.Is(w.kind, ErrPasskeyRejected) {
-		return w.kind.Error()
-	}
-	return w.kind.Error() + ": " + w.cause.Error()
-}
-func (w *wrapped) Is(target error) bool { return errors.Is(w.kind, target) }
-func (w *wrapped) Unwrap() error        { return w.cause }
 
 // EnrolledDevice maps the result token (identity post-enrollment code consumption) to a device.
 func (s *Service) EnrolledDevice(ctx context.Context, resultToken string) (*model.Device, error) {
 	d, err := s.store.DeviceByResultToken(ctx, token.Hash(resultToken), time.Now(), EnrollResultTTL)
-	if errors.Is(err, store.ErrNotFound) {
-		return nil, ErrResultExpired
-	}
-	return d, err
+	return d, notFound(err, ErrResultExpired)
 }
 
 // connectDevice does enrollment's ntfy side: account, topic grant and setup push.

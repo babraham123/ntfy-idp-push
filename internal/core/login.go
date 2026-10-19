@@ -27,10 +27,7 @@ func (s *Service) resolveUser(ctx context.Context, ref UserRef) (*model.User, er
 	} else {
 		u, err = s.store.UserByName(ctx, ref.Username)
 	}
-	if errors.Is(err, store.ErrNotFound) {
-		return nil, ErrUnknownUser
-	}
-	return u, err
+	return u, notFound(err, ErrUnknownUser)
 }
 
 // eligible determines if a device can receive/approve a push. Nil u/d skips checks for preauth.
@@ -93,20 +90,20 @@ func (s *Service) loginDevice(ctx context.Context, u *model.User, deviceID strin
 	return nil, ErrUnknownDevice
 }
 
-// PreauthResult is either Deny (reason), EnrollURL (for first device), or Devices (MRU list).
+// PreauthResult is either EnrollURL (for a first device) or Devices (MRU list).
 type PreauthResult struct {
-	Deny      error
 	EnrollURL string
 	Devices   []model.Device
 }
 
 // Preauth reports if ref can sign in and via which devices. Unknown users or users without active
-// devices are sent to enroll.
+// devices are sent to enroll. As with Authenticate, a refusal is the error: an eligibility failure,
+// or ErrEnrollmentRequired when there is nowhere to enroll; an internal failure is KindOf Internal.
 func (s *Service) Preauth(ctx context.Context, ref UserRef) (PreauthResult, error) {
 	cfg := s.Config()
 	// Before the lookup, so the kill switch answers the same for every username.
 	if err := eligible(cfg, nil, nil); err != nil {
-		return PreauthResult{Deny: err}, nil
+		return PreauthResult{}, err
 	}
 	u, err := s.resolveUser(ctx, ref)
 	var devs []model.Device
@@ -116,7 +113,7 @@ func (s *Service) Preauth(ctx context.Context, ref UserRef) (PreauthResult, erro
 		return PreauthResult{}, err
 	default:
 		if err := eligible(cfg, u, nil); err != nil {
-			return PreauthResult{Deny: err}, nil
+			return PreauthResult{}, err
 		}
 		if devs, err = s.activeDevices(ctx, u); err != nil {
 			return PreauthResult{}, err
@@ -126,7 +123,7 @@ func (s *Service) Preauth(ctx context.Context, ref UserRef) (PreauthResult, erro
 	case len(devs) > 0:
 		return PreauthResult{Devices: devs}, nil
 	case cfg.EnrollPortalURL == "":
-		return PreauthResult{Deny: ErrEnrollmentRequired}, nil
+		return PreauthResult{}, ErrEnrollmentRequired
 	default:
 		return PreauthResult{EnrollURL: cfg.EnrollPortalURL}, nil
 	}
@@ -258,16 +255,12 @@ func (s *Service) pushAllowed(username string) bool {
 // checkEligible re-verifies push validity, reporting reasons for rejection.
 func (s *Service) checkEligible(ctx context.Context, deviceID string) error {
 	d, err := s.store.Device(ctx, deviceID)
-	if errors.Is(err, store.ErrNotFound) {
-		return ErrDeviceRevoked
-	} else if err != nil {
-		return err
+	if err != nil {
+		return notFound(err, ErrDeviceRevoked)
 	}
 	u, err := s.store.UserByID(ctx, d.UserID)
-	if errors.Is(err, store.ErrNotFound) {
-		return ErrDeviceRevoked
-	} else if err != nil {
-		return err
+	if err != nil {
+		return notFound(err, ErrDeviceRevoked)
 	}
 	return eligible(s.Config(), u, d)
 }
@@ -285,10 +278,7 @@ func (s *Service) allow(ctx context.Context, c *model.Challenge) error {
 // approve c.
 func (s *Service) devicePasskeys(ctx context.Context, c *model.Challenge) (*model.Device, []model.Passkey, error) {
 	d, pks, err := s.store.DevicePasskeys(ctx, c.DeviceID)
-	if errors.Is(err, store.ErrNotFound) {
-		return nil, nil, ErrDeviceRevoked
-	}
-	return d, pks, err
+	return d, pks, notFound(err, ErrDeviceRevoked)
 }
 
 // AssertionOptions restricts navigator.credentials.get() options to the passkeys of the push's
