@@ -41,7 +41,7 @@ func TestMigrateAddsUserProfile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if u.Email != "" || u.DisplayName != "" || u.SyncedAt != nil || u.WelcomedAt != nil || u.DisabledAt == nil || u.DisabledBySync {
+	if u.Email != "" || u.DisplayName != "" || u.SyncedAt != nil || u.WelcomedAt != nil || u.DisabledAt == nil {
 		t.Fatalf("migrated user %+v", u)
 	}
 
@@ -53,24 +53,18 @@ func TestMigrateAddsUserProfile(t *testing.T) {
 	if err := st.SetUserWelcomed(ctx, u.ID, &welcomed); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.SetUserDisabled(ctx, u.ID, true, true); err != nil {
-		t.Fatal(err)
-	}
 	u, _ = st.UserByName(ctx, "alice")
 	if u.Email != "alice@example.com" || u.DisplayName != "Alice" || !u.SyncedAt.Equal(synced) ||
-		!u.WelcomedAt.Equal(welcomed) || u.DisabledAt == nil || !u.DisabledBySync {
+		!u.WelcomedAt.Equal(welcomed) || u.DisabledAt == nil {
 		t.Fatalf("profile not stored: %+v", u)
 	}
 
-	// Enabling clears the sync's mark, and a nil welcome time marks the welcome as owed again.
-	if err := st.SetUserDisabled(ctx, u.ID, false, true); err != nil {
-		t.Fatal(err)
-	}
+	// A nil welcome time marks the welcome as owed again.
 	if err := st.SetUserWelcomed(ctx, u.ID, nil); err != nil {
 		t.Fatal(err)
 	}
 	u, _ = st.UserByName(ctx, "alice")
-	if u.DisabledAt != nil || u.DisabledBySync || u.WelcomedAt != nil {
-		t.Fatalf("after enable and owed welcome: %+v", u)
+	if u.WelcomedAt != nil {
+		t.Fatalf("after owed welcome: %+v", u)
 	}
 }

@@ -9,7 +9,9 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
+	"io"
 	"math/big"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -19,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	ber "github.com/go-asn1-ber/asn1-ber"
 	"github.com/go-ldap/ldap/v3"
 )
 
@@ -91,7 +94,7 @@ func newFakeSource(t *testing.T, cfg LDAPConfig, f *fakeLDAP) Source {
 	if err != nil {
 		t.Fatal(err)
 	}
-	src.(*ldapSource).dial = func() (ldapConn, error) { return f, nil }
+	src.(*ldapSource).dial = func(context.Context) (ldapConn, error) { return f, nil }
 	return src
 }
 
@@ -139,18 +142,26 @@ func TestLDAPMapsAttributes(t *testing.T) {
 	}
 }
 
+// Every page is mapped and filtered as it arrives: members from all pages are kept, and the
+// non-members and nameless entries on each page are dropped.
 func TestLDAPPagesThroughResults(t *testing.T) {
+	const group = "cn=push,dc=example,dc=com"
 	var pages [][]*ldap.Entry
 	for p := range 3 {
 		var page []*ldap.Entry
 		for i := range 2 {
 			name := "u" + strconv.Itoa(p*2+i)
-			page = append(page, entry("uid="+name+",dc=example,dc=com", map[string][]string{"uid": {name}}))
+			page = append(page, entry("uid="+name+",dc=example,dc=com", map[string][]string{"uid": {name}, "memberOf": {group}}))
 		}
+		page = append(page,
+			entry("uid=x"+strconv.Itoa(p)+",dc=example,dc=com", map[string][]string{"uid": {"x" + strconv.Itoa(p)}, "memberOf": {"cn=other,dc=example,dc=com"}}),
+			entry("cn=nameless"+strconv.Itoa(p), map[string][]string{"memberOf": {group}}))
 		pages = append(pages, page)
 	}
 	f := &fakeLDAP{pages: pages}
-	got, err := newFakeSource(t, ldapBase, f).List(context.Background())
+	cfg := ldapBase
+	cfg.GroupDN = group
+	got, err := newFakeSource(t, cfg, f).List(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,22 +177,31 @@ func TestLDAPPagesThroughResults(t *testing.T) {
 	}
 }
 
+// The server is asked for the group's members only, with the DN escaped for the filter; the
+// entries it returns are still checked, since some servers match member-of loosely.
 func TestLDAPGroupFilter(t *testing.T) {
 	f := &fakeLDAP{pages: [][]*ldap.Entry{{
-		entry("uid=in", map[string][]string{"uid": {"in"}, "memberOf": {"cn=other,dc=example,dc=com", "CN=Push Users,OU=Groups,DC=Example,DC=com"}}),
-		entry("uid=spaced", map[string][]string{"uid": {"spaced"}, "memberOf": {"cn=push users, ou=groups, dc=example, dc=com"}}),
+		entry("uid=in", map[string][]string{"uid": {"in"}, "memberOf": {"cn=other,dc=example,dc=com", "CN=Push Users (All),OU=Groups,DC=Example,DC=com"}}),
+		entry("uid=spaced", map[string][]string{"uid": {"spaced"}, "memberOf": {"cn=push users (all), ou=groups, dc=example, dc=com"}}),
 		entry("uid=out", map[string][]string{"uid": {"out"}, "memberOf": {"cn=other,dc=example,dc=com"}}),
-		entry("uid=nested", map[string][]string{"uid": {"nested"}, "memberOf": {"cn=sub,cn=push users,ou=groups,dc=example,dc=com"}}),
+		entry("uid=nested", map[string][]string{"uid": {"nested"}, "memberOf": {"cn=sub,cn=push users (all),ou=groups,dc=example,dc=com"}}),
 		entry("uid=none", map[string][]string{"uid": {"none"}}),
 	}}}
 	cfg := ldapBase
-	cfg.GroupDN = "cn=push users,ou=groups,dc=example,dc=com"
+	cfg.GroupDN = "cn=push users (all),ou=groups,dc=example,dc=com"
 	got, err := newFakeSource(t, cfg, f).List(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if names := usernames(got); !reflect.DeepEqual(names, []string{"in", "spaced"}) {
 		t.Errorf("got %v", names)
+	}
+	const want = `(&(&(objectClass=person)(!(pwdAccountLockedTime=*)))(memberOf=cn=push users \28all\29,ou=groups,dc=example,dc=com))`
+	if got := f.searches[0].Filter; got != want {
+		t.Errorf("filter %s\nwant   %s", got, want)
+	}
+	if _, err := ldap.CompileFilter(f.searches[0].Filter); err != nil {
+		t.Errorf("filter does not compile: %v", err)
 	}
 }
 
@@ -219,7 +239,7 @@ func TestLDAPEmptyAndFailures(t *testing.T) {
 	}
 
 	dialFail := newFakeSource(t, ldapBase, nil)
-	dialFail.(*ldapSource).dial = func() (ldapConn, error) { return nil, errors.New("connection refused") }
+	dialFail.(*ldapSource).dial = func(context.Context) (ldapConn, error) { return nil, errors.New("connection refused") }
 	if _, err := dialFail.List(context.Background()); err == nil || errors.Is(err, ErrEmpty) {
 		t.Errorf("dial failure: got %v", err)
 	}
@@ -250,6 +270,93 @@ func TestLDAPCancelClosesConnection(t *testing.T) {
 	}
 	if _, err := newFakeSource(t, ldapBase, f).List(ctx); !errors.Is(err, context.Canceled) {
 		t.Errorf("got %v, want context.Canceled", err)
+	}
+}
+
+// stalledStartTLS is the server end of a connection that accepts StartTLS and then never answers
+// the TLS handshake. It reports each request it reads on reqs.
+func stalledStartTLS(t *testing.T, srv net.Conn, reqs chan<- struct{}) {
+	t.Helper()
+	go func() {
+		defer srv.Close()
+		req, err := ber.ReadPacket(srv)
+		if err != nil {
+			return
+		}
+		reqs <- struct{}{}
+		res := ber.Encode(ber.ClassUniversal, ber.TypeConstructed, ber.TagSequence, nil, "LDAP Response")
+		res.AppendChild(ber.NewInteger(ber.ClassUniversal, ber.TypePrimitive, ber.TagInteger, req.Children[0].Value, "MessageID"))
+		ext := ber.Encode(ber.ClassApplication, ber.TypeConstructed, ldap.ApplicationExtendedResponse, nil, "Extended Response")
+		ext.AppendChild(ber.NewInteger(ber.ClassUniversal, ber.TypePrimitive, ber.TagEnumerated, uint64(ldap.LDAPResultSuccess), "resultCode"))
+		ext.AppendChild(ber.NewString(ber.ClassUniversal, ber.TypePrimitive, ber.TagOctetString, "", "matchedDN"))
+		ext.AppendChild(ber.NewString(ber.ClassUniversal, ber.TypePrimitive, ber.TagOctetString, "", "diagnosticMessage"))
+		res.AppendChild(ext)
+		if _, err := srv.Write(res.Bytes()); err != nil {
+			return
+		}
+		// Swallow the ClientHello and never answer it.
+		_, _ = io.Copy(io.Discard, srv)
+	}()
+}
+
+// A StartTLS handshake the server never answers gives up at the request timeout, or as soon as the
+// caller's context ends, instead of hanging the sync.
+func TestLDAPStartTLSHandshakeIsBounded(t *testing.T) {
+	cfg := ldapBase
+	cfg.Address, cfg.StartTLS = "ldap://ldap.example.com", true
+	for _, c := range []struct {
+		name    string
+		timeout time.Duration
+		cancel  bool
+		want    error
+	}{
+		{"timeout", 100 * time.Millisecond, false, nil},
+		{"cancel", time.Hour, true, context.Canceled},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			src, err := New(Config{Type: "ldap", LDAP: cfg})
+			if err != nil {
+				t.Fatal(err)
+			}
+			s := src.(*ldapSource)
+			s.timeout = c.timeout
+			reqs := make(chan struct{}, 1)
+			s.dialNet = func(context.Context) (net.Conn, error) {
+				cli, srv := net.Pipe()
+				stalledStartTLS(t, srv, reqs)
+				return cli, nil
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if c.cancel {
+				go func() {
+					<-reqs
+					// Past the StartTLS response, into the handshake.
+					time.Sleep(50 * time.Millisecond)
+					cancel()
+				}()
+			}
+			start := time.Now()
+			done := make(chan error, 1)
+			go func() {
+				_, err := src.List(ctx)
+				done <- err
+			}()
+			select {
+			case err := <-done:
+				if err == nil || !strings.Contains(err.Error(), "start tls") {
+					t.Fatalf("got %v, want a start tls failure", err)
+				}
+				if c.want != nil && !errors.Is(err, c.want) {
+					t.Fatalf("got %v, want %v", err, c.want)
+				}
+				if c.timeout < time.Hour && time.Since(start) > c.timeout+2*time.Second {
+					t.Fatalf("took %v with a %v timeout", time.Since(start), c.timeout)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("StartTLS did not give up")
+			}
+		})
 	}
 }
 

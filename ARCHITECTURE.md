@@ -11,7 +11,7 @@ browser ──1FA──▶ IdP ──signed Duo API──▶ proxy ──▶ ntf
 
 The shim sits behind the reverse proxy that fronts the IdP: the proxy terminates TLS for `duo-hostname`, forwards plain HTTP, and signs users into the self-service pages with the IdP's forward-auth.
 
-A user directory (LDAP, or Authelia's file user database) controls who has an ntfy account. The shim polls the directory, creates and disables accounts to match, and emails each new user their ntfy credentials (see Provisioning).
+A user directory (LDAP, or Authelia's file user database) controls who has an ntfy account. The shim polls the directory, creates and deletes accounts to match, and emails each new user their ntfy credentials (see Provisioning).
 
 ## Principles
 
@@ -45,8 +45,8 @@ internal/testutil/   integration harness over app: fake ntfy, fake directory, re
 ## Data model
 
 ```
-users         (id uuid, username UNIQUE, ntfy_grants_json, disabled_at, disabled_by_sync, created_at,
-               ntfy_reset_pending, email, display_name, synced_at, welcomed_at)
+users         (id uuid, username UNIQUE, ntfy_grants_json, disabled_at, created_at, ntfy_reset_pending,
+               email, display_name, synced_at, welcomed_at)
 devices       (id uuid, user_id, name, ntfy_topic UNIQUE, verify_token_hash, verified_at, created_at,
                last_used_at, revoked_at, result_token_hash UNIQUE)
 passkeys      (cred_id, device_id, credential_json, aaguid, sign_count, created_at)
@@ -118,25 +118,29 @@ Unauthenticated routes (`/token/`, `/challenge/`) are rate limited per client ad
 
 ## Provisioning
 
-The directory manages accounts. `directory-type: ldap` binds as `directory-ldap-user` and runs a paged search of `directory-ldap-base-dn` with `directory-ldap-users-filter`, reading the username, mail, display name and member-of attributes; `directory-ldap-group-dn` limits the sync to that group. `directory-type: file` reads Authelia's `users_database.yml` on every round (`directory-group` keeps one group; `disabled: true` marks a disabled person). The sync drops entries with invalid ntfy usernames. A username listed twice fails the whole list.
+The directory manages accounts. `directory-type: ldap` binds as `directory-ldap-user` and runs a paged search of `directory-ldap-base-dn` with `directory-ldap-users-filter`, reading the username, mail, display name and member-of attributes; `directory-ldap-group-dn` limits the sync to that group by adding `(<member-of>=<group DN>)` to the filter, and the member-of values of each entry are checked again against the group DN in case the server matches loosely. A `ldap://` address with StartTLS has the upgrade bounded by the request timeout and by the round's context. `directory-type: file` reads Authelia's `users_database.yml` on every round (`directory-group` keeps one group; `disabled: true` marks a disabled person). The sync drops entries with invalid ntfy usernames. A username listed twice fails the whole list.
 
 `Sync` runs once at startup, after the startup checks, and then every `directory-sync-interval` (default 15 minutes). Each round:
 
-1. Lists the directory. An error or an empty list skips the round: nothing changes, the log records a warning, and the audit log records `sync_skipped`. An empty directory is usually broken, and acting on it locks everyone out.
-2. For each person the shim does not know: provisions the account and sends the welcome email. A person the directory marks disabled is not created.
-3. For each known person: records email, display name and `synced_at`. Disables the user if the directory marks them disabled. Enables a user disabled by a previous sync once they appear and are not disabled. Sends the welcome email if one is owed (`welcomed_at` is empty).
-4. Disables every enabled user absent from the directory.
-5. Audits `sync` with the counts created, welcomed, disabled, enabled, updated and failed.
+1. Lists the directory. An error or an empty list skips the round: nothing changes, the log records a warning, and the audit log records `sync_skipped`. An empty directory is usually broken, and deletes cannot be undone.
+2. Fetches ntfy's user list once; account lookups for the rest of the round use it.
+3. For each person the shim does not know: provisions the account and records the profile. A person the directory marks disabled is not created.
+4. For each known person: records email, display name and `synced_at`.
+5. Deletes every user the directory no longer lists or marks disabled, as `user delete` does: devices revoked, ntfy user deleted, `user_deleted` audited.
+6. Sends the welcome email to every enabled user with an email address who is owed one (`welcomed_at` is empty), new accounts included. Welcomes come last, so a slow or failing mail server never holds up a deletion.
+7. Audits `sync` with the counts created, welcomed, deleted, updated and failed.
 
-Users are never deleted, so a person who comes back keeps their phones. A disable made with `user disable` is the admin's: the sync never lifts it. A failure for one user (ntfy down, a refused username, mail down) is logged and does not stop the round.
+A person who comes back is a new user: a new account, a new welcome, and phones enrolled again. `user disable` is the admin's alone: the sync neither sets nor lifts it, and a disabled user is not welcomed. A failure for one user (ntfy down, a refused username, mail down) is logged and does not stop the round.
 
 `Provision(username)` creates the ntfy user (random password nobody knows, role `user`), applies `enroll-access`, and records grants. It is idempotent, creates no push-related data, and lets preauth return `enroll`. Enrollment calls it for the signed-in user. `user provision <u>` provisions only a person the directory lists and not disabled, records their profile, and sends the welcome if it was never sent.
 
 ### Welcome email
 
-`Welcome(username)` sets a new random ntfy password and emails it with the ntfy server URL, the username, app links (Google Play, F-Droid, App Store, the web app), the "Manage users" steps that sign the app in, and one `ntfy://` subscribe link per `default-topics` entry. The password exists only in that email. Older passwords fail, but apps already signed in keep their tokens. On success, `welcomed_at` is set and `welcome_sent` audited. On any failure (no email, disabled user, SMTP error), `welcome_failed` is audited and `welcomed_at` cleared, so the next sync round retries. `user welcome <u>` resends it.
+`Welcome(username)` sets a new random ntfy password and emails it with the ntfy server URL, the username, app links (Google Play, F-Droid, App Store, the web app), the "Manage users" steps that sign the app in, and one `ntfy://` subscribe link per `default-topics` entry. The password exists only in that email. Older passwords fail, but apps already signed in keep their tokens. `user welcome <u>` resends it.
 
-Every path that leaves a user without a known password ends in a welcome: a new account, and every ntfy user reset (`user reset-ntfy`, `device revoke --reset-ntfy-user`, revoking from `/devices` with "sign out all ntfy apps", and a reset the purge job finishes). The reset stands even if that welcome fails; the failure is logged and audited, and the next round retries.
+The retry is durable. Welcome clears `welcomed_at` before it changes the password and sets it only after the mail server accepts the email, so a crash or failure anywhere in between (no email, disabled user, SMTP error, a cancelled request) leaves the welcome owed and the next sync round sends it; failures audit `welcome_failed`, successes `welcome_sent`. These writes ignore the caller's cancellation. Welcomes for one user run one at a time, and the sync's welcome re-reads the user once it has the turn and skips one another caller just sent, so the last email always carries the password ntfy holds.
+
+Every path that leaves a user without a known password ends in a welcome: a new account, and every ntfy user reset (`user reset-ntfy`, `device revoke --reset-ntfy-user`, revoking from `/devices` with "sign out all ntfy apps", and a reset the purge job finishes). A reset marks the welcome owed before it clears `ntfy_reset_pending`, so a crash between the two leaves one of them pending. The reset stands even if that welcome fails; the failure is logged and audited, and the next round retries.
 
 ## Enrollment
 
@@ -167,8 +171,8 @@ authentik calls `enroll`, displays `activation_barcode` (`/token/qr?value=<activ
 | …and cut its ntfy token | `device revoke <id> --reset-ntfy-user` | ntfy cannot revoke another user's tokens, so the user is deleted, recreated with its grants, and sent a new welcome email. Every phone must sign in with the credentials from the new welcome email. Refused if the ntfy user has grants the shim did not make, unless `--force` |
 | Reset the ntfy user | `user reset-ntfy <u> [--force]` | the same reset with no device revoked |
 | New ntfy password | `user welcome <u>` | the password is replaced and emailed; tokens of signed-in apps stay valid |
-| Disable / enable | `user disable|enable <u>`, or the directory | preauth/auth deny; nothing deleted. The sync disables users the directory drops or marks disabled and re-enables them when listed again, but never lifts an admin's disable |
-| Delete | `user delete <u> [--keep-ntfy-user]` | all devices revoked, ntfy user deleted unless kept |
+| Disable / enable | `user disable|enable <u>` | preauth/auth deny; nothing deleted. The sync never changes it |
+| Delete | `user delete <u> [--keep-ntfy-user]`, or the directory | all devices revoked, ntfy user deleted unless kept. The sync deletes users the directory drops or marks disabled; a user it still lists is recreated and welcomed on the next round |
 | Kill switch | `push-disabled: true` + `SIGHUP` | every preauth/auth denies |
 | Rotate the IdP secret | `keygen --rotate` | new key written; the old one accepted for `duo-key-grace` |
 
@@ -204,7 +208,7 @@ auth-tokens: ["idp-push:tk_…:ntfy-idp-push"]
 
 ## Testing
 
-Integration tests execute `duo_api_golang` (v2 form and v5 JSON signing) against the handler `app` assembles for `serve`, using a fake ntfy (v2.30 error contract), a fake directory, a mail sender that records what it sends, and a software WebAuthn authenticator; the test client connects from the configured trusted proxy address and sets the identity header as forward-auth would. They cover directory sync (new users provisioned and welcomed once, absent and disabled users disabled and re-enabled, a broken or empty directory skipping the round, failed welcomes retried), welcome resends and the welcome after a reset, enrollment (including the per-platform result page), push, joining a pending push, the per-user push cap, passkey approval, deny, fraud, timeout, revocation recovery, provisioning, proxy identity (untrusted peers, forged headers on bypassed routes), config reload (token rotation, refused restart-only keys), the CLI, and config loading. Tests read state through core; the harness's store handle only fabricates what another process would have left. Forms simulate browser submissions, matching referrer policy Origins.
+Integration tests execute `duo_api_golang` (v2 form and v5 JSON signing) against the handler `app` assembles for `serve`, using a fake ntfy (v2.30 error contract), a fake directory, a mail sender that records what it sends, and a software WebAuthn authenticator; the test client connects from the configured trusted proxy address and sets the identity header as forward-auth would. They cover directory sync (new users provisioned and welcomed once, dropped and disabled people deleted and recreated when they return, an admin's disable kept, deletions not held up by mail, one ntfy user listing per round, a broken or empty directory skipping the round, failed and interrupted welcomes retried, concurrent welcomes), welcome resends and the welcome after a reset, enrollment (including the per-platform result page), push, joining a pending push, the per-user push cap, passkey approval, deny, fraud, timeout, revocation recovery, provisioning, proxy identity (untrusted peers, forged headers on bypassed routes), config reload (token rotation, refused restart-only keys), the CLI, and config loading. Tests read state through core; the harness's store handle only fabricates what another process would have left. Forms simulate browser submissions, matching referrer policy Origins.
 Live tests for `internal/ntfy` require a real ntfy server via `NTFY_IDP_PUSH_TEST_NTFY_URL`/`_TOKEN`.
 
 ## Other IdPs

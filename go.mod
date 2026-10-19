@@ -5,6 +5,7 @@ go 1.27.2
 require (
 	github.com/duosecurity/duo_api_golang v0.3.0
 	github.com/fxamacker/cbor/v2 v2.9.6
+	github.com/go-asn1-ber/asn1-ber v1.5.8
 	github.com/go-ldap/ldap/v3 v3.4.15
 	github.com/go-webauthn/webauthn v0.18.2
 	github.com/google/uuid v1.6.0
@@ -18,7 +19,6 @@ require (
 	github.com/Azure/go-ntlmssp v0.1.1 // indirect
 	github.com/BurntSushi/toml v1.4.1-0.20240526193622-a339e1f7089c // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/go-asn1-ber/asn1-ber v1.5.8 // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
 	github.com/go-webauthn/x v0.3.1 // indirect
 	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect

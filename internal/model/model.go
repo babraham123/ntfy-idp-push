@@ -13,12 +13,10 @@ type User struct {
 	ID       string
 	Username string
 	Grants   []config.Grant // ntfy grants the shim applied from enroll-access
-	// DisabledAt is set while the user may not enroll or sign in. DisabledBySync marks a disable
-	// the directory sync made, which the sync lifts when the directory lists the user again; an
-	// admin's disable stays until an admin lifts it.
-	DisabledAt     *time.Time
-	DisabledBySync bool
-	CreatedAt      time.Time
+	// DisabledAt is set while the user may not enroll or sign in. Only an admin sets or clears it;
+	// the directory sync deletes users instead.
+	DisabledAt *time.Time
+	CreatedAt  time.Time
 	// Email and DisplayName come from the directory.
 	Email       string
 	DisplayName string

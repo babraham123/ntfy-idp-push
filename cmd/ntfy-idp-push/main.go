@@ -32,7 +32,7 @@ Commands:
   user provision <username>               create the ntfy account of a directory user, apply enroll-access
                                           and send the welcome email if it was never sent (no push device)
   user welcome <username>                 set a new ntfy password and email it in a new welcome email
-  user disable|enable <username>
+  user disable|enable <username>          block or allow sign-in; the directory sync never changes it
   user delete <username> [--keep-ntfy-user]
   user approve <challenge-id>             approve a pending login without a passkey (break-glass)
   user reset-ntfy <username> [--force]    recreate the ntfy user, invalidating all of its tokens, and send

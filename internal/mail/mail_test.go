@@ -287,8 +287,12 @@ func TestSendPlainWithAuth(t *testing.T) {
 	if !got.quit {
 		t.Error("no QUIT")
 	}
-	_, body, _ := strings.Cut(got.data, "\r\n\r\n")
-	for _, line := range strings.Split(body, "\r\n") {
+	// ReadDotBytes hands the data over with CRLF already turned into LF.
+	_, body, found := strings.Cut(got.data, "\n\n")
+	if !found || body == "" {
+		t.Fatalf("no body after the header block:\n%s", got.data)
+	}
+	for _, line := range strings.Split(body, "\n") {
 		if len(line) > 76 {
 			t.Errorf("body line longer than quoted-printable's 76 octets: %q", line)
 		}

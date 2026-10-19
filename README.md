@@ -2,7 +2,7 @@
 
 ntfy-idp-push replaces the Duo Auth API to deliver secure mobile push notifications over [ntfy](https://ntfy.sh) for Authelia and authentik. ntfy acts only as transport; approvals require a device-bound passkey signature from the enrolled phone. See [ARCHITECTURE.md](ARCHITECTURE.md) for design details.
 
-Accounts follow your user directory (LDAP, or Authelia's `users_database.yml`). The shim polls the directory, creates an ntfy account for each new person, emails them a welcome with their ntfy password, and disables accounts absent from the directory. Users enroll their phone's passkey at `/enroll`.
+Accounts follow your user directory (LDAP, or Authelia's `users_database.yml`). The shim polls the directory, creates an ntfy account for each new person, emails them a welcome with their ntfy password, and deletes accounts the directory drops. Users enroll their phone's passkey at `/enroll`.
 
 ## Run
 
@@ -55,12 +55,12 @@ The directory decides who gets an ntfy account. Once at startup and then every `
 
 - creates an account for each new person, applies `enroll-access`, and sends one welcome email: ntfy server URL, username, a random password shown only there, app links, the "Manage users" steps that sign the app in, and an `ntfy://` link per `default-topics` entry;
 - keeps email and display name current;
-- disables users absent from the directory or marked disabled, and enables them when they reappear (a `user disable` by an admin stays);
-- never deletes anyone.
+- deletes users absent from the directory or marked disabled, with their devices and ntfy account; a person who returns starts over with a new account and welcome;
+- never changes a `user disable` made by an admin.
 
-A directory that errors or lists nobody skips the round and changes nothing (audit `sync_skipped`). The next round retries unsent welcome emails. Resetting a user's ntfy account (`user reset-ntfy`, `device revoke --reset-ntfy-user`) sends a new welcome, since the recreated account's password is unknown.
+A directory that errors or lists nobody skips the round and changes nothing (audit `sync_skipped`), since deletes cannot be undone. The next round retries unsent welcome emails. Resetting a user's ntfy account (`user reset-ntfy`, `device revoke --reset-ntfy-user`) sends a new welcome, since the recreated account's password is unknown.
 
-`directory-type: ldap` takes Authelia's LDAP settings: `directory-ldap-address` (`ldaps://` or `ldap://` with `directory-ldap-start-tls`), `directory-ldap-base-dn`, the bind `directory-ldap-user` and `directory-ldap-password` (or `-file`), `directory-ldap-users-filter` (default `(objectClass=person)`; it lists users, so no `{input}` placeholder), and the `directory-ldap-attribute-*` names (defaults `uid`, `mail`, `displayName`, `memberOf`). `directory-ldap-group-dn` limits the sync to one group's members. An LDAP server with a certificate from a private CA needs `directory-ldap-ca-file`, a PEM bundle trusted besides the system roots; put it in `./config` and set `directory-ldap-ca-file: /etc/ntfy-idp-push/ldap-ca.pem`.
+`directory-type: ldap` takes Authelia's LDAP settings: `directory-ldap-address` (`ldaps://` or `ldap://` with `directory-ldap-start-tls`), `directory-ldap-base-dn`, the bind `directory-ldap-user` and `directory-ldap-password` (or `-file`), `directory-ldap-users-filter` (default `(objectClass=person)`; it lists users, so no `{input}` placeholder), and the `directory-ldap-attribute-*` names (defaults `uid`, `mail`, `displayName`, `memberOf`). `directory-ldap-group-dn` limits the sync to one group's members, filtered by the server. An LDAP server with a certificate from a private CA needs `directory-ldap-ca-file`, a PEM bundle trusted besides the system roots; put it in `./config` and set `directory-ldap-ca-file: /etc/ntfy-idp-push/ldap-ca.pem`.
 
 `directory-type: file` reads Authelia's file user database (`directory-file`, re-read every round), honoring each user's `disabled` flag; `directory-group` limits the sync to one group. Mount the directory that holds the file read-only (see `deploy/compose.yaml`).
 
@@ -145,8 +145,8 @@ Users
   user list                                  users with email, devices, status, last welcome and last sync
   user provision <user>                      create a directory user's account now; welcome if never sent
   user welcome <user>                        set a new ntfy password and email it in a new welcome
-  user disable|enable <user>
-  user delete <user> [--keep-ntfy-user]
+  user disable|enable <user>                 block or allow sign-in; the directory sync never changes it
+  user delete <user> [--keep-ntfy-user]      the sync recreates a user the directory still lists
   user reset-ntfy <user> [--force]           recreate the ntfy user, invalidating its tokens; sends a new welcome
   user approve <challenge-id>                approve a pending login without a passkey (break-glass)
   enroll-link <user>                         single-use enrollment link, valid 5 minutes

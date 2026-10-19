@@ -34,6 +34,7 @@ type FakeNtfy struct {
 	published []ntfy.Message
 	deleted   []string // "topic/sequence_id"
 	pubCh     chan ntfy.Message
+	userLists int // GET /v1/users calls
 }
 
 func NewFakeNtfy(t *testing.T) *FakeNtfy {
@@ -75,6 +76,7 @@ func (f *FakeNtfy) serve(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/v1/account" && r.Method == http.MethodGet:
 		json.NewEncoder(w).Encode(ntfy.Account{Username: "idp-push", Role: f.AdminRole})
 	case r.URL.Path == "/v1/users" && r.Method == http.MethodGet:
+		f.userLists++
 		out := []ntfy.User{}
 		for _, u := range f.users {
 			out = append(out, *u)
@@ -222,6 +224,13 @@ func (f *FakeNtfy) Password(user string) string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.passwords[user]
+}
+
+// UserLists is how many times the user list (GET /v1/users) was fetched.
+func (f *FakeNtfy) UserLists() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.userLists
 }
 
 func (f *FakeNtfy) Deleted() []string {

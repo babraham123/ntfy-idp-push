@@ -807,7 +807,7 @@ func TestPendingLoginBlockedByLaterDisable(t *testing.T) {
 		authCall(h, "alice", dev.DeviceID)
 		m := h.Ntfy.NextPublish(t)
 		u, _, _ := h.Svc.DevicesOf(ctx, "alice")
-		if err := h.Store.SetUserDisabled(ctx, u.ID, true, false); err != nil {
+		if err := h.Store.SetUserDisabled(ctx, u.ID, true); err != nil {
 			t.Fatal(err)
 		}
 		if st := approve(t, h, dev.Auth, m.Click); st != 403 {

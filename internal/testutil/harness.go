@@ -195,12 +195,19 @@ type Request struct {
 	// User, when set, is signed in: the request carries the identity header the proxy adds after
 	// its forward-auth step.
 	User string
+	// Ctx, when set, is the request's context. Cancelling it hangs up, as a browser closing the tab
+	// would; Do then returns a nil response instead of failing the test.
+	Ctx context.Context
 }
 
 // Do sends a browser-style request: Origin is the public origin unless overridden.
 func (h *Harness) Do(t *testing.T, r Request) (*http.Response, []byte) {
 	t.Helper()
-	req, err := http.NewRequest(r.Method, h.Server.URL+r.Path, bytes.NewReader(r.Body))
+	ctx := r.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	req, err := http.NewRequestWithContext(ctx, r.Method, h.Server.URL+r.Path, bytes.NewReader(r.Body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,6 +226,9 @@ func (h *Harness) Do(t *testing.T, r Request) (*http.Response, []byte) {
 		}
 	}
 	resp, err := h.Client.Do(req)
+	if err != nil && ctx.Err() != nil {
+		return nil, nil
+	}
 	if err != nil {
 		t.Fatal(err)
 	}

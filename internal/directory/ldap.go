@@ -32,7 +32,13 @@ type ldapConn interface {
 type ldapSource struct {
 	cfg     LDAPConfig
 	groupDN *ldap.DN // nil keeps everyone
-	dial    func() (ldapConn, error)
+	filter  string   // the users filter, narrowed to the group's members when a group is set
+	tls     *tls.Config
+	ldaps   bool // the transport dialNet opens is already TLS
+	timeout time.Duration
+	// dial opens an unbound connection, over the transport dialNet opens. Tests replace either.
+	dial    func(ctx context.Context) (ldapConn, error)
+	dialNet func(ctx context.Context) (net.Conn, error)
 }
 
 func newLDAPSource(cfg LDAPConfig) (*ldapSource, error) {
@@ -59,7 +65,7 @@ func newLDAPSource(cfg LDAPConfig) (*ldapSource, error) {
 	if _, err := ldap.CompileFilter(cfg.UsersFilter); err != nil {
 		return nil, fmt.Errorf("directory: ldap users filter: %w", err)
 	}
-	s := &ldapSource{cfg: cfg}
+	s := &ldapSource{cfg: cfg, filter: cfg.UsersFilter, ldaps: u.Scheme == "ldaps", timeout: ldapTimeout}
 	if cfg.GroupDN != "" {
 		if cfg.AttributeMemberOf == "" {
 			return nil, errors.New("directory: ldap group DN needs a member-of attribute")
@@ -67,28 +73,61 @@ func newLDAPSource(cfg LDAPConfig) (*ldapSource, error) {
 		if s.groupDN, err = ldap.ParseDN(cfg.GroupDN); err != nil {
 			return nil, fmt.Errorf("directory: ldap group DN: %w", err)
 		}
+		// The server narrows the search so a large directory does not send every entry for a small
+		// group.
+		s.filter = "(&" + cfg.UsersFilter + "(" + cfg.AttributeMemberOf + "=" + ldap.EscapeFilter(cfg.GroupDN) + "))"
+		if _, err := ldap.CompileFilter(s.filter); err != nil {
+			return nil, fmt.Errorf("directory: ldap member-of attribute: %w", err)
+		}
 	}
-	tlsCfg, err := ldapTLSConfig(cfg, u.Hostname())
+	if s.tls, err = ldapTLSConfig(cfg, u.Hostname()); err != nil {
+		return nil, err
+	}
+	port := u.Port()
+	if port == "" {
+		port = map[string]string{"ldap": "389", "ldaps": "636"}[u.Scheme]
+	}
+	addr := net.JoinHostPort(u.Hostname(), port)
+	s.dialNet = func(ctx context.Context) (net.Conn, error) {
+		nd := &net.Dialer{Timeout: ldapDialTimeout}
+		if s.ldaps {
+			return (&tls.Dialer{NetDialer: nd, Config: s.tls}).DialContext(ctx, "tcp", addr)
+		}
+		return nd.DialContext(ctx, "tcp", addr)
+	}
+	s.dial = s.connect
+	return s, nil
+}
+
+// connect opens the connection and, with start-tls, upgrades it. go-ldap's StartTLS takes no
+// context and its handshake has no deadline, so the transport gets a deadline for the upgrade and
+// a cancelled ctx closes it.
+func (s *ldapSource) connect(ctx context.Context) (ldapConn, error) {
+	nc, err := s.dialNet(ctx)
 	if err != nil {
 		return nil, err
 	}
-	s.dial = func() (ldapConn, error) {
-		c, err := ldap.DialURL(cfg.Address,
-			ldap.DialWithDialer(&net.Dialer{Timeout: ldapDialTimeout}),
-			ldap.DialWithTLSConfig(tlsCfg))
-		if err != nil {
-			return nil, err
-		}
-		c.SetTimeout(ldapTimeout)
-		if cfg.StartTLS {
-			if err := c.StartTLS(tlsCfg); err != nil {
-				c.Close()
-				return nil, fmt.Errorf("start tls: %w", err)
-			}
-		}
+	c := ldap.NewConn(nc, s.ldaps)
+	c.Start()
+	c.SetTimeout(s.timeout)
+	if !s.cfg.StartTLS {
 		return c, nil
 	}
-	return s, nil
+	stop := context.AfterFunc(ctx, func() { c.Close() })
+	defer stop()
+	if err := nc.SetDeadline(time.Now().Add(s.timeout)); err != nil {
+		c.Close()
+		return nil, err
+	}
+	err = c.StartTLS(s.tls)
+	if err == nil {
+		err = nc.SetDeadline(time.Time{})
+	}
+	if err != nil {
+		c.Close()
+		return nil, fmt.Errorf("start tls: %w", ctxErr(ctx, err))
+	}
+	return c, nil
 }
 
 // ldapTLSConfig serves both ldaps:// and StartTLS. StartTLS has no address to infer the
@@ -115,7 +154,7 @@ func ldapTLSConfig(cfg LDAPConfig, host string) (*tls.Config, error) {
 }
 
 func (s *ldapSource) List(ctx context.Context) ([]Person, error) {
-	c, err := s.dial()
+	c, err := s.dial(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("directory: ldap connect: %w", err)
 	}
@@ -129,23 +168,18 @@ func (s *ldapSource) List(ctx context.Context) ([]Person, error) {
 			return nil, fmt.Errorf("directory: ldap bind: %w", ctxErr(ctx, err))
 		}
 	}
-	entries, err := s.search(ctx, c)
+	people, err := s.search(ctx, c)
 	if err != nil {
 		return nil, fmt.Errorf("directory: ldap search: %w", ctxErr(ctx, err))
-	}
-	people := make([]Person, 0, len(entries))
-	for _, e := range entries {
-		if p, ok := s.person(e); ok {
-			people = append(people, p)
-		}
 	}
 	return finish(people)
 }
 
 // search pages through the whole result itself (rather than SearchWithPaging) so the cookie
-// handling runs against the same ldapConn tests fake. Servers that ignore the paging control simply
-// answer with everything and no cookie.
-func (s *ldapSource) search(ctx context.Context, c ldapConn) ([]*ldap.Entry, error) {
+// handling runs against the same ldapConn tests fake, and maps each page as it arrives so only
+// the people are kept. Servers that ignore the paging control simply answer with everything and
+// no cookie.
+func (s *ldapSource) search(ctx context.Context, c ldapConn) ([]Person, error) {
 	attrs := []string{s.cfg.AttributeUsername}
 	for _, a := range []string{s.cfg.AttributeMail, s.cfg.AttributeDisplayName, s.cfg.AttributeMemberOf} {
 		if a != "" {
@@ -154,8 +188,8 @@ func (s *ldapSource) search(ctx context.Context, c ldapConn) ([]*ldap.Entry, err
 	}
 	paging := ldap.NewControlPaging(ldapPageSize)
 	req := ldap.NewSearchRequest(s.cfg.BaseDN, ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, 0, 0, false,
-		s.cfg.UsersFilter, attrs, []ldap.Control{paging})
-	var entries []*ldap.Entry
+		s.filter, attrs, []ldap.Control{paging})
+	var people []Person
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -164,10 +198,14 @@ func (s *ldapSource) search(ctx context.Context, c ldapConn) ([]*ldap.Entry, err
 		if err != nil {
 			return nil, err
 		}
-		entries = append(entries, res.Entries...)
+		for _, e := range res.Entries {
+			if p, ok := s.person(e); ok {
+				people = append(people, p)
+			}
+		}
 		next, ok := ldap.FindControl(res.Controls, ldap.ControlTypePaging).(*ldap.ControlPaging)
 		if !ok || len(next.Cookie) == 0 {
-			return entries, nil
+			return people, nil
 		}
 		paging.SetCookie(next.Cookie)
 	}
@@ -192,6 +230,8 @@ func (s *ldapSource) person(e *ldap.Entry) (Person, bool) {
 			p.Groups = groups
 		}
 	}
+	// The search filter already asked for members; this check stands for servers that match
+	// member-of loosely (substring or case rules that differ from DN equality).
 	if s.groupDN != nil && !slices.ContainsFunc(p.Groups, s.isGroup) {
 		return Person{}, false
 	}

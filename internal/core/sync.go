@@ -2,13 +2,14 @@ package core
 
 // The directory controls who has an ntfy account. Sync converges the store and ntfy on the directory
 // every round. Welcome emails the user their credentials. The ntfy password exists only in the email,
-// so every path that invalidates the password (a new account, a reset) ends in Welcome.
-// The next sync round retries failed welcomes.
+// so every path that invalidates the password (a new account, a reset) marks a welcome as owed
+// before it changes anything, and ends in Welcome. The next sync round sends any welcome still owed.
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/babraham123/ntfy-idp-push/internal/directory"
@@ -18,14 +19,15 @@ import (
 
 // SyncCounts is what one sync round changed.
 type SyncCounts struct {
-	Created, Welcomed, Disabled, Enabled, Updated int
+	Created, Welcomed, Deleted, Updated int
 }
 
 // Sync runs one directory sync round. A directory that fails or lists nobody skips the round and
-// changes nothing, since disabling everyone on a broken directory locks everyone out. Users
-// are never deleted: users absent from the directory or marked disabled are disabled. They are
-// enabled once listed and not disabled, unless an admin disabled them. A failure for one user
-// does not stop the round; every failure is logged, and they are returned together.
+// changes nothing, since deletes cannot be undone and a broken directory would delete everyone.
+// The round first reconciles accounts: it creates listed people, records profiles, and deletes
+// users the directory no longer lists or marks disabled. Only then does it send owed welcomes, so
+// a slow or failing mail server never holds up a deletion. A failure for one user does not stop
+// the round; every failure is logged, and they are returned together.
 func (s *Service) Sync(ctx context.Context) error {
 	people, err := s.dir.List(ctx)
 	if err != nil {
@@ -37,6 +39,7 @@ func (s *Service) Sync(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	ctx = s.withNtfyUsers(ctx)
 	known := make(map[string]*model.User, len(users))
 	for i := range users {
 		known[users[i].Username] = &users[i]
@@ -51,70 +54,65 @@ func (s *Service) Sync(ctx context.Context) error {
 	}
 
 	for _, p := range people {
+		// A disabled person is treated as absent: never created, and deleted if known.
+		if p.Disabled {
+			continue
+		}
 		listed[p.Username] = true
 		u := known[p.Username]
 		if u == nil {
-			if p.Disabled {
-				continue
-			}
-			created, welcomed, err := s.adopt(ctx, p, now)
-			if created != nil {
+			u, err := s.adopt(ctx, p, now)
+			if u != nil {
 				n.Created++
-			}
-			if welcomed {
-				n.Welcomed++
 			}
 			if err != nil {
 				fail(p.Username, err)
 			}
 			continue
 		}
-		if u.Email != p.Email || u.DisplayName != p.DisplayName {
-			n.Updated++
-		}
+		changed := u.Email != p.Email || u.DisplayName != p.DisplayName
 		if err := s.recordProfile(ctx, u, p, now); err != nil {
 			fail(p.Username, err)
 			continue
 		}
-		switch {
-		case p.Disabled && u.Enabled():
-			if err := s.setDisabled(ctx, u, true, true); err != nil {
-				fail(p.Username, err)
-				continue
-			}
-			n.Disabled++
-		case !p.Disabled && !u.Enabled() && u.DisabledBySync:
-			if err := s.setDisabled(ctx, u, false, true); err != nil {
-				fail(p.Username, err)
-				continue
-			}
-			u.DisabledAt = nil
-			n.Enabled++
+		if changed {
+			n.Updated++
 		}
-		if u.Enabled() && u.WelcomedAt == nil && u.Email != "" {
-			if err := s.Welcome(ctx, u.Username); err != nil {
-				fail(p.Username, err)
-				continue
-			}
+	}
+
+	for _, u := range users {
+		if listed[u.Username] {
+			continue
+		}
+		if err := s.DeleteUser(ctx, u.Username, false); err != nil {
+			fail(u.Username, err)
+			continue
+		}
+		n.Deleted++
+	}
+
+	// Re-read so the users just created and the addresses just recorded are included.
+	if users, err = s.store.Users(ctx); err != nil {
+		errs = append(errs, err)
+		users = nil
+	}
+	for _, u := range users {
+		if u.WelcomedAt != nil || u.Email == "" || !u.Enabled() {
+			continue
+		}
+		sent, err := s.welcome(ctx, u.Username, true)
+		if err != nil {
+			fail(u.Username, err)
+			continue
+		}
+		if sent {
 			n.Welcomed++
 		}
 	}
 
-	for i := range users {
-		u := &users[i]
-		if listed[u.Username] || !u.Enabled() {
-			continue
-		}
-		if err := s.setDisabled(ctx, u, true, true); err != nil {
-			fail(u.Username, err)
-			continue
-		}
-		n.Disabled++
-	}
-
 	s.store.Audit(ctx, "", "sync", map[string]any{
-		"created": n.Created, "welcomed": n.Welcomed, "disabled": n.Disabled, "enabled": n.Enabled,
-		"updated": n.Updated, "failed": len(errs),
+		"created": n.Created, "welcomed": n.Welcomed, "deleted": n.Deleted, "updated": n.Updated,
+		"failed": len(errs),
 	})
 	return errors.Join(errs...)
 }
@@ -137,32 +135,24 @@ func (s *Service) ProvisionFromDirectory(ctx context.Context, username string) (
 		if p.Disabled {
 			return nil, ErrUserDisabled
 		}
-		u, _, err := s.adopt(ctx, p, time.Now())
+		u, err := s.adopt(ctx, p, time.Now())
+		if err != nil {
+			return u, err
+		}
+		_, err = s.welcome(ctx, username, true)
 		return u, err
 	}
 	return nil, ErrNotInDirectory
 }
 
-// adopt provisions p's account, records p's profile and, unless the user was welcomed before,
-// sends the welcome. A user is returned once provisioning succeeded, even if the welcome failed.
-func (s *Service) adopt(ctx context.Context, p directory.Person, now time.Time) (*model.User, bool, error) {
+// adopt provisions p's account and records p's profile. A user is returned once provisioning
+// succeeded, even if recording the profile failed.
+func (s *Service) adopt(ctx context.Context, p directory.Person, now time.Time) (*model.User, error) {
 	u, err := s.Provision(ctx, p.Username)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
-	if err := s.recordProfile(ctx, u, p, now); err != nil {
-		return u, false, err
-	}
-	if u.WelcomedAt != nil {
-		return u, false, nil
-	}
-	if p.Email == "" {
-		return u, false, ErrNoEmail
-	}
-	if err := s.Welcome(ctx, u.Username); err != nil {
-		return u, false, err
-	}
-	return u, true, nil
+	return u, s.recordProfile(ctx, u, p, now)
 }
 
 func (s *Service) recordProfile(ctx context.Context, u *model.User, p directory.Person, now time.Time) error {
@@ -174,29 +164,49 @@ func (s *Service) recordProfile(ctx context.Context, u *model.User, p directory.
 }
 
 // Welcome gives the user a new random ntfy password and emails it with the server URL, app links,
-// and a subscribe link per default topic. Older passwords fail. Any failure after the
-// user is found is audited and marks the welcome as owed, so the next sync round retries it.
+// and a subscribe link per default topic. Older passwords fail. A welcome that does not complete
+// stays owed, so the next sync round retries it.
 func (s *Service) Welcome(ctx context.Context, username string) error {
-	u, err := s.user(ctx, username)
-	if err != nil {
-		return err
-	}
-	if err := s.welcome(ctx, u); err != nil {
-		s.store.Audit(ctx, username, "welcome_failed", map[string]any{"error": err.Error()})
-		if err := s.store.SetUserWelcomed(ctx, u.ID, nil); err != nil {
-			s.Log.Error("welcome: mark as owed", "user", username, "err", err)
-		}
-		return err
-	}
-	now := time.Now()
-	if err := s.store.SetUserWelcomed(ctx, u.ID, &now); err != nil {
-		return err
-	}
-	s.store.Audit(ctx, username, "welcome_sent", map[string]any{"email": u.Email})
-	return nil
+	_, err := s.welcome(ctx, username, false)
+	return err
 }
 
-func (s *Service) welcome(ctx context.Context, u *model.User) error {
+// welcome sends the welcome, or with owedOnly, sends it only if one is still owed. It reports
+// whether an email was sent.
+//
+// The owed marker is written before the password changes, and the success stamp only after the
+// email is accepted, so a crash or a failure anywhere in between leaves the welcome owed. The
+// bookkeeping ignores ctx's cancellation: a client that hangs up mid-send must not leave a
+// password nobody received and no welcome owed. Welcomes for one user run one at a time, so the
+// last email sent always carries the password ntfy holds.
+func (s *Service) welcome(ctx context.Context, username string, owedOnly bool) (bool, error) {
+	unlock := s.welcoming.lock(username)
+	defer unlock()
+	// Read under the lock: an overlapping welcome may have just sent one.
+	u, err := s.user(ctx, username)
+	if err != nil {
+		return false, err
+	}
+	if owedOnly && u.WelcomedAt != nil {
+		return false, nil
+	}
+	book := context.WithoutCancel(ctx)
+	if err := s.store.SetUserWelcomed(book, u.ID, nil); err != nil {
+		return false, err
+	}
+	if err := s.sendWelcome(ctx, u); err != nil {
+		s.store.Audit(book, username, "welcome_failed", map[string]any{"error": err.Error()})
+		return false, err
+	}
+	now := time.Now()
+	if err := s.store.SetUserWelcomed(book, u.ID, &now); err != nil {
+		return false, err
+	}
+	s.store.Audit(book, username, "welcome_sent", map[string]any{"email": u.Email})
+	return true, nil
+}
+
+func (s *Service) sendWelcome(ctx context.Context, u *model.User) error {
 	if u.Email == "" {
 		return ErrNoEmail
 	}
@@ -221,4 +231,40 @@ func (s *Service) welcome(ctx context.Context, u *model.User) error {
 		return fmt.Errorf("send welcome email: %w", err)
 	}
 	return nil
+}
+
+// keyedMutex is a mutex per key. A key's entry lives only while someone holds or waits for it.
+// The zero value is ready to use.
+type keyedMutex struct {
+	mu    sync.Mutex
+	locks map[string]*keyedLock
+}
+
+type keyedLock struct {
+	sync.Mutex
+	refs int
+}
+
+// lock locks key and returns its unlock.
+func (k *keyedMutex) lock(key string) (unlock func()) {
+	k.mu.Lock()
+	if k.locks == nil {
+		k.locks = map[string]*keyedLock{}
+	}
+	l := k.locks[key]
+	if l == nil {
+		l = &keyedLock{}
+		k.locks[key] = l
+	}
+	l.refs++
+	k.mu.Unlock()
+	l.Lock()
+	return func() {
+		l.Unlock()
+		k.mu.Lock()
+		if l.refs--; l.refs == 0 {
+			delete(k.locks, key)
+		}
+		k.mu.Unlock()
+	}
 }

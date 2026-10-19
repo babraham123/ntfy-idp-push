@@ -9,9 +9,11 @@ package core
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/babraham123/ntfy-idp-push/internal/config"
 	"github.com/babraham123/ntfy-idp-push/internal/model"
+	"github.com/babraham123/ntfy-idp-push/internal/ntfy"
 	"github.com/babraham123/ntfy-idp-push/internal/token"
 )
 
@@ -77,7 +79,7 @@ func (s *Service) convergeNtfyAccount(ctx context.Context, u *model.User, recrea
 		return 0, err
 	}
 	if recreate {
-		if err := s.ntfy().DeleteUser(ctx, u.Username); err != nil {
+		if err := s.deleteNtfyAccount(ctx, u.Username); err != nil {
 			return 0, err
 		}
 	}
@@ -105,7 +107,13 @@ func (s *Service) revokeDeviceGrant(ctx context.Context, d *model.Device) error 
 }
 
 func (s *Service) deleteNtfyAccount(ctx context.Context, username string) error {
-	return s.ntfy().DeleteUser(ctx, username)
+	if err := s.ntfy().DeleteUser(ctx, username); err != nil {
+		return err
+	}
+	if c := ntfyUsersFrom(ctx); c != nil {
+		c.set(username, nil)
+	}
+	return nil
 }
 
 // checkForeignGrants refuses to reset an account that holds grants the shim did not make, since
@@ -146,8 +154,12 @@ func (s *Service) knownTopics(ctx context.Context, u *model.User) (map[string]bo
 }
 
 func (s *Service) ensureNtfyUser(ctx context.Context, username string) error {
-	nu, err := s.ntfy().User(ctx, username)
-	if err != nil {
+	cache := ntfyUsersFrom(ctx)
+	var nu *ntfy.User
+	var err error
+	if cache != nil {
+		nu = cache.get(username)
+	} else if nu, err = s.ntfy().User(ctx, username); err != nil {
 		return err
 	}
 	if nu != nil {
@@ -157,7 +169,61 @@ func (s *Service) ensureNtfyUser(ctx context.Context, username string) error {
 		return nil
 	}
 	// Nobody knows this password; Welcome replaces it with one it emails to the user.
-	return s.ntfy().AddUser(ctx, username, token.Random(32))
+	if err := s.ntfy().AddUser(ctx, username, token.Random(32)); err != nil {
+		return err
+	}
+	if cache != nil {
+		cache.set(username, &ntfy.User{Username: username, Role: "user"})
+	}
+	return nil
+}
+
+// ntfyUsers is ntfy's user list fetched once for a sync round. ntfy has no single-user lookup, so
+// without it every account the round touches downloads the whole list, twice for a new person
+// (Provision, then the welcome's password change). The shim's own adds and deletes keep it
+// current for the rest of the round.
+type ntfyUsers struct {
+	mu     sync.Mutex
+	byName map[string]*ntfy.User
+}
+
+type ntfyUsersKey struct{}
+
+// withNtfyUsers returns ctx carrying the current ntfy user list. If ntfy cannot list its users,
+// ctx is returned as is and each lookup asks ntfy itself.
+func (s *Service) withNtfyUsers(ctx context.Context) context.Context {
+	us, err := s.ntfy().Users(ctx)
+	if err != nil {
+		s.Log.Warn("list ntfy users", "err", err)
+		return ctx
+	}
+	c := &ntfyUsers{byName: make(map[string]*ntfy.User, len(us))}
+	for i := range us {
+		c.byName[us[i].Username] = &us[i]
+	}
+	return context.WithValue(ctx, ntfyUsersKey{}, c)
+}
+
+func ntfyUsersFrom(ctx context.Context) *ntfyUsers {
+	c, _ := ctx.Value(ntfyUsersKey{}).(*ntfyUsers)
+	return c
+}
+
+func (c *ntfyUsers) get(username string) *ntfy.User {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.byName[username]
+}
+
+// set records username's account; nil records that it does not exist.
+func (c *ntfyUsers) set(username string, u *ntfy.User) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if u == nil {
+		delete(c.byName, username)
+	} else {
+		c.byName[username] = u
+	}
 }
 
 func mergeGrants(a, b []config.Grant) []config.Grant {

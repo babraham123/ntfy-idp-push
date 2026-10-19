@@ -13,14 +13,14 @@ import (
 
 // ---- users
 
-const userCols = `id, username, ntfy_grants_json, disabled_at, disabled_by_sync, created_at, email, display_name, synced_at, welcomed_at`
+const userCols = `id, username, ntfy_grants_json, disabled_at, created_at, email, display_name, synced_at, welcomed_at`
 
 func scanUser(row interface{ Scan(...any) error }) (*model.User, error) {
 	var u model.User
 	var grants string
 	var disabled, synced, welcomed sql.NullInt64
 	var created int64
-	if err := row.Scan(&u.ID, &u.Username, &grants, &disabled, &u.DisabledBySync, &created, &u.Email, &u.DisplayName,
+	if err := row.Scan(&u.ID, &u.Username, &grants, &disabled, &created, &u.Email, &u.DisplayName,
 		&synced, &welcomed); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
@@ -105,15 +105,13 @@ func (s *Store) PendingNtfyResets(ctx context.Context) ([]string, error) {
 	return out, rows.Err()
 }
 
-// SetUserDisabled disables or enables the user; bySync records that the directory sync made the
-// change.
-func (s *Store) SetUserDisabled(ctx context.Context, userID string, disabled, bySync bool) error {
+// SetUserDisabled disables or enables the user.
+func (s *Store) SetUserDisabled(ctx context.Context, userID string, disabled bool) error {
 	var v any
 	if disabled {
 		v = unix(time.Now())
 	}
-	_, err := s.db.ExecContext(ctx, `UPDATE users SET disabled_at = ?, disabled_by_sync = ? WHERE id = ?`,
-		v, disabled && bySync, userID)
+	_, err := s.db.ExecContext(ctx, `UPDATE users SET disabled_at = ? WHERE id = ?`, v, userID)
 	return err
 }
 

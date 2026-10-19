@@ -67,6 +67,9 @@ type Service struct {
 	pushMu sync.Mutex
 	// pushes is each user's remaining push allowance.
 	pushes map[string]*rate.Limiter
+
+	// welcoming runs one welcome per user at a time.
+	welcoming keyedMutex
 }
 
 func New(cfg *config.Config, st *store.Store, log *slog.Logger, dir directory.Source, mailer mail.Sender) (*Service, error) {

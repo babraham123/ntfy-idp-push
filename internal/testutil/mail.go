@@ -15,11 +15,24 @@ type FakeMail struct {
 	mu   sync.Mutex
 	sent []mail.Message
 	err  error
+	// gate, while set, holds every Send until it is closed; each held Send is announced on held.
+	gate chan struct{}
+	held chan mail.Message
 }
 
 func NewFakeMail() *FakeMail { return &FakeMail{} }
 
 func (f *FakeMail) Send(ctx context.Context, m mail.Message) error {
+	f.mu.Lock()
+	gate, held := f.gate, f.held
+	f.mu.Unlock()
+	if gate != nil {
+		held <- m
+		select {
+		case <-gate:
+		case <-ctx.Done():
+		}
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -30,6 +43,25 @@ func (f *FakeMail) Send(ctx context.Context, m mail.Message) error {
 	}
 	f.sent = append(f.sent, m)
 	return nil
+}
+
+// Block makes every later Send wait, like a stalled mail server, until Unblock or until its
+// context ends, which it then returns. Each waiting Send is announced on the returned channel.
+func (f *FakeMail) Block() <-chan mail.Message {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.gate, f.held = make(chan struct{}), make(chan mail.Message, 100)
+	return f.held
+}
+
+// Unblock releases the waiting Sends and stops holding later ones.
+func (f *FakeMail) Unblock() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.gate != nil {
+		close(f.gate)
+		f.gate = nil
+	}
 }
 
 // Fail makes every later Send return err without recording; nil restores delivery.
