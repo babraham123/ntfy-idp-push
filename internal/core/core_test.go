@@ -1135,3 +1135,55 @@ func TestEnrollmentThroughCore(t *testing.T) {
 		t.Fatalf("default name: %+v %v", res, err)
 	}
 }
+
+// The login eligibility rule, as every entry point applies it: preauth, the auth call before a
+// push, and the approval of a push already on the phone when the state changed meanwhile.
+func TestLoginEligibility(t *testing.T) {
+	ctx := context.Background()
+	for _, c := range []struct {
+		name   string
+		block  func(t *testing.T, h *testutil.Harness, dev testutil.Enrolled)
+		msg    string
+		assert int
+	}{
+		{"user disabled", func(t *testing.T, h *testutil.Harness, dev testutil.Enrolled) {
+			if err := h.Svc.SetUserDisabled(ctx, "alice", true); err != nil {
+				t.Fatal(err)
+			}
+		}, "user disabled", 410},
+		{"device revoked", func(t *testing.T, h *testutil.Harness, dev testutil.Enrolled) {
+			if err := h.Svc.RevokeDevice(ctx, dev.DeviceID, core.Revocation{Actor: "test"}); err != nil {
+				t.Fatal(err)
+			}
+		}, "Unknown device", 410},
+		{"kill switch", func(t *testing.T, h *testutil.Harness, dev testutil.Enrolled) {
+			h.Reload(t, func(c *config.Config) { c.PushDisabled = true })
+		}, "Push authentication is disabled", 410},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := testutil.NewHarness(t, nil)
+			dev := h.Enroll(t, "alice", testutil.NewAuthenticator(t, testutil.PublicURL))
+			duo := h.Duo(testutil.IKey, testutil.SKey)
+
+			// A push already on the phone when the state changes.
+			pending := authCall(h, "alice", dev.DeviceID)
+			m := h.Ntfy.NextPublish(t)
+			c.block(t, h, dev)
+			if r := wait(t, pending); r.Response.Result != "deny" {
+				t.Fatalf("pending login: %+v", r.Response)
+			}
+			if st := approve(t, h, dev.Auth, m.Click); st != c.assert {
+				t.Fatalf("approve: %d, want %d", st, c.assert)
+			}
+
+			// Preauth and a new login.
+			if pre, _ := duo.Preauth(authapi.PreauthUsername("alice")); pre.Response.Result == "auth" {
+				t.Fatalf("preauth: %+v", pre.Response)
+			}
+			if r, _ := duo.Auth("push", authapi.AuthUsername("alice"), authapi.AuthDevice(dev.DeviceID)); r.Response.Result != "deny" || r.Response.Status_Msg != c.msg {
+				t.Fatalf("auth: %+v", r.Response)
+			}
+			h.Ntfy.NoPublish(t, 200*time.Millisecond)
+		})
+	}
+}

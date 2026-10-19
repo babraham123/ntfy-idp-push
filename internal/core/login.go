@@ -9,7 +9,6 @@ import (
 	"io"
 	"time"
 
-	"github.com/babraham123/ntfy-idp-push/internal/config"
 	"github.com/babraham123/ntfy-idp-push/internal/model"
 	"github.com/babraham123/ntfy-idp-push/internal/ntfy"
 	"github.com/babraham123/ntfy-idp-push/internal/routes"
@@ -28,27 +27,6 @@ func (s *Service) resolveUser(ctx context.Context, ref UserRef) (*model.User, er
 		u, err = s.store.UserByName(ctx, ref.Username)
 	}
 	return u, notFound(err, ErrUnknownUser)
-}
-
-// eligible determines if a device can receive/approve a push. Nil u/d skips checks for preauth.
-// It serves preauth, the pre-flight before a push, and the re-check after approval; the decision
-// itself is guarded by the store in the deciding statement (see decide).
-func eligible(cfg *config.Config, u *model.User, d *model.Device) error {
-	switch {
-	case cfg.PushDisabled:
-		return ErrPushDisabled
-	case u == nil:
-		return nil
-	case !u.Enabled():
-		return ErrUserDisabled
-	case d == nil:
-		return nil
-	case d.UserID != u.ID:
-		return ErrNotOwner
-	case !d.Active():
-		return ErrDeviceRevoked
-	}
-	return nil
 }
 
 // activeDevices lists u's active devices (MRU first).
@@ -250,35 +228,6 @@ func (s *Service) pushAllowed(username string) bool {
 		s.pushes[username] = l
 	}
 	return l.Allow()
-}
-
-// checkEligible re-verifies push validity, reporting reasons for rejection.
-func (s *Service) checkEligible(ctx context.Context, deviceID string) error {
-	d, err := s.store.Device(ctx, deviceID)
-	if err != nil {
-		return notFound(err, ErrDeviceRevoked)
-	}
-	u, err := s.store.UserByID(ctx, d.UserID)
-	if err != nil {
-		return notFound(err, ErrDeviceRevoked)
-	}
-	return eligible(s.Config(), u, d)
-}
-
-// allow decides a pending challenge as allowed if its login is still eligible. The kill switch is
-// checked here; the device and user conditions are checked by the store as it decides.
-func (s *Service) allow(ctx context.Context, c *model.Challenge) error {
-	if s.Config().PushDisabled {
-		return ErrPushDisabled
-	}
-	return s.decide(ctx, c.ID, model.StateAllow)
-}
-
-// devicePasskeys returns the target device and its passkeys, which are the only ones allowed to
-// approve c.
-func (s *Service) devicePasskeys(ctx context.Context, c *model.Challenge) (*model.Device, []model.Passkey, error) {
-	d, pks, err := s.store.DevicePasskeys(ctx, c.DeviceID)
-	return d, pks, notFound(err, ErrDeviceRevoked)
 }
 
 // AssertionOptions restricts navigator.credentials.get() options to the passkeys of the push's

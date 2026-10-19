@@ -146,10 +146,14 @@ func (s *Store) DeleteUser(ctx context.Context, userID string) error {
 
 const deviceCols = `d.id, d.user_id, u.username, d.name, d.ntfy_topic, d.verified_at, d.created_at, d.last_used_at, d.revoked_at`
 
-// Device states over a devices row aliased d, matching model.Device.Active and Pending.
+// Device states over a devices row aliased d, matching model.Device.Active and Pending, and the
+// user's state over a users row aliased u, matching model.User.Enabled. loginEligible is both: the
+// SQL half of core's login eligibility rule, which the deciding statement checks atomically.
 const (
 	activeDevice  = `d.verified_at IS NOT NULL AND d.revoked_at IS NULL`
 	pendingDevice = `d.verified_at IS NULL AND d.revoked_at IS NULL`
+	userEnabled   = `u.disabled_at IS NULL`
+	loginEligible = activeDevice + ` AND ` + userEnabled
 )
 
 func (s *Store) queryDevices(ctx context.Context, where string, args ...any) ([]model.Device, error) {
@@ -366,7 +370,7 @@ func (s *Store) DecideChallenge(ctx context.Context, id string, state model.Chal
 		cond, args = ``, args[:3]
 	case model.StateAllow:
 		cond += ` AND EXISTS (SELECT 1 FROM devices d JOIN users u ON u.id = d.user_id WHERE d.id = challenges.device_id
-			AND ` + activeDevice + ` AND u.disabled_at IS NULL)`
+			AND ` + loginEligible + `)`
 	}
 	res, err := s.db.ExecContext(ctx, `UPDATE challenges SET state = ?, decided_at = ? WHERE id = ? AND state = 'pending'`+cond, args...)
 	if err != nil {
@@ -387,7 +391,7 @@ func (s *Store) DecideChallenge(ctx context.Context, id string, state model.Chal
 func (s *Store) allowRefusal(ctx context.Context, id string, now time.Time) (Refusal, error) {
 	var pending bool
 	var active, enabled sql.NullBool
-	err := s.db.QueryRowContext(ctx, `SELECT c.state = 'pending' AND c.expires_at > ?, `+activeDevice+`, u.disabled_at IS NULL
+	err := s.db.QueryRowContext(ctx, `SELECT c.state = 'pending' AND c.expires_at > ?, `+activeDevice+`, `+userEnabled+`
 		FROM challenges c LEFT JOIN devices d ON d.id = c.device_id LEFT JOIN users u ON u.id = d.user_id
 		WHERE c.id = ?`, unix(now), id).Scan(&pending, &active, &enabled)
 	switch {
