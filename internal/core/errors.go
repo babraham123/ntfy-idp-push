@@ -21,6 +21,8 @@ var (
 	ErrBadToken           = errors.New("invalid deny token")
 	ErrEnrollmentRequired = errors.New("enrollment required")
 	ErrTooManyPushes      = errors.New("too many sign-in requests; wait before trying again")
+	ErrNotInDirectory     = errors.New("user is not in the directory")
+	ErrNoEmail            = errors.New("user has no email address")
 
 	// Gone: something that was valid once no longer is.
 	ErrGone              = errors.New("challenge already decided or expired")
@@ -53,7 +55,7 @@ const (
 )
 
 var kinds = map[Kind][]error{
-	Refused:  {ErrUserDisabled, ErrPushDisabled, ErrDeviceRevoked, ErrNotOwner, ErrForeignGrants, ErrIdentityChanged, ErrPasskeyPolicy, ErrPasskeyRejected, ErrBadToken, ErrEnrollmentRequired, ErrTooManyPushes},
+	Refused:  {ErrUserDisabled, ErrPushDisabled, ErrDeviceRevoked, ErrNotOwner, ErrForeignGrants, ErrIdentityChanged, ErrPasskeyPolicy, ErrPasskeyRejected, ErrBadToken, ErrEnrollmentRequired, ErrTooManyPushes, ErrNotInDirectory, ErrNoEmail},
 	Gone:     {ErrGone, ErrInvalidCode, ErrEnrollmentExpired, ErrResultExpired, ErrSetupLinkUsed, ErrSetupDone},
 	NotFound: {ErrUnknownUser, ErrUnknownDevice},
 	Invalid:  {ErrInvalidName, ErrMalformed},

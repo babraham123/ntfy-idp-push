@@ -12,7 +12,6 @@ import (
 // credential (an enrollment code, result token, verify token, deny token or passkey).
 const (
 	Enroll    = "/enroll"
-	Provision = "/provision"
 	Devices   = "/devices"
 	Token     = "/token"
 	Challenge = "/challenge"

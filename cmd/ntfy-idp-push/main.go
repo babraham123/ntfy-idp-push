@@ -29,11 +29,14 @@ Commands:
   serve                                   run the server
   keygen [--rotate]                       print new Duo integration/secret keys, or rotate the secret key in the config file
   user list
-  user provision <username>               create the ntfy account and apply enroll-access (no push device)
+  user provision <username>               create the ntfy account of a directory user, apply enroll-access
+                                          and send the welcome email if it was never sent (no push device)
+  user welcome <username>                 set a new ntfy password and email it in a new welcome email
   user disable|enable <username>
   user delete <username> [--keep-ntfy-user]
   user approve <challenge-id>             approve a pending login without a passkey (break-glass)
-  user reset-ntfy <username> [--force]    recreate the ntfy user, invalidating all of its tokens
+  user reset-ntfy <username> [--force]    recreate the ntfy user, invalidating all of its tokens, and send
+                                          a new welcome email
   device list <username>
   device revoke <device-id> [--reset-ntfy-user] [--force]
   enroll-link <username>                  print a single-use enrollment link, valid 5 minutes
@@ -214,7 +217,7 @@ func keygen(cfgPath string, args []string, out io.Writer) error {
 func userCmd(ctx context.Context, svc *core.Service, args []string, out io.Writer) error {
 	flags, pos := splitArgs(args)
 	if len(pos) == 0 {
-		return errors.New("usage: user list|provision|disable|enable|delete|approve|reset-ntfy [args]")
+		return errors.New("usage: user list|provision|welcome|disable|enable|delete|approve|reset-ntfy [args]")
 	}
 	fs := flag.NewFlagSet("user", flag.ContinueOnError)
 	keepNtfy := fs.Bool("keep-ntfy-user", false, "keep the ntfy user when deleting")
@@ -229,13 +232,18 @@ func userCmd(ctx context.Context, svc *core.Service, args []string, out io.Write
 			return err
 		}
 		tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(tw, "USERNAME\tID\tDEVICES\tSTATUS")
+		fmt.Fprintln(tw, "USERNAME\tID\tEMAIL\tDEVICES\tSTATUS\tWELCOMED\tSYNCED")
 		for _, u := range users {
 			st := "active"
 			if !u.Enabled() {
 				st = "disabled"
 			}
-			fmt.Fprintf(tw, "%s\t%s\t%d\t%s\n", u.Username, u.ID, u.ActiveDevices, st)
+			email := u.Email
+			if email == "" {
+				email = "-"
+			}
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\t%s\t%s\n", u.Username, u.ID, email, u.ActiveDevices, st,
+				fmtTime(u.WelcomedAt), fmtTime(u.SyncedAt))
 		}
 		return tw.Flush()
 	}
@@ -245,13 +253,21 @@ func userCmd(ctx context.Context, svc *core.Service, args []string, out io.Write
 	arg := pos[1]
 	switch sub {
 	case "provision":
-		u, err := svc.Provision(ctx, arg)
-		if err != nil {
+		u, err := svc.ProvisionFromDirectory(ctx, arg)
+		if u != nil {
+			for _, g := range u.Grants {
+				fmt.Fprintf(out, "%s\t%s\n", g.Topic, g.Permission)
+			}
+		}
+		if err != nil && u != nil {
+			return fmt.Errorf("provisioned, but no welcome email was sent: %w", err)
+		}
+		return err
+	case "welcome":
+		if err := svc.Welcome(ctx, arg); err != nil {
 			return err
 		}
-		for _, g := range u.Grants {
-			fmt.Fprintf(out, "%s\t%s\n", g.Topic, g.Permission)
-		}
+		fmt.Fprintln(out, "welcome email sent with a new ntfy password; older passwords fail")
 		return nil
 	case "disable", "enable":
 		return svc.SetUserDisabled(ctx, arg, sub == "disable")
@@ -263,7 +279,7 @@ func userCmd(ctx context.Context, svc *core.Service, args []string, out io.Write
 		if err := svc.ResetNtfyUser(ctx, arg, *force); err != nil {
 			return err
 		}
-		fmt.Fprintln(out, "ntfy user recreated: every enrolled phone must re-open its ntfy link")
+		fmt.Fprintln(out, "ntfy user recreated: every phone must sign in with the credentials from the new welcome email")
 		return nil
 	}
 	return fmt.Errorf("unknown user command %q", sub)
@@ -297,7 +313,7 @@ func deviceCmd(ctx context.Context, svc *core.Service, args []string, out io.Wri
 			return err
 		}
 		if *reset {
-			fmt.Fprintln(out, "revoked; ntfy user recreated: other enrolled phones must re-open their ntfy link")
+			fmt.Fprintln(out, "revoked; ntfy user recreated: every phone must sign in with the credentials from the new welcome email")
 		}
 		return nil
 	}

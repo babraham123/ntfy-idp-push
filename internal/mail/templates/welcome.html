@@ -1,0 +1,35 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Your ntfy account</title></head>
+<body style="font-family: sans-serif; line-height: 1.5; color: #222;">
+<p>Hi {{.Name}},</p>
+<p>You have an account on the ntfy push notification server at <a href="{{.ServerURL}}">{{.ServerURL}}</a>.</p>
+<table style="border-collapse: collapse;">
+<tr><td style="padding-right: 1em;">Server URL</td><td><code>{{.ServerURL}}</code></td></tr>
+<tr><td style="padding-right: 1em;">Username</td><td><code>{{.Username}}</code></td></tr>
+<tr><td style="padding-right: 1em;">Password</td><td><code>{{.Password}}</code></td></tr>
+</table>
+<p>This is the only time the password is shown. Keep it somewhere safe.</p>
+<ol>
+<li>Install the ntfy app:
+<ul>
+<li>Android: <a href="{{.PlayStoreURL}}">Google Play</a> or <a href="{{.FDroidURL}}">F-Droid</a></li>
+<li>iPhone and iPad: <a href="{{.AppStoreURL}}">App Store</a></li>
+<li>Web app: <a href="{{.ServerURL}}">{{.ServerURL}}</a></li>
+</ul>
+</li>
+<li>Add your account: in ntfy, open <b>Settings</b> &rarr; <b>Manage users</b> &rarr; <b>Add</b>, then enter the server URL, username and password above.</li>
+{{- if .Topics}}
+<li>Subscribe: on the phone with ntfy installed, open each link below.
+<ul>
+{{- range .Topics}}
+<li><a href="{{.URL}}">{{.Topic}}</a></li>
+{{- end}}
+</ul>
+If a link does not open the app, tap + in ntfy, choose &ldquo;Use another server&rdquo;, and enter the server URL and the topic name.
+</li>
+{{- end}}
+</ol>
+<p>Lost the password? Ask an admin to resend this email. The resent email contains a new password and invalidates older passwords.</p>
+</body>
+</html>

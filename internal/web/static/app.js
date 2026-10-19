@@ -90,15 +90,7 @@ if (enrollForm) {
       const done = await postJSON(base + "/finish?token=" + encodeURIComponent(begin.token), attestationJSON(cred));
       enrollForm.hidden = true;
       status("Passkey saved.");
-      document.getElementById("ntfy-link").href = done.ntfy_link;
-      document.getElementById("qr").src = done.qr;
-      document.getElementById("no-code").hidden = done.has_code;
-      if (done.code_expires) {
-        const expiry = document.getElementById("code-expiry");
-        expiry.querySelector("time").textContent = new Date(done.code_expires * 1000).toLocaleTimeString();
-        expiry.hidden = false;
-      }
-      document.getElementById("done").hidden = false;
+      showResult(done);
       wireResult(done.result_token);
     } catch (err) {
       status("Enrollment failed: " + err.message);
@@ -107,20 +99,30 @@ if (enrollForm) {
   });
 }
 
-// wireResult enables the result page's manual sign-in and resend buttons for the enrolled device.
-function wireResult(token) {
-  document.getElementById("password-btn").addEventListener("click", async (e) => {
-    try {
-      const out = await postJSON("/token/password", { token });
-      document.getElementById("password-user").textContent = out.username;
-      document.getElementById("password-value").textContent = out.password;
-      document.getElementById("password").hidden = false;
-      e.target.disabled = true;
-      status("Add this user in ntfy → Settings → Manage users. It replaced your previous ntfy password.");
-    } catch (err) {
-      status(err.message);
-    }
+// showResult fills in the result section the page rendered for this browser's platform.
+function showResult(done) {
+  const fill = (cls, set) => document.querySelectorAll("." + cls).forEach(set);
+  fill("ntfy-link", (el) => { el.href = done.ntfy_link; });
+  fill("ntfy-server", (el) => { el.textContent = done.server; });
+  fill("ntfy-topic", (el) => { el.textContent = done.topic; });
+  const qr = document.getElementById("qr");
+  if (qr) qr.src = done.qr;
+  const copyable = { server: done.server, topic: done.topic };
+  document.querySelectorAll("[data-copy]").forEach((b) => {
+    b.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(copyable[b.dataset.copy]);
+        status("Copied.");
+      } catch (err) {
+        status("Copy failed: " + err.message);
+      }
+    });
   });
+  document.getElementById("done").hidden = false;
+}
+
+// wireResult enables the result page's resend button for the enrolled device.
+function wireResult(token) {
   document.getElementById("resend-btn").addEventListener("click", async () => {
     try {
       await postJSON("/token/resend", { token });

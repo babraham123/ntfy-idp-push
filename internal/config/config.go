@@ -75,6 +75,37 @@ type Config struct {
 
 	Database string `yaml:"database"`
 
+	// The directory lists the people the shim keeps ntfy accounts for; it is polled every
+	// DirectorySyncInterval.
+	DirectoryType                     string   `yaml:"directory-type"`
+	DirectorySyncInterval             Duration `yaml:"directory-sync-interval"`
+	DirectoryFile                     string   `yaml:"directory-file"`
+	DirectoryGroup                    string   `yaml:"directory-group"`
+	DirectoryLDAPAddress              string   `yaml:"directory-ldap-address"`
+	DirectoryLDAPStartTLS             bool     `yaml:"directory-ldap-start-tls"`
+	DirectoryLDAPTLSSkipVerify        bool     `yaml:"directory-ldap-tls-skip-verify"`
+	DirectoryLDAPCAFile               string   `yaml:"directory-ldap-ca-file"`
+	DirectoryLDAPBaseDN               string   `yaml:"directory-ldap-base-dn"`
+	DirectoryLDAPUser                 string   `yaml:"directory-ldap-user"`
+	DirectoryLDAPPassword             string   `yaml:"directory-ldap-password"`
+	DirectoryLDAPPasswordFile         string   `yaml:"directory-ldap-password-file"`
+	DirectoryLDAPUsersFilter          string   `yaml:"directory-ldap-users-filter"`
+	DirectoryLDAPAttributeUsername    string   `yaml:"directory-ldap-attribute-username"`
+	DirectoryLDAPAttributeMail        string   `yaml:"directory-ldap-attribute-mail"`
+	DirectoryLDAPAttributeDisplayName string   `yaml:"directory-ldap-attribute-display-name"`
+	DirectoryLDAPAttributeMemberOf    string   `yaml:"directory-ldap-attribute-member-of"`
+	DirectoryLDAPGroupDN              string   `yaml:"directory-ldap-group-dn"`
+
+	// The SMTP relay delivers the welcome email with each user's ntfy credentials.
+	SMTPHost         string `yaml:"smtp-host"`
+	SMTPPort         int    `yaml:"smtp-port"`
+	SMTPUser         string `yaml:"smtp-user"`
+	SMTPPassword     string `yaml:"smtp-password"`
+	SMTPPasswordFile string `yaml:"smtp-password-file"`
+	SMTPStartTLS     bool   `yaml:"smtp-starttls"`
+	MailFrom         string `yaml:"mail-from"`
+	MailReplyTo      string `yaml:"mail-reply-to"`
+
 	// Derived by Validate.
 	Access         []AccessRule `yaml:"-"`
 	TrustedNets    []*net.IPNet `yaml:"-"`
@@ -95,6 +126,16 @@ func defaults() *Config {
 		// opting out is a deliberate loosening.
 		WebAuthnRequireAttestation: true,
 		Database:                   "/var/lib/ntfy-idp-push/db.sqlite",
+
+		DirectorySyncInterval:             Duration(15 * time.Minute),
+		DirectoryLDAPUsersFilter:          "(objectClass=person)",
+		DirectoryLDAPAttributeUsername:    "uid",
+		DirectoryLDAPAttributeMail:        "mail",
+		DirectoryLDAPAttributeDisplayName: "displayName",
+		DirectoryLDAPAttributeMemberOf:    "memberOf",
+		SMTPPort:                          587,
+		// Credentials and the welcome email's passwords must not cross the network in the clear.
+		SMTPStartTLS: true,
 	}
 }
 
@@ -146,6 +187,12 @@ func applyEnv(c *Config, lookup func(string) (string, bool)) error {
 		switch f.Interface().(type) {
 		case string:
 			f.SetString(raw)
+		case int:
+			n, err := strconv.Atoi(raw)
+			if err != nil {
+				return fmt.Errorf("%s: %w", EnvName(key), err)
+			}
+			f.SetInt(int64(n))
 		case bool:
 			b, err := strconv.ParseBool(raw)
 			if err != nil {
@@ -186,6 +233,15 @@ func (c *Config) Validate() error {
 	req("ntfy-admin-token", c.NtfyAdminToken)
 	req("ntfy-topic-prefix", c.NtfyTopicPrefix)
 	req("database", c.Database)
+	req("smtp-host", c.SMTPHost)
+	req("mail-from", c.MailFrom)
+	// The source's own settings are checked when it is built at startup.
+	if c.DirectoryType != "ldap" && c.DirectoryType != "file" {
+		errs = append(errs, fmt.Errorf("directory-type must be ldap or file, got %q", c.DirectoryType))
+	}
+	if c.DirectorySyncInterval <= 0 {
+		errs = append(errs, errors.New("directory-sync-interval must be positive"))
+	}
 	if len(c.DuoSecretKey) > 0 && len(c.DuoSecretKey) < 40 {
 		errs = append(errs, errors.New("duo-secret-key must be at least 40 characters"))
 	}
@@ -271,6 +327,8 @@ func (c *Config) secretFiles() []secretFile {
 		{"duo-secret-key", &c.DuoSecretKey, &c.DuoSecretKeyFile},
 		{"duo-secret-key-previous", &c.DuoSecretKeyPrevious, &c.DuoSecretKeyPreviousFile},
 		{"ntfy-admin-token", &c.NtfyAdminToken, &c.NtfyAdminTokenFile},
+		{"directory-ldap-password", &c.DirectoryLDAPPassword, &c.DirectoryLDAPPasswordFile},
+		{"smtp-password", &c.SMTPPassword, &c.SMTPPasswordFile},
 	}
 }
 
@@ -297,8 +355,9 @@ func (c *Config) readSecretFiles() error {
 }
 
 // RestartOnly lists the keys of next that differ from c and take effect only on a restart: the
-// listener and database are bound at startup, and the WebAuthn relying party is built from
-// public-url and the webauthn-* keys. Everything else applies to the next request after a reload.
+// listener and database are bound at startup, the WebAuthn relying party is built from public-url
+// and the webauthn-* keys, and the directory source and mail sender from the directory-*, smtp-*
+// and mail-* keys. Everything else applies to the next request after a reload.
 func (c *Config) RestartOnly(next *Config) []string {
 	var keys []string
 	diff := func(key string, changed bool) {
@@ -313,6 +372,22 @@ func (c *Config) RestartOnly(next *Config) []string {
 	diff("webauthn-require-attestation", c.WebAuthnRequireAttestation != next.WebAuthnRequireAttestation)
 	// Existing devices keep topics under the old prefix, which the shim would then treat as foreign.
 	diff("ntfy-topic-prefix", c.NtfyTopicPrefix != next.NtfyTopicPrefix)
+	return append(keys, changedKeys(c, next, "directory-", "smtp-", "mail-")...)
+}
+
+// changedKeys lists the keys with one of prefixes whose values differ between a and b, in field
+// order.
+func changedKeys(a, b *Config, prefixes ...string) []string {
+	va, vb := reflect.ValueOf(a).Elem(), reflect.ValueOf(b).Elem()
+	var keys []string
+	for i := 0; i < va.NumField(); i++ {
+		key := va.Type().Field(i).Tag.Get("yaml")
+		for _, p := range prefixes {
+			if strings.HasPrefix(key, p) && !reflect.DeepEqual(va.Field(i).Interface(), vb.Field(i).Interface()) {
+				keys = append(keys, key)
+			}
+		}
+	}
 	return keys
 }
 

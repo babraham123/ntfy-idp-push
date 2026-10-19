@@ -11,7 +11,7 @@ browser ──1FA──▶ IdP ──signed Duo API──▶ proxy ──▶ ntf
 
 The shim sits behind the reverse proxy that fronts the IdP: the proxy terminates TLS for `duo-hostname`, forwards plain HTTP, and signs users into the self-service pages with the IdP's forward-auth.
 
-The server also provisions ntfy accounts (`/provision`, `user provision`) without a push device, serving as a self-service ntfy onboarding tool behind an IdP.
+A user directory (LDAP, or Authelia's file user database) controls who has an ntfy account. The shim polls the directory, creates and disables accounts to match, and emails each new user their ntfy credentials (see Provisioning).
 
 ## Principles
 
@@ -26,24 +26,27 @@ The server also provisions ntfy accounts (`/provision`, `user provision`) withou
 
 ```
 cmd/ntfy-idp-push/   CLI: serve, keygen, user, device, enroll-link, audit, healthcheck
-internal/app/        assembles store, core, handlers, server timeouts, purge and reload loops; serve and the harness both build from it
+internal/app/        assembles store, directory source, mail sender, core, handlers, server timeouts, purge, sync and reload loops; serve and the harness both build from it
 internal/config/     YAML + NTFY_IDP_PUSH_* env + <key>-file secrets; validation; enroll-access rules; which keys need a restart
 internal/duoapi/     Duo Auth API: signature verification (v2/v5), replay guard; renames core's results into Duo's vocabulary
-internal/core/       the running configuration; provisioning, enrollment, login (eligibility, challenges), revocation, purge, startup checks; the failure vocabulary adapters map
+internal/core/       the running configuration; directory sync and welcome emails, provisioning, enrollment, login (eligibility, challenges), revocation, purge, startup checks; the failure vocabulary adapters map
+internal/directory/  the user directory: LDAP (paged search, group filter) or Authelia's users_database.yml
+internal/mail/       the welcome email (text + HTML templates) and SMTP delivery (STARTTLS or implicit TLS)
 internal/model/      the records core reasons about and store persists (user, device, passkey, challenge, enrollment code)
 internal/routes/     the public URL scheme: path prefixes and the links core pushes, built and parsed in one place
 internal/webauthn/   passkey registration/assertion over stored passkeys (wraps go-webauthn); synced-passkey (BE flag) policy
-internal/web/        enrollment, approval, provisioning and device pages; identity from the proxy's header
-internal/ntfy/       ntfy admin, publish and token client
+internal/web/        enrollment, approval and device pages; identity from the proxy's header
+internal/ntfy/       ntfy admin and publish client
 internal/store/      SQLite (modernc.org/sqlite, pure Go), migrations
 internal/token/      random secrets and the hashes stored in their place
-internal/testutil/   integration harness over app: fake ntfy, software authenticator, test client as the proxy
+internal/testutil/   integration harness over app: fake ntfy, fake directory, recording mail sender, software authenticator, test client as the proxy
 ```
 
 ## Data model
 
 ```
-users         (id uuid, username UNIQUE, ntfy_grants_json, disabled_at, created_at)
+users         (id uuid, username UNIQUE, ntfy_grants_json, disabled_at, disabled_by_sync, created_at,
+               ntfy_reset_pending, email, display_name, synced_at, welcomed_at)
 devices       (id uuid, user_id, name, ntfy_topic UNIQUE, verify_token_hash, verified_at, created_at,
                last_used_at, revoked_at, result_token_hash UNIQUE)
 passkeys      (cred_id, device_id, credential_json, aaguid, sign_count, created_at)
@@ -109,29 +112,47 @@ Disabling a user or enabling the `push-disabled: true` kill switch causes preaut
 4. `POST /challenge/<id>/deny` with the deny token yields `deny`; "This wasn't me" yields `fraud`.
 5. The blocked `auth` wakes and responds to the IdP. The push is then deleted from the device (ntfy `DELETE /<topic>/<sequence_id>`).
 
-Challenges are single-use; decisions or expiries return 410 for `/challenge/<id>`. State-changing browser POSTs require an `Origin` matching the shim and are bounded to 64 KiB. The ntfy app's `http` action omits `Origin`, so `/challenge/<id>/deny` relies on the deny token for authorization. Pages enforce `Referrer-Policy: same-origin`, not `no-referrer`: with `no-referrer`, browsers send `Origin: null` on form posts and the Activate and Revoke forms would be refused. HTML pages use `Cache-Control: no-store` to protect ntfy sign-in codes and passwords, and a CSP that allows only same-origin scripts, forms and bases. Every response carries `X-Frame-Options: DENY` and `X-Robots-Tag: noindex` so a leaked approve or enrollment link is never indexed. `/static/` serves only the embedded files by name (no listing), with an ETag and a one-hour cache.
+Challenges are single-use; decisions or expiries return 410 for `/challenge/<id>`. State-changing browser POSTs require an `Origin` matching the shim and are bounded to 64 KiB. The ntfy app's `http` action omits `Origin`, so `/challenge/<id>/deny` relies on the deny token for authorization. Pages enforce `Referrer-Policy: same-origin`, not `no-referrer`: with `no-referrer`, browsers send `Origin: null` on form posts and the Activate and Revoke forms would be refused. HTML pages use `Cache-Control: no-store`, as they carry per-user content and token-bearing links, and a CSP that allows only same-origin scripts, forms and bases. Every response carries `X-Frame-Options: DENY` and `X-Robots-Tag: noindex` so a leaked approve or enrollment link is never indexed. `/static/` serves only the embedded files by name (no listing), with an ETag and a one-hour cache.
 
 Unauthenticated routes (`/token/`, `/challenge/`) are rate limited per client address (IPv6 per /64), 20 burst and 1/s sustained, with the table of clients capped. Duo API rejections answer with Duo's error code only, the reason going to a sampled log line.
+
+## Provisioning
+
+The directory manages accounts. `directory-type: ldap` binds as `directory-ldap-user` and runs a paged search of `directory-ldap-base-dn` with `directory-ldap-users-filter`, reading the username, mail, display name and member-of attributes; `directory-ldap-group-dn` limits the sync to that group. `directory-type: file` reads Authelia's `users_database.yml` on every round (`directory-group` keeps one group; `disabled: true` marks a disabled person). The sync drops entries with invalid ntfy usernames. A username listed twice fails the whole list.
+
+`Sync` runs once at startup, after the startup checks, and then every `directory-sync-interval` (default 15 minutes). Each round:
+
+1. Lists the directory. An error or an empty list skips the round: nothing changes, the log records a warning, and the audit log records `sync_skipped`. An empty directory is usually broken, and acting on it locks everyone out.
+2. For each person the shim does not know: provisions the account and sends the welcome email. A person the directory marks disabled is not created.
+3. For each known person: records email, display name and `synced_at`. Disables the user if the directory marks them disabled. Enables a user disabled by a previous sync once they appear and are not disabled. Sends the welcome email if one is owed (`welcomed_at` is empty).
+4. Disables every enabled user absent from the directory.
+5. Audits `sync` with the counts created, welcomed, disabled, enabled, updated and failed.
+
+Users are never deleted, so a person who comes back keeps their phones. A disable made with `user disable` is the admin's: the sync never lifts it. A failure for one user (ntfy down, a refused username, mail down) is logged and does not stop the round.
+
+`Provision(username)` creates the ntfy user (random password nobody knows, role `user`), applies `enroll-access`, and records grants. It is idempotent, creates no push-related data, and lets preauth return `enroll`. Enrollment calls it for the signed-in user. `user provision <u>` provisions only a person the directory lists and not disabled, records their profile, and sends the welcome if it was never sent.
+
+### Welcome email
+
+`Welcome(username)` sets a new random ntfy password and emails it with the ntfy server URL, the username, app links (Google Play, F-Droid, App Store, the web app), the "Manage users" steps that sign the app in, and one `ntfy://` subscribe link per `default-topics` entry. The password exists only in that email. Older passwords fail, but apps already signed in keep their tokens. On success, `welcomed_at` is set and `welcome_sent` audited. On any failure (no email, disabled user, SMTP error), `welcome_failed` is audited and `welcomed_at` cleared, so the next sync round retries. `user welcome <u>` resends it.
+
+Every path that leaves a user without a known password ends in a welcome: a new account, and every ntfy user reset (`user reset-ntfy`, `device revoke --reset-ntfy-user`, revoking from `/devices` with "sign out all ntfy apps", and a reset the purge job finishes). The reset stands even if that welcome fails; the failure is logged and audited, and the next round retries.
 
 ## Enrollment
 
 Entry points: `enroll-portal-url` (via preauth) to `/enroll` behind the proxy's forward-auth; or `enroll-link <user>`, generating a single-use `/token/<code>` link (valid 5 minutes) to bootstrap users lacking a second factor. Both render the same page; it posts to `/enroll/begin` and `/enroll/finish` (identity routes) or `/token/begin` and `/token/finish` (code routes). A ceremony begun on one family cannot be finished on the other.
 
 1. **Passkey**: `navigator.credentials.create()` requires a platform authenticator, user verification, and direct attestation. Synced passkeys (BE flag) are rejected unless `webauthn-allow-synced`; a passkey with no attestation statement (`fmt: none`) is rejected unless `webauthn-require-attestation: false`.
-2. **ntfy account**: Provisioned as described below.
+2. **ntfy account**: Provisioned as described in Provisioning.
 3. **Topic grant**: `PUT /v1/users/access` grants read-only access to the device's topic.
-4. **Link**: Generates an ntfy enrollment code (ntfy#597, `POST /v1/users/token/enroll`) formatted as `ntfy://<host>/<topic>?user=<u>&code=<c>` (tap link and QR). The UI also offers "Set an ntfy password" and "Resend setup push".
+4. **Link**: The result page hands out the device topic as `ntfy://<host>/<topic>?user=<u>` (plus `secure=false` for a plain-HTTP ntfy), laid out by User-Agent. Android gets the tap link, with the server URL and topic to add by hand if the app does not subscribe. iOS gets the server URL and topic with copy buttons and the manual steps (+, "Use another server", Subscribe), because the ntfy iOS app does not open `ntfy://` links. Desktops get a QR of the link plus both. The link carries no credentials: the phone's ntfy app must already be signed in with the credentials from the welcome email. The page also offers "Resend setup push".
 5. **Test push**: Sends a "Finish setup" action to `/token/verify/<device>` to activate the device. Unverified devices are hidden from preauth and purged after 24 hours.
 
 Execution order: verify attestation (read-only), claim the code and insert the unverified device/passkey in one transaction, then execute remote steps. Failed remote steps rollback the device and release the code for retry. Crashes leave unverified devices for the 24-hour purge.
 
-### Provisioning
+### Identity
 
-`Provision(username)` handles `user provision`, `/provision`, and enrollment: it creates the ntfy user (random password, role `user`), applies `enroll-access`, and records grants. It is idempotent, creates no push-related data, and lets preauth return `enroll`.
-
-`/provision` mints an ntfy enrollment code and renders based on User-Agent: phones get app install links and one deep link per `default-topics` entry; desktops get a QR and web-app links to `<ntfy-base-url>/account/token/redeem#code=…&subscribe=…`. Reloading supersedes the previous code.
-
-Identity for `/enroll`, `/provision`, `/devices`: the proxy's forward-auth step signs the user in and sets `identity-header` (default `Remote-User`); the shim believes it only when the request arrives from `trusted-proxies`, and answers 401 otherwise. There is no session, cookie or login page in the shim. The header is the whole login, so the proxy must overwrite or strip a client-sent copy on every route and the shim must be reachable only through it. `/token/*`, `/challenge/*` and the Duo API routes never read the header; their code, token, passkey or signature is the whole credential, which is what lets the proxy bypass them.
+Identity for `/enroll` and `/devices`: the proxy's forward-auth step signs the user in and sets `identity-header` (default `Remote-User`); the shim believes it only when the request arrives from `trusted-proxies`, and answers 401 otherwise. There is no session, cookie or login page in the shim. The header is the whole login, so the proxy must overwrite or strip a client-sent copy on every route and the shim must be reachable only through it. `/token/*`, `/challenge/*` and the Duo API routes never read the header; their code, token, passkey or signature is the whole credential, which is what lets the proxy bypass them.
 IdPs must require a second factor on the identity routes to prevent attackers from enrolling devices with just a stolen password. Users lacking a second factor enroll via: an existing IdP second-factor (e.g., TOTP), an admin `enroll-link`, or authentik's IdP-driven enrollment (bypassing the portal session).
 
 ### IdP-driven enrollment
@@ -143,9 +164,10 @@ authentik calls `enroll`, displays `activation_barcode` (`/token/qr?value=<activ
 | Action | CLI | Effect |
 |---|---|---|
 | Revoke a phone | `device revoke <id>`, or `/devices` | locally first: `revoked_at`, passkeys deleted, pending challenges denied; then the topic grant is removed and the row deleted |
-| …and cut its ntfy token | `device revoke <id> --reset-ntfy-user` | ntfy cannot revoke another user's tokens, so the user is deleted and recreated with its grants; every phone must reopen its ntfy link. Refused if the ntfy user has grants the shim did not make, unless `--force` |
+| …and cut its ntfy token | `device revoke <id> --reset-ntfy-user` | ntfy cannot revoke another user's tokens, so the user is deleted, recreated with its grants, and sent a new welcome email. Every phone must sign in with the credentials from the new welcome email. Refused if the ntfy user has grants the shim did not make, unless `--force` |
 | Reset the ntfy user | `user reset-ntfy <u> [--force]` | the same reset with no device revoked |
-| Disable / enable | `user disable|enable <u>` | preauth/auth deny; nothing deleted |
+| New ntfy password | `user welcome <u>` | the password is replaced and emailed; tokens of signed-in apps stay valid |
+| Disable / enable | `user disable|enable <u>`, or the directory | preauth/auth deny; nothing deleted. The sync disables users the directory drops or marks disabled and re-enables them when listed again, but never lifts an admin's disable |
 | Delete | `user delete <u> [--keep-ntfy-user]` | all devices revoked, ntfy user deleted unless kept |
 | Kill switch | `push-disabled: true` + `SIGHUP` | every preauth/auth denies |
 | Rotate the IdP secret | `keygen --rotate` | new key written; the old one accepted for `duo-key-grace` |
@@ -158,7 +180,7 @@ All actions are audited (`audit`).
 
 ## Configuration
 
-See [`deploy/server.yml`](deploy/server.yml). Configuration mirrors ntfy's `server.yml`. Set keys via `NTFY_IDP_PUSH_<KEY>`. Secrets (`duo-secret-key`, `duo-secret-key-previous`, `ntfy-admin-token`) support `<key>-file` or `NTFY_IDP_PUSH_<KEY>_FILE`. `SIGHUP` re-reads the configuration and applies it to the next request: keys, kill switch, `enroll-access`, `push-timeout`, `trusted-proxies`, `identity-header`, and the ntfy connection (`ntfy-base-url`, `ntfy-admin-token`, so a rotated token file takes effect without a restart). Keys bound at startup (`listen-http`, `database`, `public-url`, `webauthn-*`, `ntfy-topic-prefix`) refuse the whole reload: the running configuration stays and the log names the keys.
+See [`deploy/server.yml`](deploy/server.yml). Configuration mirrors ntfy's `server.yml`. Set keys via `NTFY_IDP_PUSH_<KEY>`. Secrets (`duo-secret-key`, `duo-secret-key-previous`, `ntfy-admin-token`, `directory-ldap-password`, `smtp-password`) support `<key>-file` or `NTFY_IDP_PUSH_<KEY>_FILE`. `directory-type`, `smtp-host` and `mail-from` are required; the directory source and the mail sender validate the rest of their keys at startup, without connecting. `SIGHUP` re-reads the configuration and applies it to the next request: keys, kill switch, `enroll-access`, `push-timeout`, `trusted-proxies`, `identity-header`, and the ntfy connection (`ntfy-base-url`, `ntfy-admin-token`, so a rotated token file takes effect without a restart). Keys bound at startup (`listen-http`, `database`, `public-url`, `webauthn-*`, `ntfy-topic-prefix`, and the `directory-*`, `smtp-*` and `mail-*` keys the directory source and mail sender are built from, secrets included) refuse the whole reload: the running configuration stays and the log names the keys.
 
 ### Failures
 
@@ -170,7 +192,7 @@ Startup checks (fail closed): Valid ntfy admin token; `GET /v1/users` succeeds u
 
 ## Reverse proxy
 
-The shim serves plain HTTP (`listen-http`) and has no TLS listener: it cannot be used without the proxy anyway, since the proxy is what signs users in. The proxy holds the certificate for `duo-hostname`, from any publicly trusted issuer, and must preserve `Host`, which Duo clients sign. The IdP's Duo client must not pin Duo's CA bundle (Authelia's does until it carries the change that skips pinning for non-Duo hostnames). Routes split into two families so the proxy's access rules can be written by prefix: identity routes (`/enroll`, `/provision`, `/devices`) behind forward-auth, everything else (`/token/`, `/challenge/`, `/auth/v2/`, `/static/`) bypassed.
+The shim serves plain HTTP (`listen-http`) and has no TLS listener: it cannot be used without the proxy anyway, since the proxy is what signs users in. The proxy holds the certificate for `duo-hostname`, from any publicly trusted issuer, and must preserve `Host`, which Duo clients sign. The IdP's Duo client must not pin Duo's CA bundle (Authelia's does until it carries the change that skips pinning for non-Duo hostnames). Routes split into two families so the proxy's access rules can be written by prefix: identity routes (`/enroll`, `/devices`) behind forward-auth, everything else (`/token/`, `/challenge/`, `/auth/v2/`, `/static/`) bypassed.
 
 ## ntfy prerequisites
 
@@ -180,14 +202,9 @@ auth-users: ["idp-push:<bcrypt>:admin"]
 auth-tokens: ["idp-push:tk_…:ntfy-idp-push"]
 ```
 
-Optional upstream ntfy features utilized (degrades gracefully without):
-
-- ntfy#597: `POST /v1/users/token/enroll`, `POST /v1/account/token/redeem`, and `/account/token/redeem`. Without these, phones sign in using a password set from the result page.
-- ntfy-android / ntfy-ios deep link handling for `user=` and `code=`: redeems if signed out, subscribes if signed in as that user, and refuses if signed in as someone else.
-
 ## Testing
 
-Integration tests execute `duo_api_golang` (v2 form and v5 JSON signing) against the handler `app` assembles for `serve`, using a fake ntfy (v2.30 error contract) and a software WebAuthn authenticator; the test client connects from the configured trusted proxy address and sets the identity header as forward-auth would. They cover enrollment, push, joining a pending push, the per-user push cap, passkey approval, deny, fraud, timeout, revocation recovery, provisioning, proxy identity (untrusted peers, forged headers on bypassed routes), config reload (token rotation, refused restart-only keys), the CLI, and config loading. Tests read state through core; the harness's store handle only fabricates what another process would have left. Forms simulate browser submissions, matching referrer policy Origins.
+Integration tests execute `duo_api_golang` (v2 form and v5 JSON signing) against the handler `app` assembles for `serve`, using a fake ntfy (v2.30 error contract), a fake directory, a mail sender that records what it sends, and a software WebAuthn authenticator; the test client connects from the configured trusted proxy address and sets the identity header as forward-auth would. They cover directory sync (new users provisioned and welcomed once, absent and disabled users disabled and re-enabled, a broken or empty directory skipping the round, failed welcomes retried), welcome resends and the welcome after a reset, enrollment (including the per-platform result page), push, joining a pending push, the per-user push cap, passkey approval, deny, fraud, timeout, revocation recovery, provisioning, proxy identity (untrusted peers, forged headers on bypassed routes), config reload (token rotation, refused restart-only keys), the CLI, and config loading. Tests read state through core; the harness's store handle only fabricates what another process would have left. Forms simulate browser submissions, matching referrer policy Origins.
 Live tests for `internal/ntfy` require a real ntfy server via `NTFY_IDP_PUSH_TEST_NTFY_URL`/`_TOKEN`.
 
 ## Other IdPs

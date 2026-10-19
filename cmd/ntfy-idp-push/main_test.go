@@ -12,10 +12,15 @@ import (
 )
 
 // env points the CLI at a database in a temp dir with a complete configuration and no config
-// file, so commands that do not need ntfy can run.
+// file, so commands that do not need ntfy or the SMTP relay can run. The directory is an Authelia
+// user database listing alice.
 func env(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
+	users := filepath.Join(dir, "users_database.yml")
+	if err := os.WriteFile(users, []byte("users:\n  alice:\n    displayname: Alice\n    email: alice@example.com\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	for k, v := range map[string]string{
 		"NTFY_IDP_PUSH_CONFIG":              "",
 		"NTFY_IDP_PUSH_DUO_HOSTNAME":        "push.test",
@@ -25,6 +30,10 @@ func env(t *testing.T) string {
 		"NTFY_IDP_PUSH_NTFY_ADMIN_TOKEN":    "tk_admin",
 		"NTFY_IDP_PUSH_TRUSTED_PROXIES":     "10.0.0.5",
 		"NTFY_IDP_PUSH_DATABASE":            filepath.Join(dir, "db.sqlite"),
+		"NTFY_IDP_PUSH_DIRECTORY_TYPE":      "file",
+		"NTFY_IDP_PUSH_DIRECTORY_FILE":      users,
+		"NTFY_IDP_PUSH_SMTP_HOST":           "smtp.test",
+		"NTFY_IDP_PUSH_MAIL_FROM":           "push@push.test",
 	} {
 		t.Setenv(k, v)
 	}
@@ -93,5 +102,24 @@ func TestEnrollLinkAndBackup(t *testing.T) {
 	}
 	if _, err := cli(t, "backup", path); err == nil {
 		t.Fatal("backup overwrote an existing file")
+	}
+}
+
+// user provision creates accounts only for people the directory lists; nothing else is touched for
+// a name it does not list, so the refusal needs neither ntfy nor the relay.
+func TestUserProvisionRequiresDirectory(t *testing.T) {
+	env(t)
+	if _, err := cli(t, "user", "provision", "mallory"); err == nil || !strings.Contains(err.Error(), "not in the directory") {
+		t.Fatalf("provision of a name the directory does not list: %v", err)
+	}
+	if _, err := cli(t, "user", "welcome", "mallory"); err == nil || !strings.Contains(err.Error(), "unknown user") {
+		t.Fatalf("welcome of an unknown user: %v", err)
+	}
+	out, err := cli(t, "user", "list")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fields := strings.Fields(out); !reflect.DeepEqual(fields, []string{"USERNAME", "ID", "EMAIL", "DEVICES", "STATUS", "WELCOMED", "SYNCED"}) {
+		t.Fatalf("user list after a refused provision: %q", out)
 	}
 }

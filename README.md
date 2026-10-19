@@ -2,7 +2,7 @@
 
 ntfy-idp-push replaces the Duo Auth API to deliver secure mobile push notifications over [ntfy](https://ntfy.sh) for Authelia and authentik. ntfy acts only as transport; approvals require a device-bound passkey signature from the enrolled phone. See [ARCHITECTURE.md](ARCHITECTURE.md) for design details.
 
-It also functions as a generic **ntfy provisioning tool**. Without Duo integration, the `/provision` endpoint creates an ntfy account for the signed-in IdP user, applies `enroll-access` grants, and signs their device into ntfy via one-tap link or QR code (or use CLI `user provision <u>`).
+Accounts follow your user directory (LDAP, or Authelia's `users_database.yml`). The shim polls the directory, creates an ntfy account for each new person, emails them a welcome with their ntfy password, and disables accounts absent from the directory. Users enroll their phone's passkey at `/enroll`.
 
 ## Run
 
@@ -14,6 +14,8 @@ mkdir -p deploy/config deploy/secrets
 cp deploy/server.yml deploy/config/server.yml     # fill in; leave the secrets out
 printf '%s' '<secret key>' > deploy/secrets/duo_secret_key
 printf '%s' 'tk_…' > deploy/secrets/ntfy_admin_token
+printf '%s' '<ldap bind password>' > deploy/secrets/ldap_password
+printf '%s' '<smtp password>' > deploy/secrets/smtp_password
 docker compose -f deploy/compose.yaml up -d
 ```
 
@@ -29,10 +31,14 @@ services:
     environment:                           # where the app reads each mounted secret
       NTFY_IDP_PUSH_DUO_SECRET_KEY_FILE: /run/secrets/duo_secret_key
       NTFY_IDP_PUSH_NTFY_ADMIN_TOKEN_FILE: /run/secrets/ntfy_admin_token
-    secrets: [duo_secret_key, ntfy_admin_token]   # mounts them at /run/secrets/<name>
+      NTFY_IDP_PUSH_DIRECTORY_LDAP_PASSWORD_FILE: /run/secrets/ldap_password
+      NTFY_IDP_PUSH_SMTP_PASSWORD_FILE: /run/secrets/smtp_password
+    secrets: [duo_secret_key, ntfy_admin_token, ldap_password, smtp_password]   # mounted at /run/secrets/<name>
 secrets:                                   # where Compose reads each secret on the host
   duo_secret_key: {file: ./secrets/duo_secret_key}
   ntfy_admin_token: {file: ./secrets/ntfy_admin_token}
+  ldap_password: {file: ./secrets/ldap_password}
+  smtp_password: {file: ./secrets/smtp_password}
 networks:
   proxy: {external: true}
 volumes:
@@ -41,7 +47,24 @@ volumes:
 
 Build the local image with `make image`. Execute CLI commands inside the container using `docker compose -f deploy/compose.yaml exec ntfy-idp-push ntfy-idp-push <command>`.
 
-**Configuration:** Set keys from [`deploy/server.yml`](deploy/server.yml) via environment variables as `NTFY_IDP_PUSH_<KEY>`. Load secrets (`duo-secret-key`, `duo-secret-key-previous`, `ntfy-admin-token`) from files using `<key>-file` or `NTFY_IDP_PUSH_<KEY>_FILE` (ideal for Docker secrets or systemd credentials). Reload per-request settings (`push-disabled`, keys, secret files including a rotated `ntfy-admin-token`, `enroll-access`, `push-timeout`, `trusted-proxies`, `identity-header`) with `SIGHUP` (`docker compose kill -s HUP`). A reload that changes `listen-http`, `database`, `public-url`, `webauthn-*` or `ntfy-topic-prefix` is refused and logged; restart instead.
+**Configuration:** Set keys from [`deploy/server.yml`](deploy/server.yml) via environment variables as `NTFY_IDP_PUSH_<KEY>`. Load secrets (`duo-secret-key`, `duo-secret-key-previous`, `ntfy-admin-token`, `directory-ldap-password`, `smtp-password`) from files using `<key>-file` or `NTFY_IDP_PUSH_<KEY>_FILE` (ideal for Docker secrets or systemd credentials). Reload per-request settings (`push-disabled`, keys, secret files including a rotated `ntfy-admin-token`, `enroll-access`, `push-timeout`, `trusted-proxies`, `identity-header`) with `SIGHUP` (`docker compose kill -s HUP`). A reload that changes `listen-http`, `database`, `public-url`, `webauthn-*`, `ntfy-topic-prefix`, or any `directory-*`, `smtp-*` or `mail-*` key (their secret files included) is refused and logged; restart instead.
+
+## Directory and email
+
+The directory decides who gets an ntfy account. Once at startup and then every `directory-sync-interval` (default `15m`), the shim lists it and:
+
+- creates an account for each new person, applies `enroll-access`, and sends one welcome email: ntfy server URL, username, a random password shown only there, app links, the "Manage users" steps that sign the app in, and an `ntfy://` link per `default-topics` entry;
+- keeps email and display name current;
+- disables users absent from the directory or marked disabled, and enables them when they reappear (a `user disable` by an admin stays);
+- never deletes anyone.
+
+A directory that errors or lists nobody skips the round and changes nothing (audit `sync_skipped`). The next round retries unsent welcome emails. Resetting a user's ntfy account (`user reset-ntfy`, `device revoke --reset-ntfy-user`) sends a new welcome, since the recreated account's password is unknown.
+
+`directory-type: ldap` takes Authelia's LDAP settings: `directory-ldap-address` (`ldaps://` or `ldap://` with `directory-ldap-start-tls`), `directory-ldap-base-dn`, the bind `directory-ldap-user` and `directory-ldap-password` (or `-file`), `directory-ldap-users-filter` (default `(objectClass=person)`; it lists users, so no `{input}` placeholder), and the `directory-ldap-attribute-*` names (defaults `uid`, `mail`, `displayName`, `memberOf`). `directory-ldap-group-dn` limits the sync to one group's members. An LDAP server with a certificate from a private CA needs `directory-ldap-ca-file`, a PEM bundle trusted besides the system roots; put it in `./config` and set `directory-ldap-ca-file: /etc/ntfy-idp-push/ldap-ca.pem`.
+
+`directory-type: file` reads Authelia's file user database (`directory-file`, re-read every round), honoring each user's `disabled` flag; `directory-group` limits the sync to one group. Mount the directory that holds the file read-only (see `deploy/compose.yaml`).
+
+Mail goes through `smtp-host`:`smtp-port` (default 587) with `smtp-user` and `smtp-password` (or `-file`). `smtp-starttls` (default true) refuses a relay that does not upgrade the connection; port 465 is implicit TLS. `mail-from` is required; `mail-reply-to` is optional, for instance the admins who can resend a welcome. The relay is not contacted at startup, so check delivery with `user welcome <user>`.
 
 ntfy prerequisites (`server.yml`):
 
@@ -119,11 +142,12 @@ Server
   version
 
 Users
-  user list
-  user provision <user>                      create the ntfy account and apply enroll-access
+  user list                                  users with email, devices, status, last welcome and last sync
+  user provision <user>                      create a directory user's account now; welcome if never sent
+  user welcome <user>                        set a new ntfy password and email it in a new welcome
   user disable|enable <user>
   user delete <user> [--keep-ntfy-user]
-  user reset-ntfy <user> [--force]           recreate the ntfy user, invalidating its tokens
+  user reset-ntfy <user> [--force]           recreate the ntfy user, invalidating its tokens; sends a new welcome
   user approve <challenge-id>                approve a pending login without a passkey (break-glass)
   enroll-link <user>                         single-use enrollment link, valid 5 minutes
   audit [user]                               last 100 audit entries
@@ -144,9 +168,9 @@ Devices
 | Path | Access | Purpose |
 |---|---|---|
 | `/enroll`<br>`/enroll/begin`<br>`/enroll/finish` | IdP | register a passkey, get the ntfy link |
-| `/provision`<br>`/provision/password`<br>`/devices`<br>`/devices/<id>/revoke` | IdP | ntfy account setup and manual sign-in; device list and revoke |
+| `/devices`<br>`/devices/<id>/revoke` | IdP | device list and revoke |
 | `/token/<code>`<br>`/token/begin`<br>`/token/finish` | Public (enrollment code) | enroll from an `enroll-link` or authentik activation link |
-| `/token/resend`<br>`/token/password` | Public (result-page token) | resend the setup push; set an ntfy password for apps without one-tap sign-in |
+| `/token/resend` | Public (result-page token) | resend the setup push |
 | `/token/verify/<device>` | Public (token in the setup push) | activate the device |
 | `/token/qr` | Public (shim-issued codes only) | QR for an enrollment URL, shown by the IdP |
 | `/challenge/<id>`<br>`/challenge/<id>/options`<br>`/challenge/<id>/assert`<br>`/challenge/<id>/fraud` | Public (passkey) | approve a sign-in, or report fraud |
@@ -168,4 +192,4 @@ make test   # go test -race ./...
 make lint   # gofmt, go vet, staticcheck, govulncheck; CI runs both on every PR
 ```
 
-Tests execute the real `duo_api_golang` client (v2 form, v5 JSON signing) against the handler `serve` runs, using a fake ntfy and a software WebAuthn authenticator, with the test client standing in for the proxy's forward-auth. They cover enrollment, push, passkey approval, deny, fraud, timeout, revocation, provisioning, and proxy identity.
+Tests execute the real `duo_api_golang` client (v2 form, v5 JSON signing) against the handler `serve` runs, using a fake ntfy, a fake directory, a recording mail sender and a software WebAuthn authenticator, with the test client standing in for the proxy's forward-auth. They cover directory sync and welcome emails, enrollment, push, passkey approval, deny, fraud, timeout, revocation, provisioning, and proxy identity.

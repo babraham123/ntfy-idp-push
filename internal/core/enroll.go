@@ -190,7 +190,7 @@ func (s *Service) takeEnrollment(handle string) *pendingEnrollment {
 
 type Enrollment struct {
 	Device *model.Device
-	// Handoff signs the phone's ntfy app in and subscribes it to the device's topic.
+	// Handoff subscribes the phone's ntfy app to the device's topic.
 	Handoff *Handoff
 	// ResultToken lets the result page act for this device for EnrollResultTTL (see EnrolledDevice).
 	ResultToken string
@@ -285,7 +285,7 @@ func (s *Service) EnrolledDevice(ctx context.Context, resultToken string) (*mode
 	return d, err
 }
 
-// connectDevice does enrollment's ntfy side: account, topic grant, sign-in code and setup push.
+// connectDevice does enrollment's ntfy side: account, topic grant and setup push.
 func (s *Service) connectDevice(ctx context.Context, dev *model.Device, verifyToken string) (*Enrollment, error) {
 	if _, err := s.Provision(ctx, dev.Username); err != nil {
 		return nil, err
@@ -293,14 +293,10 @@ func (s *Service) connectDevice(ctx context.Context, dev *model.Device, verifyTo
 	if err := s.grantDevice(ctx, dev); err != nil {
 		return nil, err
 	}
-	h, err := s.Handoff(ctx, dev.Username, []string{dev.NtfyTopic})
-	if err != nil {
-		return nil, err
-	}
 	if err := s.publishSetup(ctx, dev, verifyToken); err != nil {
 		return nil, err
 	}
-	return &Enrollment{Device: dev, Handoff: h}, nil
+	return &Enrollment{Device: dev, Handoff: s.Handoff(dev.Username, []string{dev.NtfyTopic})}, nil
 }
 
 func (s *Service) publishSetup(ctx context.Context, dev *model.Device, verifyToken string) error {

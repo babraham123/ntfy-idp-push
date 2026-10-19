@@ -21,8 +21,8 @@ func TestPagesRequireProxyIdentity(t *testing.T) {
 		"anonymous action": {Method: "POST", Path: "/devices/x/revoke"},
 		"anonymous enroll": {Method: "GET", Path: "/enroll"},
 		"anonymous begin":  {Method: "POST", Path: "/enroll/begin", Body: []byte(`{"name":"Phone"}`)},
-		"blank header":     {Method: "GET", Path: "/provision", Header: map[string]string{"Remote-User": " "}},
-		"other header":     {Method: "GET", Path: "/provision", Header: map[string]string{"X-Forwarded-User": "alice"}},
+		"blank header":     {Method: "GET", Path: "/devices", Header: map[string]string{"Remote-User": " "}},
+		"other header":     {Method: "GET", Path: "/devices", Header: map[string]string{"X-Forwarded-User": "alice"}},
 	} {
 		if resp, _ := h.Do(t, req); resp.StatusCode != 401 {
 			t.Errorf("%s: %d", name, resp.StatusCode)
@@ -66,7 +66,6 @@ func TestTokenRoutesIgnoreIdentity(t *testing.T) {
 		"bad begin": {Method: "POST", Path: "/token/begin", Body: []byte(`{"name":"Phone","code":"forged"}`), Header: forged},
 		"finish":    {Method: "POST", Path: "/token/finish?token=nosuchhandle", Body: []byte(`{}`), Header: forged},
 		"resend":    {Method: "POST", Path: "/token/resend", Body: []byte(`{"token":"forged"}`), Header: forged},
-		"password":  {Method: "POST", Path: "/token/password", Body: []byte(`{"token":"forged"}`), Header: forged},
 		"verify":    {Method: "POST", Path: "/token/verify/x", Body: []byte("t=forged"), Header: map[string]string{"Remote-User": "alice", "Content-Type": "application/x-www-form-urlencoded"}},
 	} {
 		resp, _ := h.Do(t, req)
@@ -99,8 +98,8 @@ func TestTokenRoutesIgnoreIdentity(t *testing.T) {
 	if resp.StatusCode != 200 || !strings.Contains(string(page), "<strong>erin</strong>") || !strings.Contains(string(page), `data-base="/token"`) {
 		t.Fatalf("token page: %d %s", resp.StatusCode, page)
 	}
-	e, st, b := h.FinishEnroll(t, "", code, testutil.NewAuthenticator(t, testutil.PublicURL))
-	if st != 200 || !e.HasCode {
+	_, st, b := h.FinishEnroll(t, "", code, testutil.NewAuthenticator(t, testutil.PublicURL))
+	if st != 200 {
 		t.Fatalf("enroll by code: %d %s", st, b)
 	}
 	var out struct{ Username string }

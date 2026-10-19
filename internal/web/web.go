@@ -1,4 +1,4 @@
-// Package web serves the enrollment, approval, provisioning and device pages.
+// Package web serves the enrollment, approval and device pages.
 package web
 
 import (
@@ -36,7 +36,7 @@ var tmpl = template.Must(template.New("").Funcs(template.FuncMap{
 
 const maxBody = 64 << 10
 
-// Server serves two kinds of routes. Identity routes (/enroll, /provision, /devices) know the user
+// Server serves two kinds of routes. Identity routes (/enroll, /devices) know the user
 // only from the identity header a trusted proxy sets after its forward-auth step. Token routes
 // (/token/*, /challenge/*) never read it: an enrollment code, result token, verify token, deny token
 // or passkey is their whole credential, so the proxy can let them through unauthenticated.
@@ -72,7 +72,6 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.Handle("GET "+tok+"/verify/{device}", s.limit(s.verifyPage))
 	mux.Handle("POST "+tok+"/verify/{device}", s.limit(s.sameOrigin(s.verifyDevice)))
 	mux.Handle("POST "+tok+"/resend", s.limit(s.sameOrigin(s.enrollResend)))
-	mux.Handle("POST "+tok+"/password", s.limit(s.sameOrigin(s.enrollPassword)))
 	mux.Handle("GET "+tok+"/qr", s.limit(s.enrollQR))
 
 	mux.Handle("GET "+ch+"/{id}", s.limit(s.approvePage))
@@ -82,8 +81,6 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.Handle("POST "+ch+"/{id}/deny", s.limit(s.deny))
 	mux.Handle("POST "+ch+"/{id}/fraud", s.limit(s.sameOrigin(s.fraud)))
 
-	mux.HandleFunc("GET "+routes.Provision, s.provisionPage)
-	mux.Handle("POST "+routes.Provision+"/password", s.sameOrigin(s.provisionPassword))
 	mux.HandleFunc("GET "+routes.Devices, s.devicesPage)
 	mux.Handle("POST "+routes.Devices+"/{id}/revoke", s.sameOrigin(s.revoke))
 }
@@ -114,7 +111,7 @@ func (s *Server) render(w http.ResponseWriter, status int, name string, data any
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	// Pages carry ntfy sign-in codes and passwords, and per-user content.
+	// Pages carry per-user content and token-bearing links.
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
 	// Not no-referrer: with it, browsers send "Origin: null" on form posts and sameOrigin refuses them.
@@ -365,7 +362,7 @@ func (s *Server) enrollPage(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	s.render(w, http.StatusOK, "enroll.html", map[string]string{"User": user, "Base": routes.Enroll})
+	s.render(w, http.StatusOK, "enroll.html", map[string]string{"User": user, "Base": routes.Enroll, "Platform": platform(r)})
 }
 
 // tokenPage is the token route: a shim-issued enrollment code is the whole credential.
@@ -376,7 +373,7 @@ func (s *Server) tokenPage(w http.ResponseWriter, r *http.Request) {
 		s.pageFail(w, err, "enroll: code")
 		return
 	}
-	s.render(w, http.StatusOK, "enroll.html", map[string]string{"User": user, "Code": code, "Base": routes.Token})
+	s.render(w, http.StatusOK, "enroll.html", map[string]string{"User": user, "Code": code, "Base": routes.Token, "Platform": platform(r)})
 }
 
 func (s *Server) enrollBegin(w http.ResponseWriter, r *http.Request) {
@@ -440,17 +437,13 @@ func (s *Server) finishEnrollment(w http.ResponseWriter, r *http.Request, signed
 		s.jsonFail(w, err, "enroll: qr")
 		return
 	}
-	var codeExpires int64
-	if res.Handoff.HasCode() {
-		codeExpires = res.Handoff.CodeExpires.Unix()
-	}
+	// The page rendered the instructions for its platform; this fills them in.
 	writeJSON(w, http.StatusOK, map[string]any{
 		"device":       res.Device.ID,
 		"topic":        res.Device.NtfyTopic,
 		"username":     res.Device.Username,
+		"server":       res.Handoff.Server,
 		"ntfy_link":    link,
-		"has_code":     res.Handoff.HasCode(),
-		"code_expires": codeExpires,
 		"qr":           qr,
 		"result_token": res.ResultToken,
 	})
@@ -481,19 +474,6 @@ func (s *Server) enrollResend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"result": "sent"})
-}
-
-func (s *Server) enrollPassword(w http.ResponseWriter, r *http.Request) {
-	_, user, ok := s.enrolledFrom(w, r)
-	if !ok {
-		return
-	}
-	password, err := s.svc.SetNtfyPassword(r.Context(), user)
-	if err != nil {
-		s.jsonFail(w, err, "enroll: ntfy password")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"username": user, "password": password})
 }
 
 func (s *Server) verifyPage(w http.ResponseWriter, r *http.Request) {

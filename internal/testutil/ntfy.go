@@ -3,7 +3,6 @@
 package testutil
 
 import (
-	"crypto/rand"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -20,8 +19,6 @@ const AdminToken = "tk_admin"
 // FakeNtfy simulates used ntfy API endpoints (with deny-all access). Error codes match ntfy v2.30.
 type FakeNtfy struct {
 	*httptest.Server
-	// EnrollSupported toggles the ntfy#597 POST /v1/users/token/enroll endpoint.
-	EnrollSupported bool
 	// AdminRole is the role GET /v1/account reports for the admin token.
 	AdminRole string
 	// AnonymousRead simulates a server that lets anyone poll any topic.
@@ -34,7 +31,6 @@ type FakeNtfy struct {
 	failures  map[string]int // "METHOD /path" -> calls left to fail with 500
 	passwords map[string]string
 	users     map[string]*ntfy.User
-	codes     map[string]string // pending enrollment code -> username; one per user, as in ntfy
 	published []ntfy.Message
 	deleted   []string // "topic/sequence_id"
 	pubCh     chan ntfy.Message
@@ -42,14 +38,12 @@ type FakeNtfy struct {
 
 func NewFakeNtfy(t *testing.T) *FakeNtfy {
 	f := &FakeNtfy{
-		EnrollSupported: true,
-		AdminRole:       "admin",
-		AdminToken:      AdminToken,
-		users:           map[string]*ntfy.User{"idp-push": {Username: "idp-push", Role: "admin"}},
-		pubCh:           make(chan ntfy.Message, 100),
-		codes:           map[string]string{},
-		failures:        map[string]int{},
-		passwords:       map[string]string{},
+		AdminRole:  "admin",
+		AdminToken: AdminToken,
+		users:      map[string]*ntfy.User{"idp-push": {Username: "idp-push", Role: "admin"}},
+		pubCh:      make(chan ntfy.Message, 100),
+		failures:   map[string]int{},
+		passwords:  map[string]string{},
 	}
 	f.Server = httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(f.Close)
@@ -70,14 +64,6 @@ func (f *FakeNtfy) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch {
-	case r.URL.Path == "/v1/account/token/redeem" && r.Method == http.MethodPost:
-		user, ok := f.codes[body["code"]]
-		if !ok {
-			http.Error(w, `{"code":40060}`, http.StatusBadRequest)
-			return
-		}
-		delete(f.codes, body["code"])
-		json.NewEncoder(w).Encode(ntfy.Token{Token: "tk_" + user, Label: body["label"], Username: user})
 	case strings.HasSuffix(r.URL.Path, "/json") && r.Method == http.MethodGet:
 		if !admin && !f.AnonymousRead {
 			http.Error(w, `{"code":40301}`, http.StatusForbidden)
@@ -119,7 +105,6 @@ func (f *FakeNtfy) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		delete(f.users, body["username"])
-		f.dropCodes(body["username"])
 		w.Write([]byte(`{"success":true}`))
 	case r.URL.Path == "/v1/users/access" && (r.Method == http.MethodPut || r.Method == http.MethodPost):
 		u := f.users[body["username"]]
@@ -138,23 +123,6 @@ func (f *FakeNtfy) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		u.Grants = setGrant(u.Grants, ntfy.Grant{Topic: body["topic"]})
 		w.Write([]byte(`{"success":true}`))
-	case r.URL.Path == "/v1/users/token/enroll" && r.Method == http.MethodPost:
-		if !f.EnrollSupported {
-			http.NotFound(w, r)
-			return
-		}
-		u := f.users[body["username"]]
-		if u == nil {
-			http.Error(w, `{"code":40035}`, http.StatusBadRequest)
-			return
-		} else if u.Role != "user" {
-			http.Error(w, `{"code":40101}`, http.StatusUnauthorized)
-			return
-		}
-		f.dropCodes(u.Username)
-		code := rand.Text()
-		f.codes[code] = u.Username
-		json.NewEncoder(w).Encode(ntfy.EnrollCode{Code: code, Expires: time.Now().Add(10 * time.Minute).Unix()})
 	case r.URL.Path == "/" && r.Method == http.MethodPost:
 		var m ntfy.Message
 		if err := json.NewDecoder(r.Body).Decode(&m); err != nil {
@@ -172,15 +140,6 @@ func (f *FakeNtfy) serve(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"id":"x"}`))
 	default:
 		http.NotFound(w, r)
-	}
-}
-
-// dropCodes removes a user's pending code: issuing a new one or deleting the user supersedes it.
-func (f *FakeNtfy) dropCodes(user string) {
-	for c, u := range f.codes {
-		if u == user {
-			delete(f.codes, c)
-		}
 	}
 }
 
@@ -276,5 +235,4 @@ func (f *FakeNtfy) DeleteUser(name string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	delete(f.users, name)
-	f.dropCodes(name)
 }

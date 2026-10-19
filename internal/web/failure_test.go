@@ -15,13 +15,14 @@ func TestInternalErrorsAreNotEchoed(t *testing.T) {
 	if st != 200 {
 		t.Fatalf("enroll: %d %s", st, b)
 	}
-	h.Ntfy.FailNext("PUT", "/v1/users", 1)
-	resp, b := h.Do(t, testutil.Request{Method: "POST", Path: "/token/password", Body: []byte(`{"token":"` + e.ResultToken + `"}`)})
+	h.Ntfy.NextPublish(t)
+	h.Ntfy.FailNext("POST", "/", 1)
+	resp, b := h.Do(t, testutil.Request{Method: "POST", Path: "/token/resend", Body: []byte(`{"token":"` + e.ResultToken + `"}`)})
 	if resp.StatusCode != 500 || strings.TrimSpace(string(b)) != `{"error":"internal error"}` {
 		t.Fatalf("ntfy failure: %d %s", resp.StatusCode, b)
 	}
 	// A classified failure carries its reason.
-	resp, b = h.Do(t, testutil.Request{Method: "POST", Path: "/token/password", Body: []byte(`{"token":"forged"}`)})
+	resp, b = h.Do(t, testutil.Request{Method: "POST", Path: "/token/resend", Body: []byte(`{"token":"forged"}`)})
 	if resp.StatusCode != 410 || !strings.Contains(string(b), "expired") {
 		t.Fatalf("forged result token: %d %s", resp.StatusCode, b)
 	}

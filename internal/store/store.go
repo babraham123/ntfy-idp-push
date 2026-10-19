@@ -89,6 +89,12 @@ var migrations = []string{
 	// Sign-in moved to the proxy's forward-auth step; databases from the OIDC releases still carry
 	// the session table.
 	`DROP TABLE IF EXISTS oidc_sessions;`,
+	// Accounts follow a user directory, and each user is emailed their ntfy credentials.
+	`ALTER TABLE users ADD COLUMN email TEXT NOT NULL DEFAULT '';
+	ALTER TABLE users ADD COLUMN display_name TEXT NOT NULL DEFAULT '';
+	ALTER TABLE users ADD COLUMN synced_at INTEGER;
+	ALTER TABLE users ADD COLUMN welcomed_at INTEGER;
+	ALTER TABLE users ADD COLUMN disabled_by_sync INTEGER NOT NULL DEFAULT 0;`,
 }
 
 func Open(path string) (*Store, error) {

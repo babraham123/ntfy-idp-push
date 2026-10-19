@@ -18,6 +18,10 @@ func valid() *Config {
 	c.NtfyAdminToken = "tk_x"
 	c.EnrollAccess = []string{"${user}-*:rw", "alerts:ro"}
 	c.DefaultTopics = []string{"alerts", "${user}-inbox"}
+	c.DirectoryType = "file"
+	c.DirectoryFile = "/etc/authelia/users_database.yml"
+	c.SMTPHost = "smtp.example.com"
+	c.MailFrom = "push@example.com"
 	return c
 }
 
@@ -78,6 +82,11 @@ func TestValidateFailsClosed(t *testing.T) {
 		"bad trusted proxy":  func(c *Config) { c.TrustedProxies = []string{"proxy"} },
 		"no identity header": func(c *Config) { c.IdentityHeader = " " },
 		"no listener":        func(c *Config) { c.ListenHTTP = "" },
+		"no directory":       func(c *Config) { c.DirectoryType = "" },
+		"unknown directory":  func(c *Config) { c.DirectoryType = "ad" },
+		"no sync interval":   func(c *Config) { c.DirectorySyncInterval = 0 },
+		"no smtp host":       func(c *Config) { c.SMTPHost = "" },
+		"no mail from":       func(c *Config) { c.MailFrom = "" },
 	} {
 		c := valid()
 		mutate(c)
@@ -87,9 +96,16 @@ func TestValidateFailsClosed(t *testing.T) {
 	}
 }
 
-func TestAttestationRequiredByDefault(t *testing.T) {
-	if !defaults().WebAuthnRequireAttestation {
+func TestDefaults(t *testing.T) {
+	d := defaults()
+	if !d.WebAuthnRequireAttestation {
 		t.Fatal("webauthn-require-attestation should default to true")
+	}
+	if d.DirectorySyncInterval.D() != 15*time.Minute || d.DirectoryLDAPUsersFilter != "(objectClass=person)" ||
+		d.DirectoryLDAPAttributeUsername != "uid" || d.DirectoryLDAPAttributeMail != "mail" ||
+		d.DirectoryLDAPAttributeDisplayName != "displayName" || d.DirectoryLDAPAttributeMemberOf != "memberOf" ||
+		d.SMTPPort != 587 || !d.SMTPStartTLS {
+		t.Fatalf("directory and smtp defaults: %+v", d)
 	}
 }
 
@@ -100,6 +116,16 @@ func TestEnvOverrides(t *testing.T) {
 		"NTFY_IDP_PUSH_PUSH_TIMEOUT":  "45s",
 		"NTFY_IDP_PUSH_PUSH_DISABLED": "true",
 		"NTFY_IDP_PUSH_DUO_HOSTNAME":  "Other.Example.com",
+
+		"NTFY_IDP_PUSH_DIRECTORY_TYPE":           "ldap",
+		"NTFY_IDP_PUSH_DIRECTORY_SYNC_INTERVAL":  "5m",
+		"NTFY_IDP_PUSH_DIRECTORY_LDAP_ADDRESS":   "ldaps://ldap.example.com",
+		"NTFY_IDP_PUSH_DIRECTORY_LDAP_CA_FILE":   "/etc/ssl/private-ca.pem",
+		"NTFY_IDP_PUSH_DIRECTORY_LDAP_START_TLS": "false",
+		"NTFY_IDP_PUSH_DIRECTORY_LDAP_GROUP_DN":  "cn=push,dc=example,dc=com",
+		"NTFY_IDP_PUSH_SMTP_PORT":                "465",
+		"NTFY_IDP_PUSH_SMTP_STARTTLS":            "false",
+		"NTFY_IDP_PUSH_MAIL_REPLY_TO":            "admin@example.com",
 	}
 	if err := applyEnv(c, func(k string) (string, bool) { v, ok := env[k]; return v, ok }); err != nil {
 		t.Fatal(err)
@@ -111,6 +137,39 @@ func TestEnvOverrides(t *testing.T) {
 	if len(c.EnrollAccess) != 2 || c.EnrollAccess[1] != "news:ro" || c.PushTimeout.D() != 45*time.Second ||
 		!c.PushDisabled || c.DuoHostname != "other.example.com" || c.PublicURL != "https://other.example.com" {
 		t.Fatalf("env not applied: %+v", c)
+	}
+	if c.DirectoryType != "ldap" || c.DirectorySyncInterval.D() != 5*time.Minute ||
+		c.DirectoryLDAPAddress != "ldaps://ldap.example.com" || c.DirectoryLDAPCAFile != "/etc/ssl/private-ca.pem" ||
+		c.DirectoryLDAPGroupDN != "cn=push,dc=example,dc=com" || c.SMTPPort != 465 || c.SMTPStartTLS ||
+		c.MailReplyTo != "admin@example.com" {
+		t.Fatalf("directory and smtp env not applied: %+v", c)
+	}
+	if err := applyEnv(c, func(k string) (string, bool) { return "x", k == "NTFY_IDP_PUSH_SMTP_PORT" }); err == nil ||
+		!strings.Contains(err.Error(), "NTFY_IDP_PUSH_SMTP_PORT") {
+		t.Fatalf("non-numeric smtp-port: %v", err)
+	}
+}
+
+// The directory source and mail sender are built once at startup, so changing their keys needs a
+// restart; the ntfy connection and per-request settings do not.
+func TestRestartOnly(t *testing.T) {
+	c := valid()
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	next := *c
+	next.NtfyAdminToken = "tk_rotated"
+	next.PushDisabled = true
+	if keys := c.RestartOnly(&next); len(keys) != 0 {
+		t.Fatalf("per-request keys refused: %v", keys)
+	}
+	next.DirectoryLDAPPassword = "rotated"
+	next.SMTPPort = 2525
+	next.MailFrom = "other@example.com"
+	next.Database = "/elsewhere.sqlite"
+	want := "database, directory-ldap-password, smtp-port, mail-from"
+	if got := strings.Join(c.RestartOnly(&next), ", "); got != want {
+		t.Fatalf("restart-only keys %q, want %q", got, want)
 	}
 }
 
@@ -124,6 +183,10 @@ trusted-proxies: [10.0.0.5]
 identity-header: x-authentik-username
 ntfy-base-url: https://ntfy.example.com
 ntfy-admin-token: tk_x
+directory-type: file
+directory-file: /etc/authelia/users_database.yml
+smtp-host: smtp.example.com
+mail-from: push@example.com
 `
 	if err := os.WriteFile(path, []byte(yml), 0o600); err != nil {
 		t.Fatal(err)
@@ -180,15 +243,21 @@ duo-integration-key: DIAAAAAAAAAAAAAAAAAA
 duo-secret-key-file: `+write("skey", skey+"\n")+`
 trusted-proxies: [10.0.0.0/8]
 ntfy-base-url: https://ntfy.example.com
+directory-type: ldap
+directory-ldap-password-file: `+write("ldap", "ldap-secret\n")+`
+smtp-host: smtp.example.com
+mail-from: push@example.com
 `)
 	// Docker and Podman secrets, and systemd credentials, are files named by an env variable.
 	t.Setenv("NTFY_IDP_PUSH_NTFY_ADMIN_TOKEN_FILE", write("token", "tk_from_file\r\n"))
+	t.Setenv("NTFY_IDP_PUSH_SMTP_PASSWORD_FILE", write("smtp", "smtp-secret"))
 	c, err := Load(cfgPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.DuoSecretKey != skey || c.NtfyAdminToken != "tk_from_file" {
-		t.Fatalf("secrets not read from files: %q %q", c.DuoSecretKey, c.NtfyAdminToken)
+	if c.DuoSecretKey != skey || c.NtfyAdminToken != "tk_from_file" || c.DirectoryLDAPPassword != "ldap-secret" ||
+		c.SMTPPassword != "smtp-secret" {
+		t.Fatalf("secrets not read from files: %q %q %q %q", c.DuoSecretKey, c.NtfyAdminToken, c.DirectoryLDAPPassword, c.SMTPPassword)
 	}
 
 	// A reload re-reads the files, so a rotated secret file takes effect on SIGHUP.

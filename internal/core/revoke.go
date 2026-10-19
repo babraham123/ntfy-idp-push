@@ -109,19 +109,30 @@ func (s *Service) finishReset(ctx context.Context, username string) error {
 		return err
 	}
 	s.store.Audit(ctx, username, "ntfy_user_reset", map[string]any{"devices": granted})
+	// The recreated account has a password nobody knows, so the user needs new credentials. The
+	// reset itself is done either way; a failed welcome is audited and the next sync round retries.
+	if err := s.Welcome(ctx, username); err != nil {
+		s.Log.Warn("welcome after ntfy user reset", "user", username, "err", err)
+	}
 	return nil
 }
 
+// SetUserDisabled is an admin's disable or enable. The directory sync never lifts an admin's
+// disable.
 func (s *Service) SetUserDisabled(ctx context.Context, username string, disabled bool) error {
 	u, err := s.user(ctx, username)
 	if err != nil {
 		return err
 	}
-	if err := s.store.SetUserDisabled(ctx, u.ID, disabled); err != nil {
+	return s.setDisabled(ctx, u, disabled, false)
+}
+
+func (s *Service) setDisabled(ctx context.Context, u *model.User, disabled, bySync bool) error {
+	if err := s.store.SetUserDisabled(ctx, u.ID, disabled, bySync); err != nil {
 		return err
 	}
 	if disabled {
-		if err := s.denyPending(ctx, store.ChallengeFilter{Username: username}); err != nil {
+		if err := s.denyPending(ctx, store.ChallengeFilter{Username: u.Username}); err != nil {
 			return err
 		}
 	}
@@ -129,7 +140,11 @@ func (s *Service) SetUserDisabled(ctx context.Context, username string, disabled
 	if disabled {
 		ev = "user_disabled"
 	}
-	s.store.Audit(ctx, username, ev, nil)
+	var detail map[string]any
+	if bySync {
+		detail = map[string]any{"by": "sync"}
+	}
+	s.store.Audit(ctx, u.Username, ev, detail)
 	return nil
 }
 

@@ -13,9 +13,6 @@ import (
 	"time"
 )
 
-// ErrNotSupported means the server lacks an optional endpoint (e.g. ntfy#597 enroll codes).
-var ErrNotSupported = errors.New("not supported by ntfy server")
-
 type Client struct {
 	BaseURL string
 	Token   string
@@ -175,27 +172,6 @@ func (c *Client) ResetAccess(ctx context.Context, username, topic string) error 
 	return err
 }
 
-type EnrollCode struct {
-	Code    string `json:"code"`
-	Expires int64  `json:"expires"` // Unix seconds; ntfy issues codes valid for 10 minutes
-}
-
-func (ec *EnrollCode) ExpiresAt() time.Time { return time.Unix(ec.Expires, 0) }
-
-// MintEnrollCode issues a single-use code, invalidating previous pending codes. Answers
-// 404/ErrNotSupported if absent, 401 for admins, 400 for unknown users.
-func (c *Client) MintEnrollCode(ctx context.Context, username string) (*EnrollCode, error) {
-	var ec EnrollCode
-	err := c.do(ctx, http.MethodPost, "/v1/users/token/enroll", map[string]string{"username": username}, &ec, true)
-	if IsStatus(err, http.StatusNotFound) || IsStatus(err, http.StatusMethodNotAllowed) {
-		return nil, ErrNotSupported
-	}
-	if err == nil && ec.Code == "" {
-		return nil, errors.New("ntfy enroll: empty code")
-	}
-	return &ec, err
-}
-
 type Action struct {
 	Action string `json:"action"`
 	Label  string `json:"label"`
@@ -220,18 +196,6 @@ type Message struct {
 
 func (c *Client) Publish(ctx context.Context, m *Message) error {
 	return c.do(ctx, http.MethodPost, "/", m, nil, true)
-}
-
-type Token struct {
-	Token    string `json:"token"`
-	Label    string `json:"label,omitempty"`
-	Username string `json:"username"`
-}
-
-// RedeemEnrollCode exchanges a code for a token via unauthenticated POST /v1/account/token/redeem.
-func (c *Client) RedeemEnrollCode(ctx context.Context, code, label string) (*Token, error) {
-	var t Token
-	return &t, c.do(ctx, http.MethodPost, "/v1/account/token/redeem", map[string]string{"code": code, "label": label}, &t, false)
 }
 
 // DeleteMessage removes a published message (by sequence ID) from subscribers' lists.

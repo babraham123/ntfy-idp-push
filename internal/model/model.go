@@ -10,11 +10,23 @@ import (
 )
 
 type User struct {
-	ID         string
-	Username   string
-	Grants     []config.Grant // ntfy grants the shim applied from enroll-access
-	DisabledAt *time.Time
-	CreatedAt  time.Time
+	ID       string
+	Username string
+	Grants   []config.Grant // ntfy grants the shim applied from enroll-access
+	// DisabledAt is set while the user may not enroll or sign in. DisabledBySync marks a disable
+	// the directory sync made, which the sync lifts when the directory lists the user again; an
+	// admin's disable stays until an admin lifts it.
+	DisabledAt     *time.Time
+	DisabledBySync bool
+	CreatedAt      time.Time
+	// Email and DisplayName come from the directory.
+	Email       string
+	DisplayName string
+	// SyncedAt is the last directory sync round that listed the user.
+	SyncedAt *time.Time
+	// WelcomedAt is when the last welcome email was sent; nil means the user is owed one, which the
+	// next sync round sends.
+	WelcomedAt *time.Time
 }
 
 // Enabled reports whether the user may enroll and sign in.

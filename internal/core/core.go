@@ -1,6 +1,7 @@
-// Package core holds shared operations for the Duo facade, web UI, and CLI (provisioning,
-// enrollment, logins, revocation). It owns the running configuration: a reload swaps the
-// per-request settings and rebuilds the ntfy adapter, and refuses keys that need a restart.
+// Package core holds shared operations for the Duo facade, web UI, and CLI (directory sync and
+// welcome emails, provisioning, enrollment, logins, revocation). It owns the running
+// configuration: a reload swaps the per-request settings and rebuilds the ntfy adapter, and
+// refuses keys that need a restart.
 package core
 
 import (
@@ -19,6 +20,8 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/babraham123/ntfy-idp-push/internal/config"
+	"github.com/babraham123/ntfy-idp-push/internal/directory"
+	"github.com/babraham123/ntfy-idp-push/internal/mail"
 	"github.com/babraham123/ntfy-idp-push/internal/model"
 	"github.com/babraham123/ntfy-idp-push/internal/ntfy"
 	"github.com/babraham123/ntfy-idp-push/internal/store"
@@ -47,6 +50,10 @@ type Service struct {
 	store *store.Store
 	Log   *slog.Logger
 	rp    *webauthn.RP
+	// dir lists the people who should have accounts; mail delivers their welcome emails. Both are
+	// built at startup from restart-only keys.
+	dir  directory.Source
+	mail mail.Sender
 
 	waitMu sync.Mutex
 	// waiters holds a channel per pending auth call challenge in this process, closed upon
@@ -62,7 +69,7 @@ type Service struct {
 	pushes map[string]*rate.Limiter
 }
 
-func New(cfg *config.Config, st *store.Store, log *slog.Logger) (*Service, error) {
+func New(cfg *config.Config, st *store.Store, log *slog.Logger, dir directory.Source, mailer mail.Sender) (*Service, error) {
 	pub, _ := url.Parse(cfg.PublicURL)
 	rp, err := webauthn.New(webauthn.Config{
 		RPID:               pub.Hostname(),
@@ -77,6 +84,8 @@ func New(cfg *config.Config, st *store.Store, log *slog.Logger) (*Service, error
 		store:     st,
 		rp:        rp,
 		Log:       log,
+		dir:       dir,
+		mail:      mailer,
 		waiters:   map[string]chan struct{}{},
 		enrolling: map[string]*pendingEnrollment{},
 		pushes:    map[string]*rate.Limiter{},
@@ -142,69 +151,43 @@ func (s *Service) Provision(ctx context.Context, username string) (*model.User, 
 	return u, nil
 }
 
-// TopicLink is the ntfy:// deep link that signs the app in and subscribes it to Topic.
+// TopicLink is the ntfy:// deep link that subscribes the app to Topic on the shim's ntfy server.
 type TopicLink struct {
 	Topic string
 	URL   string
 }
 
-// Handoff is everything a user needs to sign an ntfy app or the web app in and subscribe: one
-// deep link per topic, the web app's redeem link, and the single-use sign-in code's expiry. Without
-// ntfy enroll-code support there is no code and the links only name the user.
+// Handoff is what an ntfy app needs to subscribe a user to topics: the server URL and one deep
+// link per topic. It carries no credentials; the app must already be signed in as the user.
 type Handoff struct {
 	Username string
-	Links    []TopicLink
-	// RedeemURL opens the ntfy web app signed in and subscribed to every topic; "" without a code.
-	RedeemURL string
-	// CodeExpires is zero without a code.
-	CodeExpires time.Time
+	// Server is ntfy-base-url, for apps that subscribe by hand instead of opening a link.
+	Server string
+	Links  []TopicLink
 }
 
-func (h *Handoff) HasCode() bool { return !h.CodeExpires.IsZero() }
-
-// Handoff mints a sign-in code for username and builds the links for topics. Minting supersedes
-// any previous pending code for the user. ${user} in topics is expanded.
-func (s *Service) Handoff(ctx context.Context, username string, topics []string) (*Handoff, error) {
+// Handoff builds the subscribe links for topics, expanding ${user}.
+func (s *Service) Handoff(username string, topics []string) *Handoff {
 	cfg := s.Config()
-	h := &Handoff{Username: username}
-	code := ""
-	ec, err := s.ntfy().MintEnrollCode(ctx, username)
-	switch {
-	case errors.Is(err, ntfy.ErrNotSupported):
-	case err != nil:
-		return nil, err
-	default:
-		code, h.CodeExpires = ec.Code, ec.ExpiresAt()
-	}
-	var names []string
+	h := &Handoff{Username: username, Server: cfg.NtfyBaseURL}
 	for _, t := range topics {
 		t = config.Expand(t, username)
-		names = append(names, t)
-		h.Links = append(h.Links, TopicLink{Topic: t, URL: ntfyLink(cfg, t, username, code)})
+		h.Links = append(h.Links, TopicLink{Topic: t, URL: ntfyLink(cfg, t, username)})
 	}
-	if code != "" {
-		// The fragment keeps the code out of ntfy server logs. user= prevents the web app from
-		// mixing accounts.
-		frag := url.Values{"code": {code}, "user": {username}, "subscribe": {strings.Join(names, ",")}}
-		h.RedeemURL = cfg.NtfyBaseURL + "/account/token/redeem#" + frag.Encode()
-	}
-	return h, nil
+	return h
 }
 
-// DefaultHandoff is Handoff for the configured default-topics, as /provision hands out.
-func (s *Service) DefaultHandoff(ctx context.Context, username string) (*Handoff, error) {
-	return s.Handoff(ctx, username, s.Config().DefaultTopics)
+// DefaultHandoff is Handoff for the configured default-topics.
+func (s *Service) DefaultHandoff(username string) *Handoff {
+	return s.Handoff(username, s.Config().DefaultTopics)
 }
 
-// ntfyLink is the deep link the ntfy app opens to sign in (with code) and subscribe to topic.
-func ntfyLink(cfg *config.Config, topic, username, code string) string {
+// ntfyLink is the deep link the ntfy app opens to subscribe to topic as username.
+func ntfyLink(cfg *config.Config, topic, username string) string {
 	host, secure := cfg.NtfyHost()
 	q := url.Values{}
 	if username != "" {
 		q.Set("user", username)
-	}
-	if code != "" {
-		q.Set("code", code)
 	}
 	if !secure {
 		q.Set("secure", "false")
@@ -238,8 +221,8 @@ func (s *Service) Purge(ctx context.Context) {
 	}
 }
 
-// SetNtfyPassword generates a random password for apps unable to redeem enrollment codes. Existing
-// tokens remain valid.
+// SetNtfyPassword provisions username and replaces its ntfy password with a random one, returned
+// for the user to sign their apps in with. Tokens of apps already signed in remain valid.
 func (s *Service) SetNtfyPassword(ctx context.Context, username string) (string, error) {
 	if _, err := s.Provision(ctx, username); err != nil {
 		return "", err

@@ -156,7 +156,7 @@ func (s *Service) ensureNtfyUser(ctx context.Context, username string) error {
 		}
 		return nil
 	}
-	// Nobody needs the password: the apps sign in with enrollment codes.
+	// Nobody knows this password; Welcome replaces it with one it emails to the user.
 	return s.ntfy().AddUser(ctx, username, token.Random(32))
 }
 

@@ -12,7 +12,9 @@ import (
 
 	"github.com/babraham123/ntfy-idp-push/internal/config"
 	"github.com/babraham123/ntfy-idp-push/internal/core"
+	"github.com/babraham123/ntfy-idp-push/internal/directory"
 	"github.com/babraham123/ntfy-idp-push/internal/duoapi"
+	"github.com/babraham123/ntfy-idp-push/internal/mail"
 	"github.com/babraham123/ntfy-idp-push/internal/store"
 	"github.com/babraham123/ntfy-idp-push/internal/web"
 )
@@ -26,9 +28,10 @@ type App struct {
 	Log     *slog.Logger
 }
 
-// Build wires core and the handlers over an already open store.
-func Build(cfg *config.Config, st *store.Store, log *slog.Logger) (*App, error) {
-	svc, err := core.New(cfg, st, log)
+// Build wires core and the handlers over an already open store, the user directory and the mail
+// sender.
+func Build(cfg *config.Config, st *store.Store, log *slog.Logger, dir directory.Source, mailer mail.Sender) (*App, error) {
+	svc, err := core.New(cfg, st, log, dir, mailer)
 	if err != nil {
 		return nil, err
 	}
@@ -38,13 +41,23 @@ func Build(cfg *config.Config, st *store.Store, log *slog.Logger) (*App, error) 
 	return &App{Cfg: cfg, Store: st, Svc: svc, Handler: web.SecurityHeaders(mux), Log: log}, nil
 }
 
-// Open opens the configured database and builds the app on it. Close releases the database.
+// Open builds the configured directory source and mail sender, opens the configured database and
+// builds the app on them. Neither the source nor the sender connects until it is used, so commands
+// that need neither work while the directory or the relay is down. Close releases the database.
 func Open(cfg *config.Config, log *slog.Logger) (*App, error) {
+	dir, err := directory.New(DirectoryConfig(cfg))
+	if err != nil {
+		return nil, err
+	}
+	mailer, err := mail.New(MailConfig(cfg))
+	if err != nil {
+		return nil, err
+	}
 	st, err := store.Open(cfg.Database)
 	if err != nil {
 		return nil, err
 	}
-	a, err := Build(cfg, st, log)
+	a, err := Build(cfg, st, log, dir, mailer)
 	if err != nil {
 		st.Close()
 		return nil, err
@@ -53,6 +66,43 @@ func Open(cfg *config.Config, log *slog.Logger) (*App, error) {
 }
 
 func (a *App) Close() error { return a.Store.Close() }
+
+// DirectoryConfig is the directory source the directory-* keys describe.
+func DirectoryConfig(cfg *config.Config) directory.Config {
+	return directory.Config{
+		Type:  cfg.DirectoryType,
+		File:  cfg.DirectoryFile,
+		Group: cfg.DirectoryGroup,
+		LDAP: directory.LDAPConfig{
+			Address:              cfg.DirectoryLDAPAddress,
+			StartTLS:             cfg.DirectoryLDAPStartTLS,
+			TLSSkipVerify:        cfg.DirectoryLDAPTLSSkipVerify,
+			CAFile:               cfg.DirectoryLDAPCAFile,
+			BaseDN:               cfg.DirectoryLDAPBaseDN,
+			User:                 cfg.DirectoryLDAPUser,
+			Password:             cfg.DirectoryLDAPPassword,
+			UsersFilter:          cfg.DirectoryLDAPUsersFilter,
+			AttributeUsername:    cfg.DirectoryLDAPAttributeUsername,
+			AttributeMail:        cfg.DirectoryLDAPAttributeMail,
+			AttributeDisplayName: cfg.DirectoryLDAPAttributeDisplayName,
+			AttributeMemberOf:    cfg.DirectoryLDAPAttributeMemberOf,
+			GroupDN:              cfg.DirectoryLDAPGroupDN,
+		},
+	}
+}
+
+// MailConfig is the SMTP relay and sender the smtp-* and mail-* keys describe.
+func MailConfig(cfg *config.Config) mail.Config {
+	return mail.Config{
+		Host:     cfg.SMTPHost,
+		Port:     cfg.SMTPPort,
+		User:     cfg.SMTPUser,
+		Password: cfg.SMTPPassword,
+		StartTLS: cfg.SMTPStartTLS,
+		From:     cfg.MailFrom,
+		ReplyTo:  cfg.MailReplyTo,
+	}
+}
 
 // Server is the HTTP server for the handler. Plain HTTP: the reverse proxy in front terminates TLS
 // and signs users in.
@@ -74,7 +124,22 @@ func (a *App) Server() *http.Server {
 // are cleaned up.
 const purgeInterval = 10 * time.Minute
 
-// Serve runs the startup checks, the listener and the purge loop until ctx ends. Each value
+// every runs fn now and then every interval until ctx ends.
+func every(ctx context.Context, interval time.Duration, fn func()) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		fn()
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
+// Serve runs the startup checks, the listener, the purge loop and the directory sync loop until
+// ctx ends. Each value
 // received on the reload channel re-reads the configuration with load and applies it; a refused
 // reload keeps the running one and is logged.
 func (a *App) Serve(ctx context.Context, reload <-chan struct{}, load func() (*config.Config, error)) error {
@@ -90,18 +155,10 @@ func (a *App) Serve(ctx context.Context, reload <-chan struct{}, load func() (*c
 	go func() { errc <- srv.ListenAndServe() }()
 	a.Log.Info("listening", "http", a.Cfg.ListenHTTP, "hostname", a.Cfg.DuoHostname)
 
-	go func() {
-		t := time.NewTicker(purgeInterval)
-		defer t.Stop()
-		for {
-			a.Svc.Purge(ctx)
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-			}
-		}
-	}()
+	go every(ctx, purgeInterval, func() { a.Svc.Purge(ctx) })
+	// Sync logs its own failures. directory-sync-interval is restart-only, so the startup value
+	// holds for the process.
+	go every(ctx, a.Cfg.DirectorySyncInterval.D(), func() { _ = a.Svc.Sync(ctx) })
 
 	for {
 		select {

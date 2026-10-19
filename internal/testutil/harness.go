@@ -36,9 +36,12 @@ const (
 // fake ntfy behind it. The test client connects from loopback, which the config lists as the
 // trusted proxy, so Request.User plays the proxy's forward-auth step.
 type Harness struct {
-	Cfg    *config.Config
-	Svc    *core.Service
-	Ntfy   *FakeNtfy
+	Cfg  *config.Config
+	Svc  *core.Service
+	Ntfy *FakeNtfy
+	// Dir is the user directory the sync reads; Mail records the emails the shim sends.
+	Dir    *FakeDirectory
+	Mail   *FakeMail
 	Server *httptest.Server
 	// Host is what Duo clients put in the Host header and sign (duo-hostname).
 	Host   string
@@ -74,6 +77,12 @@ func NewHarness(t *testing.T, mutate func(*config.Config)) *Harness {
 		EnrollRole:        "user",
 		EnrollAccess:      []string{"${user}-*:rw", "alerts:ro"},
 		Database:          ":memory:",
+		// Tests run Sync themselves; the interval only has to be valid.
+		DirectoryType:         "file",
+		DirectorySyncInterval: config.Duration(time.Hour),
+		SMTPHost:              "smtp.test",
+		SMTPPort:              587,
+		MailFrom:              "push@push.test",
 		// The software authenticator attests "none"; the opt-in default has its own config test.
 		WebAuthnRequireAttestation: false,
 	}
@@ -92,7 +101,7 @@ func NewHarness(t *testing.T, mutate func(*config.Config)) *Harness {
 	if testing.Verbose() {
 		log = slog.New(slog.NewTextHandler(&testWriter{t}, nil))
 	}
-	h := &Harness{Cfg: cfg, Ntfy: fn, Server: srv, Host: host, Store: st, log: log}
+	h := &Harness{Cfg: cfg, Ntfy: fn, Dir: &FakeDirectory{}, Mail: NewFakeMail(), Server: srv, Host: host, Store: st, log: log}
 	h.serve(t)
 	// Shorter than push-timeout (like serve's write timeout), forcing blocking auth to extend
 	// its own deadline.
@@ -113,7 +122,7 @@ func NewHarness(t *testing.T, mutate func(*config.Config)) *Harness {
 // serve builds the shim from h.Cfg on h.Store and routes the server to it.
 func (h *Harness) serve(t *testing.T) {
 	t.Helper()
-	a, err := app.Build(h.Cfg, h.Store, h.log)
+	a, err := app.Build(h.Cfg, h.Store, h.log, h.Dir, h.Mail)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,8 +238,9 @@ func LocalPath(t *testing.T, u string) string {
 
 type Enrolled struct {
 	DeviceID, Topic, NtfyLink string
-	HasCode                   bool
-	// ResultToken authorizes the enrollment result page's resend and manual sign-in actions.
+	// Server is the ntfy server URL the result page shows for subscribing by hand.
+	Server string
+	// ResultToken authorizes the enrollment result page's resend action.
 	ResultToken string
 	Auth        *Authenticator
 }
@@ -279,11 +289,11 @@ func (h *Harness) FinishEnroll(t *testing.T, user, code string, a *Authenticator
 		Device      string `json:"device"`
 		Topic       string `json:"topic"`
 		NtfyLink    string `json:"ntfy_link"`
-		HasCode     bool   `json:"has_code"`
+		Server      string `json:"server"`
 		ResultToken string `json:"result_token"`
 	}
 	_ = json.Unmarshal(b, &out)
-	return Enrolled{DeviceID: out.Device, Topic: out.Topic, NtfyLink: out.NtfyLink, HasCode: out.HasCode,
+	return Enrolled{DeviceID: out.Device, Topic: out.Topic, NtfyLink: out.NtfyLink, Server: out.Server,
 		ResultToken: out.ResultToken, Auth: a}, resp.StatusCode, b
 }
 

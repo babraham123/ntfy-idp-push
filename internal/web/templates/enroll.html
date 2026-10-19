@@ -8,19 +8,31 @@
 <p id="status" role="status"></p>
 <section id="done" hidden>
   <h2>Connect the ntfy app</h2>
-  <p><a id="ntfy-link" class="button" href="#">Open in ntfy</a></p>
-  <p id="code-expiry" hidden>The link signs the app in once and expires at <time></time>.</p>
-  <p id="no-code" hidden>Your ntfy server cannot issue sign-in codes, so the ntfy app must already be signed in as <strong>{{.User}}</strong>.</p>
-  <div id="manual">
-    <p>If the app does not sign you in (app versions without one-tap sign-in ignore the code), sign in manually, then open the link again:</p>
-    <p><button type="button" id="password-btn">Set an ntfy password</button></p>
-    <dl id="password" hidden>
-      <dt>Username</dt><dd><code id="password-user"></code></dd>
-      <dt>Password</dt><dd><code id="password-value"></code></dd>
-    </dl>
-  </div>
-  <p>On another device? Scan this with the phone:</p>
+  <p>The ntfy app on the phone must already be signed in as <strong>{{.User}}</strong> with the ntfy credentials from your welcome email.</p>
+  {{if eq .Platform "android"}}
+  <p><a class="button ntfy-link" href="#">Subscribe in ntfy</a></p>
+  {{else if eq .Platform "desktop"}}
+  <h3>Android</h3>
+  <p>Scan this with the phone to subscribe in ntfy:</p>
   <img id="qr" alt="QR code for the ntfy link" width="240" height="240">
+  {{end}}
+  {{if ne .Platform "ios"}}
+  <p class="note">If the app does not subscribe, add topic <code class="ntfy-topic"></code> on server <code class="ntfy-server"></code> manually.</p>
+  {{end}}
+  {{if ne .Platform "android"}}
+  {{if eq .Platform "desktop"}}<h3>iPhone or iPad</h3>{{end}}
+  <p>The ntfy iOS app does not open ntfy:// links, so subscribe by hand:</p>
+  <dl>
+    <dt>Server URL</dt><dd><code class="ntfy-server"></code> <button type="button" data-copy="server">Copy</button></dd>
+    <dt>Topic</dt><dd><code class="ntfy-topic"></code> <button type="button" data-copy="topic">Copy</button></dd>
+  </dl>
+  <ol>
+    <li>Open ntfy and tap <strong>+</strong>.</li>
+    <li>Turn on <strong>Use another server</strong> and paste the server URL.</li>
+    <li>Paste the topic.</li>
+    <li>Tap <strong>Subscribe</strong>.</li>
+  </ol>
+  {{end}}
   <p>A "Finish setup" notification will arrive in ntfy. Tap it to activate this phone.</p>
   <p><button type="button" id="resend-btn">Resend setup notification</button></p>
 </section>

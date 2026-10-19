@@ -1,7 +1,9 @@
 # ntfy-idp-push example config. Every key can also be set as NTFY_IDP_PUSH_<KEY>
 # (dashes to underscores; lists comma-separated). SIGHUP reloads per-request settings.
-# Secrets (duo-secret-key, duo-secret-key-previous, ntfy-admin-token) can instead be read from a
-# file: <key>-file here, or NTFY_IDP_PUSH_<KEY>_FILE.
+# Secrets (duo-secret-key, duo-secret-key-previous, ntfy-admin-token, directory-ldap-password,
+# smtp-password) can instead be read from a file: <key>-file here, or NTFY_IDP_PUSH_<KEY>_FILE.
+# The directory-*, smtp-* and mail-* keys take effect only on a restart; a SIGHUP that changes one
+# is refused.
 
 # Plain HTTP. The reverse proxy in front terminates TLS for duo-hostname, preserves Host, and signs
 # users in (forward-auth). Only the proxy may reach this port.
@@ -42,3 +44,41 @@ webauthn-allow-synced: false
 # authenticator, and "device-bound" would be only a promise the client makes.
 webauthn-require-attestation: true
 database: "/var/lib/ntfy-idp-push/db.sqlite"
+
+# The user directory controls who has an ntfy account. Every directory-sync-interval (and once at
+# startup), the shim lists the directory. New people get an account and a welcome email with their
+# ntfy password. People absent from the directory or marked disabled are disabled (never deleted).
+# They are enabled when listed. A directory that errors or lists nobody skips the round.
+directory-type: "ldap"                  # ldap | file; required
+directory-sync-interval: "15m"
+
+# directory-type: file reads Authelia's file user database (users_database.yml), re-read every round.
+# directory-file: "/etc/authelia/users_database.yml"
+# directory-group: ""                   # only users in this group; empty: everyone
+
+# directory-type: ldap. Use the same server and bind user as Authelia's ldap backend.
+directory-ldap-address: "ldaps://ldap.example.com:636"   # ldaps:// or ldap://
+directory-ldap-start-tls: false         # ldap:// only: upgrade with StartTLS before binding
+directory-ldap-tls-skip-verify: false
+directory-ldap-ca-file: ""              # PEM bundle trusted besides the system roots (private CA)
+directory-ldap-base-dn: "dc=example,dc=com"
+directory-ldap-user: "cn=authelia,dc=example,dc=com"     # bind DN; empty binds anonymously
+directory-ldap-password: "…"
+# directory-ldap-password-file: "/run/secrets/ldap_password"
+directory-ldap-users-filter: "(objectClass=person)"      # lists every user; no {input} placeholder
+directory-ldap-attribute-username: "uid"
+directory-ldap-attribute-mail: "mail"
+directory-ldap-attribute-display-name: "displayName"
+directory-ldap-attribute-member-of: "memberOf"
+directory-ldap-group-dn: ""             # only members of this group DN; empty: everyone the filter finds
+
+# The SMTP relay for the welcome email, which carries the user's ntfy password. Port 465 is
+# implicit TLS; on any other port smtp-starttls refuses a relay that does not upgrade.
+smtp-host: "smtp.example.com"           # required
+smtp-port: 587
+smtp-user: "…"
+smtp-password: "…"
+# smtp-password-file: "/run/secrets/smtp_password"
+smtp-starttls: true
+mail-from: "ntfy-idp-push <push@example.com>"   # required
+mail-reply-to: ""                       # e.g. the admins who can resend a welcome

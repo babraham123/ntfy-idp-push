@@ -1,0 +1,27 @@
+Hi {{.Name}},
+
+You have an account on the ntfy push notification server at {{.ServerURL}}.
+
+  Server URL: {{.ServerURL}}
+  Username:   {{.Username}}
+  Password:   {{.Password}}
+
+This is the only time the password is shown. Keep it somewhere safe.
+
+1. Install the ntfy app:
+   Android (Google Play): {{.PlayStoreURL}}
+   Android (F-Droid):     {{.FDroidURL}}
+   iPhone and iPad:       {{.AppStoreURL}}
+   Web app:               {{.ServerURL}}
+
+2. Add your account: in ntfy, open Settings -> Manage users -> Add, then enter the server URL, username and password above.
+{{- if .Topics}}
+
+3. Subscribe: on the phone with ntfy installed, open each link below.
+{{- range .Topics}}
+   {{.Topic}}: {{.URL}}
+{{- end}}
+   If a link does not open the app, tap + in ntfy, choose "Use another server", and enter the server URL and the topic name.
+{{- end}}
+
+Lost the password? Ask an admin to resend this email. The resent email contains a new password and invalidates older passwords.

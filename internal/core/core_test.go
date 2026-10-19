@@ -2,10 +2,8 @@ package core_test
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"html"
 	"net/url"
 	"strings"
 	"sync/atomic"
@@ -69,9 +67,6 @@ func approve(t *testing.T, h *testutil.Harness, a *testutil.Authenticator, click
 	return resp.StatusCode
 }
 
-// phone is an ntfy client without credentials, as the app is before it redeems a code.
-func phone(h *testutil.Harness) *ntfy.Client { return ntfy.New(h.Cfg.NtfyBaseURL, "") }
-
 func pushAction(m ntfy.Message, label string) ntfy.Action {
 	for _, a := range m.Actions {
 		if a.Label == label {
@@ -93,13 +88,10 @@ func TestAutheliaLoginApprovedWithPasskey(t *testing.T) {
 	if h.Ntfy.Grant("alice", "alice-*") != config.PermReadWrite || h.Ntfy.Grant("alice", "alerts") != config.PermReadOnly {
 		t.Fatalf("enroll-access not applied: %+v", h.Ntfy.User("alice").Grants)
 	}
-	if !strings.HasPrefix(dev.NtfyLink, "ntfy://") || !strings.Contains(dev.NtfyLink, "/"+dev.Topic+"?") ||
-		!strings.Contains(dev.NtfyLink, "user=alice") || !strings.Contains(dev.NtfyLink, "code=") {
-		t.Fatalf("ntfy link %q", dev.NtfyLink)
-	}
-	link, _ := url.Parse(dev.NtfyLink)
-	if tok, err := phone(h).RedeemEnrollCode(context.Background(), link.Query().Get("code"), "Pixel"); err != nil || tok.Username != "alice" {
-		t.Fatalf("enrollment link code: %+v %v", tok, err)
+	// The result page subscribes the app to the device's topic on the plain-HTTP fake ntfy; the
+	// link names the user and carries no credentials.
+	if want := ntfyLink(h, dev.Topic, "alice"); dev.NtfyLink != want || dev.Server != h.Cfg.NtfyBaseURL {
+		t.Fatalf("ntfy link %q server %q, want %q", dev.NtfyLink, dev.Server, want)
 	}
 
 	pre, err := h.Duo(testutil.IKey, testutil.SKey).Preauth(authapi.PreauthUsername("alice"))
@@ -566,70 +558,38 @@ func TestUnverifiedDeviceHidden(t *testing.T) {
 
 func TestProvision(t *testing.T) {
 	h := testutil.NewHarness(t, nil)
-	resp, page := h.Do(t, testutil.Request{Method: "GET", Path: "/provision", User: "dana",
-		Header: map[string]string{"User-Agent": "Mozilla/5.0 (Linux; Android 15)"}})
-	if resp.StatusCode != 200 {
-		t.Fatalf("provision: %d", resp.StatusCode)
-	}
-	for _, want := range []string{"ntfy://", "/alerts?", "/dana-inbox?", "user=dana", "play.google.com"} {
-		if !strings.Contains(string(page), want) {
-			t.Fatalf("android page lacks %q", want)
-		}
-	}
-	androidCode := linkParam(t, string(page), "ntfy://", "code")
-
-	resp, page = h.Do(t, testutil.Request{Method: "GET", Path: "/provision", User: "dana",
-		Header: map[string]string{"User-Agent": "Mozilla/5.0 (X11; Linux x86_64)"}})
-	if resp.StatusCode != 200 || !strings.Contains(string(page), "data:image/png;base64,") {
-		t.Fatalf("desktop page: %d", resp.StatusCode)
-	}
-	// The web app link carries code, user and topics in the fragment, per ntfy's /account/token/redeem.
-	frag, err := url.ParseQuery(linkParam(t, string(page), h.Ntfy.URL+"/account/token/redeem#", ""))
-	if err != nil {
+	ctx := context.Background()
+	if _, err := h.Svc.Provision(ctx, "dana"); err != nil {
 		t.Fatal(err)
 	}
-	if frag.Get("user") != "dana" || frag.Get("subscribe") != "alerts,dana-inbox" || frag.Get("code") == "" {
-		t.Fatalf("redeem fragment %v", frag)
-	}
-	// Reloading superseded the first page's code; the new one redeems once, as dana.
-	ctx := context.Background()
-	if _, err := phone(h).RedeemEnrollCode(ctx, androidCode, "Pixel"); err == nil {
-		t.Fatal("superseded code still redeemable")
-	}
-	tok, err := phone(h).RedeemEnrollCode(ctx, frag.Get("code"), "Laptop")
-	if err != nil || tok.Username != "dana" {
-		t.Fatalf("redeem: %+v %v", tok, err)
-	}
-	if _, err := phone(h).RedeemEnrollCode(ctx, frag.Get("code"), "Laptop"); err == nil {
-		t.Fatal("code redeemed twice")
+	if h.Ntfy.User("dana") == nil || h.Ntfy.Grant("dana", "dana-*") != config.PermReadWrite || h.Ntfy.Grant("dana", "alerts") != config.PermReadOnly {
+		t.Fatalf("enroll-access not applied: %+v", h.Ntfy.User("dana"))
 	}
 	// Provisioning creates no push device.
 	pre, _ := h.Duo(testutil.IKey, testutil.SKey).Preauth(authapi.PreauthUsername("dana"))
 	if pre.Response.Result != "enroll" {
 		t.Fatalf("preauth after provision: %+v", pre.Response)
 	}
-	if h.Ntfy.Grant("dana", "dana-*") != config.PermReadWrite {
-		t.Fatal("enroll-access not applied")
+
+	// The default handoff subscribes to every default topic, ${user} expanded.
+	hd := h.Svc.DefaultHandoff("dana")
+	if hd.Server != h.Cfg.NtfyBaseURL || len(hd.Links) != 2 ||
+		hd.Links[0] != (core.TopicLink{Topic: "alerts", URL: ntfyLink(h, "alerts", "dana")}) ||
+		hd.Links[1] != (core.TopicLink{Topic: "dana-inbox", URL: ntfyLink(h, "dana-inbox", "dana")}) {
+		t.Fatalf("default handoff %+v", hd)
+	}
+
+	// A new ntfy password replaces the old one and is returned once.
+	before := h.Ntfy.Password("dana")
+	pw, err := h.Svc.SetNtfyPassword(ctx, "dana")
+	if err != nil || pw == "" || pw == before || h.Ntfy.Password("dana") != pw {
+		t.Fatalf("ntfy password: %q %v", pw, err)
 	}
 }
 
-// linkParam parses an HTML page for the first link starting with prefix, returning the query param
-// key (or the rest of the link if key is "").
-func linkParam(t *testing.T, page, prefix, key string) string {
-	t.Helper()
-	i := strings.Index(page, prefix)
-	if i < 0 {
-		t.Fatalf("no link starting with %q", prefix)
-	}
-	link := html.UnescapeString(page[i : i+strings.IndexByte(page[i:], '"')])
-	if key == "" {
-		return strings.TrimPrefix(link, prefix)
-	}
-	u, err := url.Parse(link)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return u.Query().Get(key)
+// ntfyLink is the subscribe link for topic as user on the harness's plain-HTTP ntfy server.
+func ntfyLink(h *testutil.Harness, topic, user string) string {
+	return "ntfy://" + strings.TrimPrefix(h.Cfg.NtfyBaseURL, "http://") + "/" + topic + "?secure=false&user=" + user
 }
 
 func TestProvisionRefusesUsernameThatReachesPushTopics(t *testing.T) {
@@ -640,15 +600,6 @@ func TestProvisionRefusesUsernameThatReachesPushTopics(t *testing.T) {
 	}
 	if h.Ntfy.Grant("push", "push-*") != "" {
 		t.Fatal("push-* granted")
-	}
-}
-
-func TestEnrollmentWithoutNtfyEnrollEndpoint(t *testing.T) {
-	h := testutil.NewHarness(t, nil)
-	h.Ntfy.EnrollSupported = false
-	dev := h.Enroll(t, "alice", testutil.NewAuthenticator(t, testutil.PublicURL))
-	if dev.HasCode || strings.Contains(dev.NtfyLink, "code=") || !strings.Contains(dev.NtfyLink, "user=alice") {
-		t.Fatalf("link without enroll support: %q", dev.NtfyLink)
 	}
 }
 
@@ -856,7 +807,7 @@ func TestPendingLoginBlockedByLaterDisable(t *testing.T) {
 		authCall(h, "alice", dev.DeviceID)
 		m := h.Ntfy.NextPublish(t)
 		u, _, _ := h.Svc.DevicesOf(ctx, "alice")
-		if err := h.Store.SetUserDisabled(ctx, u.ID, true); err != nil {
+		if err := h.Store.SetUserDisabled(ctx, u.ID, true, false); err != nil {
 			t.Fatal(err)
 		}
 		if st := approve(t, h, dev.Auth, m.Click); st != 403 {
@@ -1101,7 +1052,7 @@ func TestFailedEnrollmentKeepsCodeUsable(t *testing.T) {
 	}
 }
 
-func TestEnrollmentResultResendAndManualSignIn(t *testing.T) {
+func TestEnrollmentResultResend(t *testing.T) {
 	h := testutil.NewHarness(t, nil)
 	e, status, b := h.FinishEnroll(t, "alice", "", testutil.NewAuthenticator(t, testutil.PublicURL))
 	if status != 200 || e.ResultToken == "" {
@@ -1111,15 +1062,7 @@ func TestEnrollmentResultResendAndManualSignIn(t *testing.T) {
 	// The result page keeps working across a server restart.
 	h.Restart(t, func(*config.Config) {})
 
-	// Manual sign-in for apps that ignore the code: a fresh ntfy password, shown once.
-	before := h.Ntfy.Password("alice")
-	resp, b := h.Do(t, testutil.Request{Method: "POST", Path: "/token/password", Body: []byte(`{"token":"` + e.ResultToken + `"}`)})
-	var pw struct{ Username, Password string }
-	_ = json.Unmarshal(b, &pw)
-	if resp.StatusCode != 200 || pw.Username != "alice" || pw.Password == "" || pw.Password == before || h.Ntfy.Password("alice") != pw.Password {
-		t.Fatalf("manual password: %d %s", resp.StatusCode, b)
-	}
-	resp, _ = h.Do(t, testutil.Request{Method: "POST", Path: "/token/password", Body: []byte(`{"token":"forged"}`)})
+	resp, _ := h.Do(t, testutil.Request{Method: "POST", Path: "/token/resend", Body: []byte(`{"token":"forged"}`)})
 	if resp.StatusCode != 410 {
 		t.Fatalf("forged result token: %d", resp.StatusCode)
 	}
@@ -1137,12 +1080,6 @@ func TestEnrollmentResultResendAndManualSignIn(t *testing.T) {
 	resp, _ = h.Do(t, testutil.Request{Method: "POST", Path: "/token/resend", Body: []byte(`{"token":"` + e.ResultToken + `"}`)})
 	if resp.StatusCode != 410 {
 		t.Fatalf("resend after setup: %d", resp.StatusCode)
-	}
-
-	// The same manual path from /provision, a plain HTML form.
-	resp, b = h.SubmitForm(t, "/provision", "alice", "/provision/password", nil)
-	if resp.StatusCode != 200 || !strings.Contains(string(b), h.Ntfy.Password("alice")) {
-		t.Fatalf("provision password: %d", resp.StatusCode)
 	}
 }
 

@@ -22,15 +22,22 @@ services:
     volumes:
       - ./config:/etc/ntfy-idp-push:ro
       - state:/var/lib/ntfy-idp-push
+      # directory-type: file reads Authelia's user database. Mount its directory rather than the file:
+      # a file bind mount shows the original file after the host replaces it.
+      # - ../authelia/users:/etc/authelia:ro
     # A secret is named three times: the top-level secrets: says where Compose reads it on the host, the
     # service's secrets: mounts it at /run/secrets/<name>, and the _FILE variable tells the app that path.
     # Reading secrets from files keeps them out of server.yml and the environment.
     environment:
       NTFY_IDP_PUSH_DUO_SECRET_KEY_FILE: /run/secrets/duo_secret_key
       NTFY_IDP_PUSH_NTFY_ADMIN_TOKEN_FILE: /run/secrets/ntfy_admin_token
+      NTFY_IDP_PUSH_DIRECTORY_LDAP_PASSWORD_FILE: /run/secrets/ldap_password
+      NTFY_IDP_PUSH_SMTP_PASSWORD_FILE: /run/secrets/smtp_password
     secrets:
       - duo_secret_key
       - ntfy_admin_token
+      - ldap_password      # only for directory-type: ldap
+      - smtp_password
     healthcheck:
       test: ["CMD", "/usr/bin/ntfy-idp-push", "healthcheck"]
       interval: 30s
@@ -41,6 +48,10 @@ secrets:
     file: ./secrets/duo_secret_key
   ntfy_admin_token:
     file: ./secrets/ntfy_admin_token
+  ldap_password:
+    file: ./secrets/ldap_password
+  smtp_password:
+    file: ./secrets/smtp_password
 
 networks:
   proxy:

@@ -13,3 +13,4 @@ dt { color: var(--muted); } dd { margin: 0; word-break: break-all; }
 table { width: 100%; border-collapse: collapse; } td, th { text-align: left; padding: .4rem; border-bottom: 1px solid #8884; }
 .links { list-style: none; padding: 0; } .note { color: var(--muted); }
 img { max-width: 100%; height: auto; image-rendering: pixelated; background: #fff; }
+dd button { padding: .2rem .6rem; margin: 0 0 0 .5rem; }

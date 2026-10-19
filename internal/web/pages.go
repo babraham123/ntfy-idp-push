@@ -2,81 +2,25 @@ package web
 
 import (
 	"errors"
-	"html/template"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/babraham123/ntfy-idp-push/internal/core"
 	"github.com/babraham123/ntfy-idp-push/internal/routes"
 )
 
-type topicLink struct {
-	Topic string
-	Link  template.URL
-}
-
-// provisionPage creates the ntfy account and hands out one-tap sign-in/subscribe links.
-func (s *Server) provisionPage(w http.ResponseWriter, r *http.Request) {
-	user, ok := s.signedIn(w, r)
-	if !ok {
-		return
-	}
-	ctx := r.Context()
-	if _, err := s.svc.Provision(ctx, user); err != nil {
-		s.pageFail(w, err, "provision")
-		return
-	}
-	h, err := s.svc.DefaultHandoff(ctx, user)
-	if err != nil {
-		s.pageFail(w, err, "provision: handoff")
-		return
-	}
-	var links []topicLink
-	for _, l := range h.Links {
-		links = append(links, topicLink{Topic: l.Topic, Link: template.URL(l.URL)})
-	}
-	data := map[string]any{
-		"User":    user,
-		"HasCode": h.HasCode(),
-		"Links":   links,
-		"WebApp":  s.svc.Config().NtfyBaseURL,
-	}
-	if h.HasCode() {
-		data["CodeMinutes"] = int(time.Until(h.CodeExpires).Round(time.Minute).Minutes())
-	}
+// platform picks the ntfy app instructions a page shows: the Android app subscribes from an
+// ntfy:// link, the iOS app does not open them and subscribes by hand, and a desktop browser is
+// not the phone, so it shows a QR code for Android and the manual steps for iOS.
+func platform(r *http.Request) string {
 	ua := r.UserAgent()
 	switch {
 	case strings.Contains(ua, "Android"):
-		data["Platform"] = "android"
+		return "android"
 	case strings.Contains(ua, "iPhone") || strings.Contains(ua, "iPad"):
-		data["Platform"] = "ios"
-	default:
-		data["Platform"] = "desktop"
-		if len(links) > 0 {
-			if qr, err := qrDataURL(string(links[0].Link)); err == nil {
-				data["QR"] = qr
-			}
-		}
-		if h.RedeemURL != "" {
-			data["Redeem"] = template.URL(h.RedeemURL)
-		}
+		return "ios"
 	}
-	s.render(w, http.StatusOK, "provision.html", data)
-}
-
-// provisionPassword is the manual sign-in path for ntfy apps that cannot redeem sign-in codes.
-func (s *Server) provisionPassword(w http.ResponseWriter, r *http.Request) {
-	user, ok := s.signedIn(w, r)
-	if !ok {
-		return
-	}
-	password, err := s.svc.SetNtfyPassword(r.Context(), user)
-	if err != nil {
-		s.pageFail(w, err, "provision: ntfy password")
-		return
-	}
-	s.render(w, http.StatusOK, "password.html", map[string]string{"User": user, "Password": password, "Server": s.svc.Config().NtfyBaseURL})
+	return "desktop"
 }
 
 func (s *Server) devicesPage(w http.ResponseWriter, r *http.Request) {

@@ -13,14 +13,15 @@ import (
 
 // ---- users
 
-const userCols = `id, username, ntfy_grants_json, disabled_at, created_at`
+const userCols = `id, username, ntfy_grants_json, disabled_at, disabled_by_sync, created_at, email, display_name, synced_at, welcomed_at`
 
 func scanUser(row interface{ Scan(...any) error }) (*model.User, error) {
 	var u model.User
 	var grants string
-	var disabled sql.NullInt64
+	var disabled, synced, welcomed sql.NullInt64
 	var created int64
-	if err := row.Scan(&u.ID, &u.Username, &grants, &disabled, &created); err != nil {
+	if err := row.Scan(&u.ID, &u.Username, &grants, &disabled, &u.DisabledBySync, &created, &u.Email, &u.DisplayName,
+		&synced, &welcomed); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -31,6 +32,8 @@ func scanUser(row interface{ Scan(...any) error }) (*model.User, error) {
 	}
 	u.DisabledAt = fromUnix(disabled)
 	u.CreatedAt = time.Unix(created, 0)
+	u.SyncedAt = fromUnix(synced)
+	u.WelcomedAt = fromUnix(welcomed)
 	return &u, nil
 }
 
@@ -102,12 +105,32 @@ func (s *Store) PendingNtfyResets(ctx context.Context) ([]string, error) {
 	return out, rows.Err()
 }
 
-func (s *Store) SetUserDisabled(ctx context.Context, userID string, disabled bool) error {
+// SetUserDisabled disables or enables the user; bySync records that the directory sync made the
+// change.
+func (s *Store) SetUserDisabled(ctx context.Context, userID string, disabled, bySync bool) error {
 	var v any
 	if disabled {
 		v = unix(time.Now())
 	}
-	_, err := s.db.ExecContext(ctx, `UPDATE users SET disabled_at = ? WHERE id = ?`, v, userID)
+	_, err := s.db.ExecContext(ctx, `UPDATE users SET disabled_at = ?, disabled_by_sync = ? WHERE id = ?`,
+		v, disabled && bySync, userID)
+	return err
+}
+
+// SetUserProfile records what the directory said about the user at syncedAt.
+func (s *Store) SetUserProfile(ctx context.Context, userID, email, displayName string, syncedAt time.Time) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE users SET email = ?, display_name = ?, synced_at = ? WHERE id = ?`,
+		email, displayName, unix(syncedAt), userID)
+	return err
+}
+
+// SetUserWelcomed records when the user's welcome email was sent; nil marks a welcome as owed.
+func (s *Store) SetUserWelcomed(ctx context.Context, userID string, t *time.Time) error {
+	var v any
+	if t != nil {
+		v = unix(*t)
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE users SET welcomed_at = ? WHERE id = ?`, v, userID)
 	return err
 }
 
