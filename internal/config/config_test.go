@@ -18,8 +18,7 @@ func valid() *Config {
 	c.NtfyAdminToken = "tk_x"
 	c.EnrollAccess = []string{"${user}-*:rw", "alerts:ro"}
 	c.DefaultTopics = []string{"alerts", "${user}-inbox"}
-	c.DirectoryType = "file"
-	c.DirectoryFile = "/etc/authelia/users_database.yml"
+	c.DirectoryType = "ldap"
 	c.SMTPHost = "smtp.example.com"
 	c.MailFrom = "push@example.com"
 	return c
@@ -82,7 +81,6 @@ func TestValidateFailsClosed(t *testing.T) {
 		"bad trusted proxy":  func(c *Config) { c.TrustedProxies = []string{"proxy"} },
 		"no identity header": func(c *Config) { c.IdentityHeader = " " },
 		"no listener":        func(c *Config) { c.ListenHTTP = "" },
-		"no directory":       func(c *Config) { c.DirectoryType = "" },
 		"unknown directory":  func(c *Config) { c.DirectoryType = "ad" },
 		"no sync interval":   func(c *Config) { c.DirectorySyncInterval = 0 },
 		"no smtp host":       func(c *Config) { c.SMTPHost = "" },
@@ -93,6 +91,15 @@ func TestValidateFailsClosed(t *testing.T) {
 		if err := c.Validate(); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
+	}
+}
+
+// Without a directory nothing is polled, so the sync interval is not checked.
+func TestNoDirectory(t *testing.T) {
+	c := valid()
+	c.DirectoryType, c.DirectorySyncInterval = "", 0
+	if err := c.Validate(); err != nil {
+		t.Fatalf("no directory refused: %v", err)
 	}
 }
 
@@ -183,8 +190,6 @@ trusted-proxies: [10.0.0.5]
 identity-header: x-authentik-username
 ntfy-base-url: https://ntfy.example.com
 ntfy-admin-token: tk_x
-directory-type: file
-directory-file: /etc/authelia/users_database.yml
 smtp-host: smtp.example.com
 mail-from: push@example.com
 `

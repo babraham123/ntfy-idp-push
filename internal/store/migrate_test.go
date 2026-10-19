@@ -46,7 +46,7 @@ func TestMigrateAddsUserProfile(t *testing.T) {
 	}
 
 	synced := time.Unix(1_700_000_000, 0)
-	if err := st.SetUserProfile(ctx, u.ID, "alice@example.com", "Alice", synced); err != nil {
+	if err := st.SetUserProfile(ctx, u.ID, "alice@example.com", "Alice", &synced); err != nil {
 		t.Fatal(err)
 	}
 	welcomed := synced.Add(time.Minute)

@@ -22,9 +22,6 @@ services:
     volumes:
       - ./config:/etc/ntfy-idp-push:ro
       - state:/var/lib/ntfy-idp-push
-      # directory-type: file reads Authelia's user database. Mount its directory rather than the file:
-      # a file bind mount shows the original file after the host replaces it.
-      # - ../authelia/users:/etc/authelia:ro
     # A secret is named three times: the top-level secrets: says where Compose reads it on the host, the
     # service's secrets: mounts it at /run/secrets/<name>, and the _FILE variable tells the app that path.
     # Reading secrets from files keeps them out of server.yml and the environment.

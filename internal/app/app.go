@@ -22,16 +22,17 @@ import (
 
 // App is one shim process's worth of wiring over an open store.
 type App struct {
-	Cfg     *config.Config
-	Store   *store.Store
-	Svc     *core.Service
+	Cfg   *config.Config
+	Store *store.Store
+	Svc   *core.Service
+	// Dir is nil when no directory is configured.
 	Dir     directory.Source
 	Handler http.Handler
 	Log     *slog.Logger
 }
 
-// Build wires core and the handlers over an already open store, the user directory and the mail
-// sender.
+// Build wires core and the handlers over an already open store, the user directory (nil for none)
+// and the mail sender.
 func Build(cfg *config.Config, st *store.Store, log *slog.Logger, dir directory.Source, mailer mail.Sender) (*App, error) {
 	svc, err := core.New(cfg, st, log, dir, mailer)
 	if err != nil {
@@ -47,9 +48,12 @@ func Build(cfg *config.Config, st *store.Store, log *slog.Logger, dir directory.
 // builds the app on them. Neither the source nor the sender connects until it is used, so commands
 // that need neither work while the directory or the relay is down. Close releases the database.
 func Open(cfg *config.Config, log *slog.Logger) (*App, error) {
-	dir, err := directory.New(DirectoryConfig(cfg))
-	if err != nil {
-		return nil, err
+	var dir directory.Source
+	if cfg.DirectoryType != "" {
+		var err error
+		if dir, err = directory.New(DirectoryConfig(cfg)); err != nil {
+			return nil, err
+		}
 	}
 	mailer, err := mail.New(MailConfig(cfg))
 	if err != nil {
@@ -72,9 +76,7 @@ func (a *App) Close() error { return a.Store.Close() }
 // DirectoryConfig is the directory source the directory-* keys describe.
 func DirectoryConfig(cfg *config.Config) directory.Config {
 	return directory.Config{
-		Type:  cfg.DirectoryType,
-		File:  cfg.DirectoryFile,
-		Group: cfg.DirectoryGroup,
+		Type: cfg.DirectoryType,
 		LDAP: directory.LDAPConfig{
 			Address:              cfg.DirectoryLDAPAddress,
 			StartTLS:             cfg.DirectoryLDAPStartTLS,
@@ -140,10 +142,9 @@ func every(ctx context.Context, interval time.Duration, fn func()) {
 	}
 }
 
-// Serve runs the startup checks, the listener, the purge loop and the directory sync loop until
-// ctx ends. Each value
-// received on the reload channel re-reads the configuration with load and applies it; a refused
-// reload keeps the running one and is logged.
+// Serve runs the startup checks, the listener, the purge loop and, with a directory, the sync loop
+// until ctx ends. Each value received on the reload channel re-reads the configuration with load
+// and applies it; a refused reload keeps the running one and is logged.
 func (a *App) Serve(ctx context.Context, reload <-chan struct{}, load func() (*config.Config, error)) error {
 	if err := a.startupChecks(ctx); err != nil {
 		return err
@@ -155,9 +156,13 @@ func (a *App) Serve(ctx context.Context, reload <-chan struct{}, load func() (*c
 	a.Log.Info("listening", "http", a.Cfg.ListenHTTP, "hostname", a.Cfg.DuoHostname)
 
 	go every(ctx, purgeInterval, func() { a.Svc.Purge(ctx) })
-	// Sync logs its own failures. directory-sync-interval is restart-only, so the startup value
-	// holds for the process.
-	go every(ctx, a.Cfg.DirectorySyncInterval.D(), func() { _ = a.Svc.Sync(ctx) })
+	if a.Dir == nil {
+		a.Log.Info("directory sync off: no directory-type; provision users with user provision --email")
+	} else {
+		// Sync logs its own failures. directory-sync-interval is restart-only, so the startup value
+		// holds for the process.
+		go every(ctx, a.Cfg.DirectorySyncInterval.D(), func() { _ = a.Svc.Sync(ctx) })
+	}
 
 	for {
 		select {
@@ -186,25 +191,17 @@ func (a *App) startupChecks(ctx context.Context) error {
 	if err := a.Svc.StartupChecks(ctx); err != nil {
 		return errors.Join(errors.New("startup check"), err)
 	}
+	if a.Dir == nil {
+		return nil
+	}
 	if err := a.Dir.Check(ctx); err != nil {
-		return errors.Join(fmt.Errorf("directory check (%s)", directoryCheckKey(a.Cfg, err)), err)
+		key := "directory-ldap-*"
+		if errors.Is(err, directory.ErrNoGroup) {
+			key = "directory-ldap-group-dn"
+		}
+		return errors.Join(fmt.Errorf("directory check (%s)", key), err)
 	}
 	return nil
-}
-
-// directoryCheckKey names the configuration a failed directory check points at.
-func directoryCheckKey(cfg *config.Config, err error) string {
-	ldap := cfg.DirectoryType == "ldap"
-	switch {
-	case errors.Is(err, directory.ErrNoGroup) && ldap:
-		return "directory-ldap-group-dn"
-	case errors.Is(err, directory.ErrNoGroup):
-		return "directory-group"
-	case ldap:
-		return "directory-ldap-*"
-	default:
-		return "directory-file"
-	}
 }
 
 // Reload applies a freshly loaded configuration, or logs why it was refused.

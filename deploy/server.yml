@@ -47,14 +47,11 @@ database: "/var/lib/ntfy-idp-push/db.sqlite"
 
 # The user directory controls who has an ntfy account. Every directory-sync-interval (and once at
 # startup), the shim lists the directory. New people get an account and a welcome email with their
-# ntfy password. People it listed before and no longer lists, or marks disabled, are deleted, with
-# their devices and ntfy account. A directory that errors skips the round.
-directory-type: "ldap"                  # ldap | file; required
+# ntfy password. People it listed before and no longer lists are deleted, with their devices and
+# ntfy account. A directory that errors skips the round. Without a directory nothing syncs, and
+# `ntfy-idp-push user provision <user> --email <addr>` creates each account.
+directory-type: "ldap"                  # ldap | empty: no directory
 directory-sync-interval: "15m"
-
-# directory-type: file reads Authelia's file user database (users_database.yml), re-read every round.
-# directory-file: "/etc/authelia/users_database.yml"
-# directory-group: ""                   # only users in this group, which must have one; empty: everyone
 
 # directory-type: ldap. Use the same server and bind user as Authelia's ldap backend.
 directory-ldap-address: "ldaps://ldap.example.com:636"   # ldaps:// or ldap://

@@ -2,7 +2,7 @@
 
 ntfy-idp-push replaces the Duo Auth API to deliver secure mobile push notifications over [ntfy](https://ntfy.sh) for Authelia and authentik. ntfy acts only as transport; approvals require a device-bound passkey signature from the enrolled phone. See [ARCHITECTURE.md](ARCHITECTURE.md) for design details.
 
-Accounts follow your user directory (LDAP, or Authelia's `users_database.yml`). The shim polls the directory, creates an ntfy account for each new person, emails them a welcome with their ntfy password, and deletes accounts the directory drops. Users enroll their phone's passkey at `/enroll`.
+Accounts follow your LDAP directory: the shim polls it, creates an ntfy account for each new person, emails them a welcome with their ntfy password, and deletes accounts the directory drops. Without a directory, `user provision <user> --email <addr>` creates each account. Users enroll their phone's passkey at `/enroll`.
 
 ## Run
 
@@ -51,18 +51,18 @@ Build the local image with `make image`. Execute CLI commands inside the contain
 
 ## Directory and email
 
-The directory decides who gets an ntfy account. Once at startup and then every `directory-sync-interval` (default `15m`), the shim lists it and:
+With `directory-type: ldap`, the directory decides who gets an ntfy account. Once at startup and then every `directory-sync-interval` (default `15m`), the shim lists it and:
 
 - creates an account for each new person, applies `enroll-access`, and sends one welcome email: ntfy server URL, username, a random password shown only there, app links, the "Manage users" steps that sign the app in, and an `ntfy://` link per `default-topics` entry;
 - keeps email and display name current;
-- deletes users it has listed once they are absent from the directory, and users marked disabled, with their devices and ntfy account; a person who returns starts over with a new account and welcome;
+- deletes users it has listed once they are absent from the directory (a disabled LDAP account the users filter excludes is absent), with their devices and ntfy account; a person who returns starts over with a new account and welcome;
 - never changes a `user disable` made by an admin.
 
 A directory that errors skips the round and changes nothing (audit `sync_skipped`), since deletes cannot be undone. The next round retries unsent welcome emails. Resetting a user's ntfy account (`user reset-ntfy`, `device revoke --reset-ntfy-user`) sends a new welcome, since the recreated account's password is unknown.
 
 `directory-type: ldap` takes Authelia's LDAP settings: `directory-ldap-address` (`ldaps://` or `ldap://` with `directory-ldap-start-tls`), `directory-ldap-base-dn`, the bind `directory-ldap-user` and `directory-ldap-password` (or `-file`), `directory-ldap-users-filter` (default `(objectClass=person)`; it lists users, so no `{input}` placeholder), and the `directory-ldap-attribute-*` names (defaults `uid`, `mail`, `displayName`, `memberOf`). `directory-ldap-group-dn` limits the sync to one group's members, filtered by the server. An LDAP server with a certificate from a private CA needs `directory-ldap-ca-file`, a PEM bundle trusted besides the system roots; put it in `./config` and set `directory-ldap-ca-file: /etc/ntfy-idp-push/ldap-ca.pem`.
 
-`directory-type: file` reads Authelia's file user database (`directory-file`, re-read every round), honoring each user's `disabled` flag; `directory-group` limits the sync to one group. Mount the directory that holds the file read-only (see `deploy/compose.yaml`).
+Without `directory-type`, nothing syncs (the startup log says so). `user provision <user> --email <addr>` creates the account and sends the welcome once; rerunning it with another address records that address without a new welcome (`user welcome` resends). These accounts are never deleted by a directory added later.
 
 Mail goes through `smtp-host`:`smtp-port` (default 587) with `smtp-user` and `smtp-password` (or `-file`). `smtp-starttls` (default true) refuses a relay that does not upgrade the connection; port 465 is implicit TLS. `mail-from` is required; `mail-reply-to` is optional, for instance the admins who can resend a welcome. The relay is not contacted at startup, so check delivery with `user welcome <user>`.
 
@@ -117,7 +117,7 @@ access_control:
 
 **First enrollment:** Users must register another second factor in Authelia (TOTP or browser passkey) to pass the `two_factor` policy before enrolling their phone at `/enroll`. Admins can bypass this with a single-use link via `enroll-link <user>`. authentik uses its own Duo stage (`/auth/v2/enroll`).
 
-Startup fails closed if the ntfy token lacks admin rights, anonymous reads of push topics are allowed, the ntfy user list exceeds the client's 1 MiB response limit, the LDAP bind fails, or the configured group (`directory-ldap-group-dn`, `directory-group`) does not exist.
+Startup fails closed if the ntfy token lacks admin rights, anonymous reads of push topics are allowed, the ntfy user list exceeds the client's 1 MiB response limit, the LDAP bind fails, or `directory-ldap-group-dn` does not exist.
 
 ## Backup
 
@@ -143,7 +143,8 @@ Server
 
 Users
   user list                                  users with email, devices, status, last welcome and last sync
-  user provision <user>                      create a directory user's account now; welcome if never sent
+  user provision <user> [--email <addr>]     create a directory user's account now, or without a directory
+                                             one at <addr>; welcome if never sent
   user welcome <user>                        set a new ntfy password and email it in a new welcome
   user disable|enable <user>                 block or allow sign-in; the directory sync never changes it
   user delete <user> [--keep-ntfy-user]      the sync recreates a user the directory still lists

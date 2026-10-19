@@ -1,5 +1,4 @@
-// Package directory lists the people the shim keeps ntfy accounts for, from LDAP or from Authelia's
-// file user database.
+// Package directory lists the people the shim keeps ntfy accounts for, from LDAP.
 package directory
 
 import (
@@ -17,7 +16,6 @@ type Person struct {
 	Email       string
 	DisplayName string
 	Groups      []string
-	Disabled    bool
 }
 
 // Source lists the directory's people, sorted by username.
@@ -34,12 +32,8 @@ var ErrNoGroup = errors.New("group does not exist")
 
 // Config selects and configures a Source; it mirrors the directory-* configuration keys.
 type Config struct {
-	Type string // "ldap" or "file"
-	// File is the path to Authelia's users_database.yml (Type "file").
-	File string
-	// Group keeps only file users in this group; empty keeps everyone.
-	Group string
-	LDAP  LDAPConfig
+	Type string // "ldap"
+	LDAP LDAPConfig
 }
 
 // LDAPConfig configures the ldap Source.
@@ -61,17 +55,10 @@ type LDAPConfig struct {
 
 // New builds the Source cfg.Type names.
 func New(cfg Config) (Source, error) {
-	switch cfg.Type {
-	case "file":
-		if cfg.File == "" {
-			return nil, errors.New("directory: file source needs a file path")
-		}
-		return &fileSource{path: cfg.File, group: cfg.Group}, nil
-	case "ldap":
-		return newLDAPSource(cfg.LDAP)
-	default:
-		return nil, fmt.Errorf("directory: unknown type %q (want ldap or file)", cfg.Type)
+	if cfg.Type != "ldap" {
+		return nil, fmt.Errorf("directory: unknown type %q (want ldap)", cfg.Type)
 	}
+	return newLDAPSource(cfg.LDAP)
 }
 
 // usernameRe duplicates core's username rule (ntfy's user.AllowedUsername) rather than importing
@@ -82,7 +69,7 @@ func validUsername(u string) bool {
 	return usernameRe.MatchString(u) && u != "everyone"
 }
 
-// finish applies the rules every source shares: entries core could never provision are dropped, and
+// finish applies the listing rules: entries core could never provision are dropped, and
 // a username listed twice fails the whole list because either entry might be the impostor.
 func finish(people []Person) ([]Person, error) {
 	people = slices.DeleteFunc(people, func(p Person) bool { return !validUsername(p.Username) })

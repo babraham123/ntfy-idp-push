@@ -50,8 +50,8 @@ type Service struct {
 	store *store.Store
 	Log   *slog.Logger
 	rp    *webauthn.RP
-	// dir lists the people who should have accounts; mail delivers their welcome emails. Both are
-	// built at startup from restart-only keys.
+	// dir lists the people who should have accounts, and is nil when no directory is configured;
+	// mail delivers their welcome emails. Both are built at startup from restart-only keys.
 	dir  directory.Source
 	mail mail.Sender
 

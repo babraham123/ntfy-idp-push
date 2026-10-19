@@ -22,6 +22,7 @@ import (
 	"github.com/babraham123/ntfy-idp-push/internal/app"
 	"github.com/babraham123/ntfy-idp-push/internal/config"
 	"github.com/babraham123/ntfy-idp-push/internal/core"
+	"github.com/babraham123/ntfy-idp-push/internal/directory"
 	"github.com/babraham123/ntfy-idp-push/internal/ntfy"
 	"github.com/babraham123/ntfy-idp-push/internal/store"
 )
@@ -39,7 +40,8 @@ type Harness struct {
 	Cfg  *config.Config
 	Svc  *core.Service
 	Ntfy *FakeNtfy
-	// Dir is the user directory the sync reads; Mail records the emails the shim sends.
+	// Dir is the user directory the sync reads, wired in unless the config sets no directory-type;
+	// Mail records the emails the shim sends.
 	Dir    *FakeDirectory
 	Mail   *FakeMail
 	Server *httptest.Server
@@ -77,8 +79,9 @@ func NewHarness(t *testing.T, mutate func(*config.Config)) *Harness {
 		EnrollRole:        "user",
 		EnrollAccess:      []string{"${user}-*:rw", "alerts:ro"},
 		Database:          ":memory:",
-		// Tests run Sync themselves; the interval only has to be valid.
-		DirectoryType:         "file",
+		// Tests run Sync themselves; the interval only has to be valid. The source is Dir, unless
+		// NoDirectory clears the type.
+		DirectoryType:         "ldap",
 		DirectorySyncInterval: config.Duration(time.Hour),
 		SMTPHost:              "smtp.test",
 		SMTPPort:              587,
@@ -122,12 +125,24 @@ func NewHarness(t *testing.T, mutate func(*config.Config)) *Harness {
 // serve builds the shim from h.Cfg on h.Store and routes the server to it.
 func (h *Harness) serve(t *testing.T) {
 	t.Helper()
-	a, err := app.Build(h.Cfg, h.Store, h.log, h.Dir, h.Mail)
+	a, err := app.Build(h.Cfg, h.Store, h.log, h.Source(), h.Mail)
 	if err != nil {
 		t.Fatal(err)
 	}
 	h.Server.Config.Handler = a.Handler
 	h.Svc = a.Svc
+}
+
+// NoDirectory is a NewHarness mutate that runs the shim with no directory.
+func NoDirectory(c *config.Config) { c.DirectoryType = "" }
+
+// Source is the directory the shim is built with: Dir, or nil when the config sets no
+// directory-type.
+func (h *Harness) Source() directory.Source {
+	if h.Cfg.DirectoryType == "" {
+		return nil
+	}
+	return h.Dir
 }
 
 // Reload applies a changed config as SIGHUP would.

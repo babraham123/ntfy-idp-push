@@ -115,10 +115,15 @@ func (s *Store) SetUserDisabled(ctx context.Context, userID string, disabled boo
 	return err
 }
 
-// SetUserProfile records what the directory said about the user at syncedAt.
-func (s *Store) SetUserProfile(ctx context.Context, userID, email, displayName string, syncedAt time.Time) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE users SET email = ?, display_name = ?, synced_at = ? WHERE id = ?`,
-		email, displayName, unix(syncedAt), userID)
+// SetUserProfile records the user's email and display name. syncedAt is when a directory round
+// listed them; nil leaves synced_at as it was.
+func (s *Store) SetUserProfile(ctx context.Context, userID, email, displayName string, syncedAt *time.Time) error {
+	var v any
+	if syncedAt != nil {
+		v = unix(*syncedAt)
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE users SET email = ?, display_name = ?, synced_at = COALESCE(?, synced_at) WHERE id = ?`,
+		email, displayName, v, userID)
 	return err
 }
 

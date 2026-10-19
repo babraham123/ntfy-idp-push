@@ -497,3 +497,54 @@ func selfSigned(t *testing.T, host string) (*x509.Certificate, []byte) {
 	}
 	return cert, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 }
+
+func TestNewRejectsBadConfig(t *testing.T) {
+	ldapOK := LDAPConfig{
+		Address:           "ldap://ldap.example.com",
+		BaseDN:            "dc=example,dc=com",
+		UsersFilter:       "(objectClass=person)",
+		AttributeUsername: "uid",
+		AttributeMemberOf: "memberOf",
+	}
+	for _, c := range []struct {
+		name    string
+		cfg     Config
+		wantErr string
+	}{
+		{"unknown type", Config{Type: "ad"}, "unknown type"},
+		{"no type", Config{}, "unknown type"},
+		{"ldap without address", Config{Type: "ldap", LDAP: with(ldapOK, func(l *LDAPConfig) { l.Address = "" })}, "address"},
+		{"ldap without base DN", Config{Type: "ldap", LDAP: with(ldapOK, func(l *LDAPConfig) { l.BaseDN = "" })}, "base DN"},
+		{"ldap without filter", Config{Type: "ldap", LDAP: with(ldapOK, func(l *LDAPConfig) { l.UsersFilter = "" })}, "users filter"},
+		{"ldap without username attribute", Config{Type: "ldap", LDAP: with(ldapOK, func(l *LDAPConfig) { l.AttributeUsername = "" })}, "username attribute"},
+		{"ldap wrong scheme", Config{Type: "ldap", LDAP: with(ldapOK, func(l *LDAPConfig) { l.Address = "https://ldap.example.com" })}, "scheme"},
+		{"ldaps with start-tls", Config{Type: "ldap", LDAP: with(ldapOK, func(l *LDAPConfig) { l.Address = "ldaps://ldap.example.com"; l.StartTLS = true })}, "start-tls"},
+		{"ldap bad filter", Config{Type: "ldap", LDAP: with(ldapOK, func(l *LDAPConfig) { l.UsersFilter = "(objectClass=person" })}, "users filter"},
+		{"ldap bad group DN", Config{Type: "ldap", LDAP: with(ldapOK, func(l *LDAPConfig) { l.GroupDN = "not a dn" })}, "group DN"},
+		{"ldap group DN without member-of", Config{Type: "ldap", LDAP: with(ldapOK, func(l *LDAPConfig) { l.GroupDN = "cn=g,dc=example,dc=com"; l.AttributeMemberOf = "" })}, "member-of"},
+		{"ldap missing CA file", Config{Type: "ldap", LDAP: with(ldapOK, func(l *LDAPConfig) { l.CAFile = filepath.Join(t.TempDir(), "absent.pem") })}, "CA file"},
+	} {
+		_, err := New(c.cfg)
+		if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+			t.Errorf("%s: got %v, want %q", c.name, err, c.wantErr)
+		}
+	}
+	for _, addr := range []string{"ldap://ldap.example.com", "ldaps://ldap.example.com:636", "ldap://10.0.0.5:389"} {
+		if _, err := New(Config{Type: "ldap", LDAP: with(ldapOK, func(l *LDAPConfig) { l.Address = addr })}); err != nil {
+			t.Errorf("%s: %v", addr, err)
+		}
+	}
+}
+
+func with(l LDAPConfig, f func(*LDAPConfig)) LDAPConfig {
+	f(&l)
+	return l
+}
+
+func usernames(people []Person) []string {
+	var out []string
+	for _, p := range people {
+		out = append(out, p.Username)
+	}
+	return out
+}

@@ -249,7 +249,7 @@ func (s *ldapSource) search(ctx context.Context, c ldapConn) ([]Person, error) {
 
 // person maps an entry; attribute names compare case-insensitively as LDAP defines them. LDAP has
 // no portable "disabled" attribute, so disabled accounts are expected to be excluded by the users
-// filter, which makes them absent and lets the sync disable them.
+// filter, which makes them absent, so the sync deletes them.
 func (s *ldapSource) person(e *ldap.Entry) (Person, bool) {
 	p := Person{Username: e.GetEqualFoldAttributeValue(s.cfg.AttributeUsername)}
 	if p.Username == "" {

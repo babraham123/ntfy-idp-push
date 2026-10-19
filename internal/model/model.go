@@ -17,7 +17,7 @@ type User struct {
 	// the directory sync deletes users instead.
 	DisabledAt *time.Time
 	CreatedAt  time.Time
-	// Email and DisplayName come from the directory.
+	// Email and DisplayName come from the directory, or without one Email from user provision.
 	Email       string
 	DisplayName string
 	// SyncedAt is the last directory sync round that listed the user.

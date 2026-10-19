@@ -11,7 +11,7 @@ import (
 
 var _ directory.Source = (*FakeDirectory)(nil)
 
-// FakeDirectory is a directory.Source listing whatever the test set, with the real sources'
+// FakeDirectory is a directory.Source listing whatever the test set, with the LDAP source's
 // contract: sorted by username. The zero value lists nobody.
 type FakeDirectory struct {
 	mu       sync.Mutex

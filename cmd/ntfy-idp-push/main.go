@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/babraham123/ntfy-idp-push/internal/app"
 	"github.com/babraham123/ntfy-idp-push/internal/config"
 	"github.com/babraham123/ntfy-idp-push/internal/core"
+	"github.com/babraham123/ntfy-idp-push/internal/model"
 	"github.com/babraham123/ntfy-idp-push/internal/store"
 	"github.com/babraham123/ntfy-idp-push/internal/token"
 )
@@ -29,8 +31,10 @@ Commands:
   serve                                   run the server
   keygen [--rotate]                       print new Duo integration/secret keys, or rotate the secret key in the config file
   user list
-  user provision <username>               create the ntfy account of a directory user, apply enroll-access
-                                          and send the welcome email if it was never sent (no push device)
+  user provision <username> [--email <addr>]
+                                          create the ntfy account of a directory user, or with no directory
+                                          of the user at <addr>, apply enroll-access and send the welcome
+                                          email if it was never sent (no push device)
   user welcome <username>                 set a new ntfy password and email it in a new welcome email
   user disable|enable <username>          block or allow sign-in; the directory sync never changes it
   user delete <username> [--keep-ntfy-user]
@@ -72,17 +76,23 @@ func main() {
 	}
 }
 
-// splitArgs separates flags from positionals so flags may follow positional arguments. Everything
-// after "--" is positional, which is how a username that starts with "-" is passed.
-func splitArgs(args []string) (flags, pos []string) {
-	for i, a := range args {
+// splitArgs separates flags from positionals so flags may follow positional arguments. The flags
+// named in valued take a value, which may be the next argument. Everything after "--" is
+// positional, which is how a username that starts with "-" is passed.
+func splitArgs(args []string, valued ...string) (flags, pos []string) {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
 		if a == "--" {
 			return flags, append(pos, args[i+1:]...)
 		}
-		if strings.HasPrefix(a, "-") {
-			flags = append(flags, a)
-		} else {
+		if !strings.HasPrefix(a, "-") {
 			pos = append(pos, a)
+			continue
+		}
+		flags = append(flags, a)
+		if slices.Contains(valued, strings.TrimLeft(a, "-")) && i+1 < len(args) {
+			i++
+			flags = append(flags, args[i])
 		}
 	}
 	return flags, pos
@@ -215,11 +225,12 @@ func keygen(cfgPath string, args []string, out io.Writer) error {
 }
 
 func userCmd(ctx context.Context, svc *core.Service, args []string, out io.Writer) error {
-	flags, pos := splitArgs(args)
+	flags, pos := splitArgs(args, "email")
 	if len(pos) == 0 {
 		return errors.New("usage: user list|provision|welcome|disable|enable|delete|approve|reset-ntfy [args]")
 	}
 	fs := flag.NewFlagSet("user", flag.ContinueOnError)
+	email := fs.String("email", "", "the address to provision a user at when no directory is configured")
 	keepNtfy := fs.Bool("keep-ntfy-user", false, "keep the ntfy user when deleting")
 	force := fs.Bool("force", false, "reset-ntfy even if the ntfy user has grants the shim did not make")
 	if err := fs.Parse(flags); err != nil {
@@ -253,7 +264,19 @@ func userCmd(ctx context.Context, svc *core.Service, args []string, out io.Write
 	arg := pos[1]
 	switch sub {
 	case "provision":
-		u, err := svc.ProvisionFromDirectory(ctx, arg)
+		var u *model.User
+		var err error
+		if *email != "" {
+			u, err = svc.ProvisionManual(ctx, arg, *email)
+		} else {
+			u, err = svc.ProvisionFromDirectory(ctx, arg)
+		}
+		switch {
+		case errors.Is(err, core.ErrDirectoryConfigured):
+			return fmt.Errorf("--email refused: %w", err)
+		case errors.Is(err, core.ErrNoDirectory):
+			return fmt.Errorf("%w: user provision needs --email <addr>", err)
+		}
 		if u != nil {
 			for _, g := range u.Grants {
 				fmt.Fprintf(out, "%s\t%s\n", g.Topic, g.Permission)

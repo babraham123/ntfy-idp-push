@@ -76,11 +76,9 @@ type Config struct {
 	Database string `yaml:"database"`
 
 	// The directory lists the people the shim keeps ntfy accounts for; it is polled every
-	// DirectorySyncInterval.
+	// DirectorySyncInterval. An empty DirectoryType means no directory: the CLI manages accounts.
 	DirectoryType                     string   `yaml:"directory-type"`
 	DirectorySyncInterval             Duration `yaml:"directory-sync-interval"`
-	DirectoryFile                     string   `yaml:"directory-file"`
-	DirectoryGroup                    string   `yaml:"directory-group"`
 	DirectoryLDAPAddress              string   `yaml:"directory-ldap-address"`
 	DirectoryLDAPStartTLS             bool     `yaml:"directory-ldap-start-tls"`
 	DirectoryLDAPTLSSkipVerify        bool     `yaml:"directory-ldap-tls-skip-verify"`
@@ -236,11 +234,14 @@ func (c *Config) Validate() error {
 	req("smtp-host", c.SMTPHost)
 	req("mail-from", c.MailFrom)
 	// The source's own settings are checked when it is built at startup.
-	if c.DirectoryType != "ldap" && c.DirectoryType != "file" {
-		errs = append(errs, fmt.Errorf("directory-type must be ldap or file, got %q", c.DirectoryType))
-	}
-	if c.DirectorySyncInterval <= 0 {
-		errs = append(errs, errors.New("directory-sync-interval must be positive"))
+	switch c.DirectoryType {
+	case "":
+	case "ldap":
+		if c.DirectorySyncInterval <= 0 {
+			errs = append(errs, errors.New("directory-sync-interval must be positive"))
+		}
+	default:
+		errs = append(errs, fmt.Errorf("directory-type must be ldap or empty (no directory), got %q", c.DirectoryType))
 	}
 	if len(c.DuoSecretKey) > 0 && len(c.DuoSecretKey) < 40 {
 		errs = append(errs, errors.New("duo-secret-key must be at least 40 characters"))

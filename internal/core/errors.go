@@ -17,12 +17,14 @@ var (
 	ErrPasskeyPolicy = errors.New("passkey refused by policy")
 	// ErrPasskeyRejected: the attestation or assertion did not verify (wrong origin, nonce,
 	// credential, or signature).
-	ErrPasskeyRejected    = errors.New("passkey verification failed")
-	ErrBadToken           = errors.New("invalid deny token")
-	ErrEnrollmentRequired = errors.New("enrollment required")
-	ErrTooManyPushes      = errors.New("too many sign-in requests; wait before trying again")
-	ErrNotInDirectory     = errors.New("user is not in the directory")
-	ErrNoEmail            = errors.New("user has no email address")
+	ErrPasskeyRejected     = errors.New("passkey verification failed")
+	ErrBadToken            = errors.New("invalid deny token")
+	ErrEnrollmentRequired  = errors.New("enrollment required")
+	ErrTooManyPushes       = errors.New("too many sign-in requests; wait before trying again")
+	ErrNotInDirectory      = errors.New("user is not in the directory")
+	ErrNoDirectory         = errors.New("no directory is configured")
+	ErrDirectoryConfigured = errors.New("a directory is configured and decides each user's email")
+	ErrNoEmail             = errors.New("user has no email address")
 
 	// Gone: something that was valid once no longer is.
 	ErrGone              = errors.New("challenge already decided or expired")
@@ -37,8 +39,9 @@ var (
 	ErrUnknownDevice = errors.New("unknown device")
 
 	// Invalid: the input itself is unacceptable.
-	ErrInvalidName = errors.New("invalid username")
-	ErrMalformed   = errors.New("malformed passkey response")
+	ErrInvalidName  = errors.New("invalid username")
+	ErrInvalidEmail = errors.New("invalid email address")
+	ErrMalformed    = errors.New("malformed passkey response")
 )
 
 // Kind classifies a failure for the adapters.
@@ -55,10 +58,10 @@ const (
 )
 
 var kinds = map[Kind][]error{
-	Refused:  {ErrUserDisabled, ErrPushDisabled, ErrDeviceRevoked, ErrNotOwner, ErrForeignGrants, ErrIdentityChanged, ErrPasskeyPolicy, ErrPasskeyRejected, ErrBadToken, ErrEnrollmentRequired, ErrTooManyPushes, ErrNotInDirectory, ErrNoEmail},
+	Refused:  {ErrUserDisabled, ErrPushDisabled, ErrDeviceRevoked, ErrNotOwner, ErrForeignGrants, ErrIdentityChanged, ErrPasskeyPolicy, ErrPasskeyRejected, ErrBadToken, ErrEnrollmentRequired, ErrTooManyPushes, ErrNotInDirectory, ErrNoDirectory, ErrDirectoryConfigured, ErrNoEmail},
 	Gone:     {ErrGone, ErrInvalidCode, ErrEnrollmentExpired, ErrResultExpired, ErrSetupLinkUsed, ErrSetupDone},
 	NotFound: {ErrUnknownUser, ErrUnknownDevice},
-	Invalid:  {ErrInvalidName, ErrMalformed},
+	Invalid:  {ErrInvalidName, ErrInvalidEmail, ErrMalformed},
 }
 
 // KindOf classifies err; nil is not a failure and classifies as Internal.
