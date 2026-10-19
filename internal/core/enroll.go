@@ -300,15 +300,8 @@ func (s *Service) connectDevice(ctx context.Context, dev *model.Device, verifyTo
 }
 
 func (s *Service) publishSetup(ctx context.Context, dev *model.Device, verifyToken string) error {
-	verifyURL := routes.VerifyURL(s.Config().PublicURL, dev.ID, verifyToken)
-	return s.ntfy().Publish(ctx, &ntfy.Message{
-		Topic:    dev.NtfyTopic,
-		Title:    "Finish setup",
-		Message:  "Tap to finish enrolling " + dev.Name + " for sign-in approvals.",
-		Priority: 4,
-		Tags:     []string{"key"},
-		Click:    verifyURL,
-		Actions:  []ntfy.Action{{Action: "view", Label: "Finish setup", URL: verifyURL, Clear: true}},
+	return s.ntfy().SendSetup(ctx, ntfy.Setup{
+		Topic: dev.NtfyTopic, DeviceName: dev.Name, VerifyURL: routes.VerifyURL(s.Config().PublicURL, dev.ID, verifyToken),
 	})
 }
 

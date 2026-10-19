@@ -2,19 +2,20 @@ package core
 
 // The shim wants each user's ntfy account to hold exactly the enroll-access grants expanded for
 // the user plus read-only access to the push topic of every device that is not revoked. Every
-// ntfy user and ACL call the shim makes goes through this file, so that rule is written once:
-// Provision applies the enroll-access half, enrollment adds a device's grant, revocation removes
-// it, and a reset recreates the account and converges it from scratch.
+// ntfy account and grant change the shim makes goes through this file, so that rule is written
+// once: provision applies the enroll-access half, enrollment adds a device's grant, revocation
+// removes it, and a reset recreates the account and converges it from scratch.
+//
+// Each operation takes the ntfy.Accounts it works against: the view of ntfy's users it fetched
+// once, which a sync round shares across every account it touches.
 
 import (
 	"context"
 	"fmt"
-	"sync"
 
 	"github.com/babraham123/ntfy-idp-push/internal/config"
 	"github.com/babraham123/ntfy-idp-push/internal/model"
 	"github.com/babraham123/ntfy-idp-push/internal/ntfy"
-	"github.com/babraham123/ntfy-idp-push/internal/token"
 )
 
 // enrollGrants is enroll-access expanded for username.
@@ -36,8 +37,8 @@ func deviceGrants(devs []model.Device) []config.Grant {
 
 // applyNtfyAccount ensures the ntfy user exists with grants, ignoring user policy to allow
 // restoring disabled accounts.
-func (s *Service) applyNtfyAccount(ctx context.Context, u *model.User, grants []config.Grant) error {
-	if err := s.ensureNtfyUser(ctx, u.Username); err != nil {
+func (s *Service) applyNtfyAccount(ctx context.Context, acc *ntfy.Accounts, u *model.User, grants []config.Grant) error {
+	if err := acc.Ensure(ctx, u.Username); err != nil {
 		return err
 	}
 	for _, g := range grants {
@@ -69,7 +70,7 @@ func (s *Service) applyNtfyAccount(ctx context.Context, u *model.User, grants []
 // recreate is set so that every token it had stops working. It returns how many device grants it
 // made. The enroll-access expansion runs before anything is touched, so a refused name leaves ntfy
 // as it was.
-func (s *Service) convergeNtfyAccount(ctx context.Context, u *model.User, recreate bool) (int, error) {
+func (s *Service) convergeNtfyAccount(ctx context.Context, acc *ntfy.Accounts, u *model.User, recreate bool) (int, error) {
 	grants, err := s.enrollGrants(u.Username)
 	if err != nil {
 		return 0, err
@@ -79,11 +80,11 @@ func (s *Service) convergeNtfyAccount(ctx context.Context, u *model.User, recrea
 		return 0, err
 	}
 	if recreate {
-		if err := s.deleteNtfyAccount(ctx, u.Username); err != nil {
+		if err := acc.Delete(ctx, u.Username); err != nil {
 			return 0, err
 		}
 	}
-	if err := s.applyNtfyAccount(ctx, u, grants); err != nil {
+	if err := s.applyNtfyAccount(ctx, acc, u, grants); err != nil {
 		return 0, err
 	}
 	dg := deviceGrants(devs)
@@ -106,24 +107,14 @@ func (s *Service) revokeDeviceGrant(ctx context.Context, d *model.Device) error 
 	return s.ntfy().ResetAccess(ctx, d.Username, d.NtfyTopic)
 }
 
-func (s *Service) deleteNtfyAccount(ctx context.Context, username string) error {
-	if err := s.ntfy().DeleteUser(ctx, username); err != nil {
-		return err
-	}
-	if c := ntfyUsersFrom(ctx); c != nil {
-		c.set(username, nil)
-	}
-	return nil
-}
-
 // checkForeignGrants refuses to reset an account that holds grants the shim did not make, since
 // a reset would silently drop them.
-func (s *Service) checkForeignGrants(ctx context.Context, u *model.User) error {
+func (s *Service) checkForeignGrants(ctx context.Context, acc *ntfy.Accounts, u *model.User) error {
 	known, err := s.knownTopics(ctx, u)
 	if err != nil {
 		return err
 	}
-	nu, err := s.ntfy().User(ctx, u.Username)
+	nu, err := acc.Get(ctx, u.Username)
 	if err != nil || nu == nil {
 		return err
 	}
@@ -151,79 +142,6 @@ func (s *Service) knownTopics(ctx context.Context, u *model.User) (map[string]bo
 		known[d.NtfyTopic] = true
 	}
 	return known, nil
-}
-
-func (s *Service) ensureNtfyUser(ctx context.Context, username string) error {
-	cache := ntfyUsersFrom(ctx)
-	var nu *ntfy.User
-	var err error
-	if cache != nil {
-		nu = cache.get(username)
-	} else if nu, err = s.ntfy().User(ctx, username); err != nil {
-		return err
-	}
-	if nu != nil {
-		if nu.Role == "admin" {
-			return fmt.Errorf("ntfy user %q is an admin; refusing to manage it", username)
-		}
-		return nil
-	}
-	// Nobody knows this password; Welcome replaces it with one it emails to the user.
-	if err := s.ntfy().AddUser(ctx, username, token.Random(32)); err != nil {
-		return err
-	}
-	if cache != nil {
-		cache.set(username, &ntfy.User{Username: username, Role: "user"})
-	}
-	return nil
-}
-
-// ntfyUsers is ntfy's user list fetched once for a sync round. ntfy has no single-user lookup, so
-// without it every account the round touches downloads the whole list, twice for a new person
-// (Provision, then the welcome's password change). The shim's own adds and deletes keep it
-// current for the rest of the round.
-type ntfyUsers struct {
-	mu     sync.Mutex
-	byName map[string]*ntfy.User
-}
-
-type ntfyUsersKey struct{}
-
-// withNtfyUsers returns ctx carrying the current ntfy user list. If ntfy cannot list its users,
-// ctx is returned as is and each lookup asks ntfy itself.
-func (s *Service) withNtfyUsers(ctx context.Context) context.Context {
-	us, err := s.ntfy().Users(ctx)
-	if err != nil {
-		s.Log.Warn("list ntfy users", "err", err)
-		return ctx
-	}
-	c := &ntfyUsers{byName: make(map[string]*ntfy.User, len(us))}
-	for i := range us {
-		c.byName[us[i].Username] = &us[i]
-	}
-	return context.WithValue(ctx, ntfyUsersKey{}, c)
-}
-
-func ntfyUsersFrom(ctx context.Context) *ntfyUsers {
-	c, _ := ctx.Value(ntfyUsersKey{}).(*ntfyUsers)
-	return c
-}
-
-func (c *ntfyUsers) get(username string) *ntfy.User {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.byName[username]
-}
-
-// set records username's account; nil records that it does not exist.
-func (c *ntfyUsers) set(username string, u *ntfy.User) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if u == nil {
-		delete(c.byName, username)
-	} else {
-		c.byName[username] = u
-	}
 }
 
 func mergeGrants(a, b []config.Grant) []config.Grant {

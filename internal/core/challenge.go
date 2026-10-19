@@ -97,7 +97,7 @@ func (s *Service) clearPush(c *model.Challenge) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := s.ntfy().DeleteMessage(ctx, d.NtfyTopic, c.ID); err != nil {
+	if err := s.ntfy().ClearLogin(ctx, d.NtfyTopic, c.ID); err != nil {
 		s.Log.Debug("clear push", "challenge", c.ID, "err", err)
 	}
 }

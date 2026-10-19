@@ -108,7 +108,7 @@ func TestAutheliaLoginApprovedWithPasskey(t *testing.T) {
 
 	res := authCall(h, "alice", d.Device)
 	m := h.Ntfy.NextPublish(t)
-	if m.Topic != dev.Topic || m.Title != "Sign-in request" || m.Priority != 4 {
+	if m.Topic != dev.Topic || m.Title != ntfy.LoginTitle || m.Priority != 4 {
 		t.Fatalf("push %+v", m)
 	}
 	if !strings.Contains(m.Message, "alice") || !strings.Contains(m.Message, "203.0.113.7") || !strings.Contains(m.Message, "app.example.com") {

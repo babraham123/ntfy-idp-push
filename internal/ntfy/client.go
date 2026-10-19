@@ -1,4 +1,6 @@
-// Package ntfy is a client for the ntfy admin and publish APIs.
+// Package ntfy is the shim's ntfy adapter: the accounts and grants it manages (Accounts, AllowAccess,
+// ResetAccess), the pushes it sends (SendLogin, SendSetup) and the startup safety check (CheckServer),
+// over ntfy's admin and publish APIs. The wire format stays in this package.
 package ntfy
 
 import (
@@ -122,8 +124,8 @@ func (c *Client) Users(ctx context.Context) ([]User, error) {
 	return us, c.do(ctx, http.MethodGet, "/v1/users", nil, &us, true)
 }
 
-// User returns the named ntfy user, or nil if it does not exist.
-func (c *Client) User(ctx context.Context, username string) (*User, error) {
+// user returns the named ntfy user, or nil if it does not exist.
+func (c *Client) user(ctx context.Context, username string) (*User, error) {
 	us, err := c.Users(ctx)
 	if err != nil {
 		return nil, err
@@ -166,7 +168,7 @@ func (c *Client) ResetAccess(ctx context.Context, username, topic string) error 
 	if err == nil {
 		return nil
 	}
-	if u, lerr := c.User(ctx, username); lerr == nil && u == nil {
+	if u, lerr := c.user(ctx, username); lerr == nil && u == nil {
 		return nil
 	}
 	return err

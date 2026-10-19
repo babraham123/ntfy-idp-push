@@ -370,7 +370,7 @@ func (h *Harness) VerifyFromPush(t *testing.T, m ntfy.Message) {
 // the fragment into the form.
 func (h *Harness) SubmitVerify(t *testing.T, m ntfy.Message) (*http.Response, []byte) {
 	t.Helper()
-	if m.Title != "Finish setup" {
+	if m.Title != ntfy.SetupTitle {
 		t.Fatalf("expected the setup push, got %q", m.Title)
 	}
 	path, frag := Fragment(t, m.Click)

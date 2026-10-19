@@ -310,20 +310,21 @@ func TestSyncDeletesBeforeWelcoming(t *testing.T) {
 	wantSyncCounts(t, h, 1, 1, 1, 0)
 }
 
-// A round asks ntfy for its user list once, however many accounts it creates and welcomes.
+// A round asks ntfy for its user list once, however many accounts it creates and welcomes, and a
+// round with nothing to do never asks.
 func TestSyncListsNtfyUsersOnce(t *testing.T) {
 	ctx := context.Background()
 	h := testutil.NewHarness(t, nil)
 	erin := directory.Person{Username: "erin", Email: "erin@example.com"}
 	people := []directory.Person{carol, dave, erin}
 	h.Dir.Set(people...)
-	for round := range 2 {
+	for round, want := range []int{1, 0} {
 		before := h.Ntfy.UserLists()
 		if err := h.Svc.Sync(ctx); err != nil {
 			t.Fatal(err)
 		}
-		if n := h.Ntfy.UserLists() - before; n != 1 {
-			t.Fatalf("round %d listed ntfy users %d times, want 1", round, n)
+		if n := h.Ntfy.UserLists() - before; n != want {
+			t.Fatalf("round %d listed ntfy users %d times, want %d", round, n, want)
 		}
 	}
 	for _, p := range people {

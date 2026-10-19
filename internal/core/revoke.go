@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/babraham123/ntfy-idp-push/internal/model"
+	"github.com/babraham123/ntfy-idp-push/internal/ntfy"
 	"github.com/babraham123/ntfy-idp-push/internal/store"
 )
 
@@ -23,7 +24,7 @@ func (s *Service) RevokeDevice(ctx context.Context, deviceID string, resetNtfyUs
 	} else if err != nil {
 		return err
 	}
-	return s.revoke(ctx, d, resetNtfyUser, force, actor)
+	return s.revoke(ctx, s.ntfy().Accounts(), d, resetNtfyUser, force, actor)
 }
 
 // RevokeOwned is RevokeDevice on behalf of the device's owner, who may not force a reset.
@@ -32,7 +33,7 @@ func (s *Service) RevokeOwned(ctx context.Context, username, deviceID string, re
 	if err != nil {
 		return err
 	}
-	return s.revoke(ctx, d, resetNtfyUser, false, username)
+	return s.revoke(ctx, s.ntfy().Accounts(), d, resetNtfyUser, false, username)
 }
 
 // user is the user named username; a missing one is ErrUnknownUser.
@@ -44,10 +45,10 @@ func (s *Service) user(ctx context.Context, username string) (*model.User, error
 	return u, err
 }
 
-func (s *Service) revoke(ctx context.Context, d *model.Device, resetNtfyUser, force bool, actor string) error {
+func (s *Service) revoke(ctx context.Context, acc *ntfy.Accounts, d *model.Device, resetNtfyUser, force bool, actor string) error {
 	if resetNtfyUser {
 		// Before revoking anything, so a refusal leaves the device intact.
-		if err := s.requestReset(ctx, d.Username, force); err != nil {
+		if err := s.requestReset(ctx, acc, d.Username, force); err != nil {
 			return err
 		}
 	}
@@ -64,7 +65,7 @@ func (s *Service) revoke(ctx context.Context, d *model.Device, resetNtfyUser, fo
 		return fmt.Errorf("device revoked but its ntfy grant was not removed; re-run to retry: %w", err)
 	}
 	if resetNtfyUser {
-		if err := s.finishReset(ctx, d.Username); err != nil {
+		if err := s.finishReset(ctx, acc, d.Username); err != nil {
 			return fmt.Errorf("device revoked but the ntfy user was not reset; re-run to retry: %w", err)
 		}
 	}
@@ -74,21 +75,22 @@ func (s *Service) revoke(ctx context.Context, d *model.Device, resetNtfyUser, fo
 // ResetNtfyUser deletes and recreates the ntfy user to invalidate all its tokens (since ntfy lacks
 // targeted token revocation).
 func (s *Service) ResetNtfyUser(ctx context.Context, username string, force bool) error {
-	if err := s.requestReset(ctx, username, force); err != nil {
+	acc := s.ntfy().Accounts()
+	if err := s.requestReset(ctx, acc, username, force); err != nil {
 		return err
 	}
-	return s.finishReset(ctx, username)
+	return s.finishReset(ctx, acc, username)
 }
 
 // requestReset validates (unless forced) that no foreign grants exist, then records the reset as
 // pending.
-func (s *Service) requestReset(ctx context.Context, username string, force bool) error {
+func (s *Service) requestReset(ctx context.Context, acc *ntfy.Accounts, username string, force bool) error {
 	u, err := s.user(ctx, username)
 	if err != nil {
 		return err
 	}
 	if !force {
-		if err := s.checkForeignGrants(ctx, u); err != nil {
+		if err := s.checkForeignGrants(ctx, acc, u); err != nil {
 			return err
 		}
 	}
@@ -96,12 +98,12 @@ func (s *Service) requestReset(ctx context.Context, username string, force bool)
 }
 
 // finishReset carries out a requested reset and clears it.
-func (s *Service) finishReset(ctx context.Context, username string) error {
+func (s *Service) finishReset(ctx context.Context, acc *ntfy.Accounts, username string) error {
 	u, err := s.user(ctx, username)
 	if err != nil {
 		return err
 	}
-	granted, err := s.convergeNtfyAccount(ctx, u, true)
+	granted, err := s.convergeNtfyAccount(ctx, acc, u, true)
 	if err != nil {
 		return err
 	}
@@ -116,7 +118,7 @@ func (s *Service) finishReset(ctx context.Context, username string) error {
 	}
 	s.store.Audit(ctx, username, "ntfy_user_reset", map[string]any{"devices": granted})
 	// The reset is done either way; a failed welcome is audited and the next sync round retries.
-	if err := s.Welcome(ctx, username); err != nil {
+	if _, err := s.welcome(ctx, acc, username, false); err != nil {
 		s.Log.Warn("welcome after ntfy user reset", "user", username, "err", err)
 	}
 	return nil
@@ -147,6 +149,10 @@ func (s *Service) SetUserDisabled(ctx context.Context, username string, disabled
 
 // DeleteUser revokes every device and removes the user, and the ntfy user unless keepNtfy.
 func (s *Service) DeleteUser(ctx context.Context, username string, keepNtfy bool) error {
+	return s.deleteUser(ctx, s.ntfy().Accounts(), username, keepNtfy)
+}
+
+func (s *Service) deleteUser(ctx context.Context, acc *ntfy.Accounts, username string, keepNtfy bool) error {
 	u, err := s.user(ctx, username)
 	if err != nil {
 		return err
@@ -161,7 +167,7 @@ func (s *Service) DeleteUser(ctx context.Context, username string, keepNtfy bool
 		}
 	}
 	if !keepNtfy {
-		if err := s.deleteNtfyAccount(ctx, username); err != nil {
+		if err := acc.Delete(ctx, username); err != nil {
 			return err
 		}
 	}
@@ -183,9 +189,10 @@ func (s *Service) Reconcile(ctx context.Context) error {
 	if err != nil {
 		return errors.Join(append(errs, err)...)
 	}
+	acc := s.ntfy().Accounts()
 	for _, u := range resets {
 		// The foreign-grant check passed, or was forced, when the reset was requested.
-		if err := s.finishReset(ctx, u); err != nil {
+		if err := s.finishReset(ctx, acc, u); err != nil {
 			errs = append(errs, fmt.Errorf("reset ntfy user %q: %w", u, err))
 		}
 	}

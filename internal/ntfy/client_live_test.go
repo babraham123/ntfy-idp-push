@@ -36,7 +36,7 @@ func TestLiveServer(t *testing.T) {
 	if err := c.AllowAccess(ctx, user, user+"-*", "read-write"); err != nil {
 		t.Fatal(err)
 	}
-	u, err := c.User(ctx, user)
+	u, err := c.Accounts().Get(ctx, user)
 	if err != nil || u == nil || len(u.Grants) != 2 {
 		t.Fatalf("user: %+v %v", u, err)
 	}

@@ -132,6 +132,10 @@ func ValidUsername(u string) error {
 // Provision safely ensures the ntfy account exists with enroll-access grants without creating push
 // resources.
 func (s *Service) Provision(ctx context.Context, username string) (*model.User, error) {
+	return s.provision(ctx, s.ntfy().Accounts(), username)
+}
+
+func (s *Service) provision(ctx context.Context, acc *ntfy.Accounts, username string) (*model.User, error) {
 	if err := ValidUsername(username); err != nil {
 		return nil, err
 	}
@@ -147,7 +151,7 @@ func (s *Service) Provision(ctx context.Context, username string) (*model.User, 
 	if !u.Enabled() {
 		return nil, ErrUserDisabled
 	}
-	if err := s.applyNtfyAccount(ctx, u, grants); err != nil {
+	if err := s.applyNtfyAccount(ctx, acc, u, grants); err != nil {
 		return nil, err
 	}
 	s.store.Audit(ctx, username, "provision", map[string]any{"grants": grants})
@@ -227,7 +231,11 @@ func (s *Service) Purge(ctx context.Context) {
 // SetNtfyPassword provisions username and replaces its ntfy password with a random one, returned
 // for the user to sign their apps in with. Tokens of apps already signed in remain valid.
 func (s *Service) SetNtfyPassword(ctx context.Context, username string) (string, error) {
-	if _, err := s.Provision(ctx, username); err != nil {
+	return s.setNtfyPassword(ctx, s.ntfy().Accounts(), username)
+}
+
+func (s *Service) setNtfyPassword(ctx context.Context, acc *ntfy.Accounts, username string) (string, error) {
+	if _, err := s.provision(ctx, acc, username); err != nil {
 		return "", err
 	}
 	password := token.Random(18)
@@ -245,28 +253,5 @@ func (s *Service) AuditLog(ctx context.Context, username string, limit int) ([]m
 
 // StartupChecks fails closed on an ntfy setup that would let anyone but the phone read pushes.
 func (s *Service) StartupChecks(ctx context.Context) error {
-	cfg := s.Config()
-	n := s.ntfy()
-	acct, err := n.Account(ctx)
-	if err != nil {
-		return fmt.Errorf("ntfy admin token: %w", err)
-	}
-	if acct.Role != "admin" {
-		return fmt.Errorf("ntfy token belongs to %q with role %q; admin required", acct.Username, acct.Role)
-	}
-	if _, err := n.Users(ctx); err != nil {
-		return fmt.Errorf("ntfy GET /v1/users: %w", err)
-	}
-	probe := cfg.NtfyTopicPrefix + "probe"
-	status, err := n.AnonymousReadStatus(ctx, probe)
-	if err != nil {
-		return fmt.Errorf("ntfy anonymous probe: %w", err)
-	}
-	if status != 401 && status != 403 {
-		return fmt.Errorf("anonymous read of %q returned %d; set ntfy auth-default-access: deny-all", probe, status)
-	}
-	if err := n.Publish(ctx, &ntfy.Message{Topic: probe, Message: "probe", Cache: "no", Firebase: "no"}); err != nil {
-		return fmt.Errorf("publish to %q: %w", probe, err)
-	}
-	return nil
+	return s.ntfy().CheckServer(ctx, s.Config().NtfyTopicPrefix+"probe")
 }

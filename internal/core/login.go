@@ -184,19 +184,9 @@ func (s *Service) Authenticate(ctx context.Context, r AuthRequest) (model.Challe
 	if err != nil {
 		return model.StateDeny, err
 	}
-	approveURL := routes.ApproveURL(cfg.PublicURL, c.ID)
-	if err := s.ntfy().Publish(ctx, &ntfy.Message{
-		Topic:      d.NtfyTopic,
-		SequenceID: c.ID,
-		Title:      "Sign-in request",
-		Message:    Describe(c),
-		Priority:   4,
-		Tags:       []string{"lock"},
-		Click:      approveURL,
-		Actions: []ntfy.Action{
-			{Action: "view", Label: "Approve", URL: approveURL, Clear: true},
-			{Action: "http", Label: "Deny", URL: routes.DenyURL(cfg.PublicURL, c.ID), Method: "POST", Body: denyToken, Clear: true},
-		},
+	if err := s.ntfy().SendLogin(ctx, ntfy.Login{
+		Topic: d.NtfyTopic, ChallengeID: c.ID, Text: Describe(c),
+		ApproveURL: routes.ApproveURL(cfg.PublicURL, c.ID), DenyURL: routes.DenyURL(cfg.PublicURL, c.ID), DenyToken: denyToken,
 	}); err != nil {
 		_ = s.decide(context.WithoutCancel(ctx), c.ID, model.StateDeny)
 		return model.StateDeny, fmt.Errorf("publish: %w", err)
