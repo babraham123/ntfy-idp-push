@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"fmt"
 	"html"
 	"io"
 	"log/slog"
@@ -13,6 +14,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -173,6 +175,67 @@ func (h *Harness) HasDevice(t *testing.T, user, id string) bool {
 		}
 	}
 	return false
+}
+
+// Sync runs one directory round, which must succeed, and returns what it changed.
+func (h *Harness) Sync(t *testing.T) core.SyncCounts {
+	t.Helper()
+	n, err := h.Svc.Sync(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+var loginSeq atomic.Int32
+
+// StartLogin runs an Authelia-shaped auth call for user's device in the background: the push
+// goes out at once, the result arrives on the channel once the push is decided. Calls differ by
+// hostname so that the replay guard tells them apart.
+func (h *Harness) StartLogin(user, device string) <-chan *authapi.AuthResult {
+	out := make(chan *authapi.AuthResult, 1)
+	seq := loginSeq.Add(1)
+	go func() {
+		r, err := h.Duo(IKey, SKey).Auth("push",
+			authapi.AuthUsername(user),
+			authapi.AuthDevice(device),
+			authapi.AuthIpAddr("203.0.113.7"),
+			func(v *url.Values) { v.Set("hostname", fmt.Sprintf("laptop-%d", seq)) },
+			authapi.AuthDisplayUsername(user),
+			// Authelia sends pushinfo as "target%20url=<url>".
+			authapi.AuthPushinfo("target%20url=https://app.example.com/dashboard"))
+		if err != nil {
+			r = &authapi.AuthResult{}
+			r.Response.Result = "error: " + err.Error()
+		}
+		out <- r
+	}()
+	return out
+}
+
+// Await is the result of a login started with StartLogin, which must arrive.
+func Await(t *testing.T, ch <-chan *authapi.AuthResult) *authapi.AuthResult {
+	t.Helper()
+	select {
+	case r := <-ch:
+		return r
+	case <-time.After(20 * time.Second):
+		t.Fatal("auth did not return")
+		return nil
+	}
+}
+
+// Approve does what the phone does on the push's Approve link: opens the approve page's options
+// and signs the challenge with a, and returns the status of the assertion.
+func (h *Harness) Approve(t *testing.T, a *Authenticator, click string) int {
+	t.Helper()
+	path := LocalPath(t, click)
+	resp, opts := h.Do(t, Request{Method: "GET", Path: path + "/options"})
+	if resp.StatusCode != 200 {
+		return resp.StatusCode
+	}
+	resp, _ = h.Do(t, Request{Method: "POST", Path: path + "/assert", Body: a.Get(t, opts)})
+	return resp.StatusCode
 }
 
 // Audit returns user's audit entries with event ("" for every user), newest first, as the CLI's

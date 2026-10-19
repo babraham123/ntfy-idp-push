@@ -36,10 +36,10 @@ internal/model/      the records core reasons about and store persists (user, de
 internal/routes/     the public URL scheme: path prefixes and the links core pushes, built and parsed in one place
 internal/webauthn/   passkey registration/assertion over stored passkeys (wraps go-webauthn); synced-passkey (BE flag) policy
 internal/web/        enrollment, approval and device pages; identity from the proxy's header
-internal/ntfy/       ntfy admin and publish client
+internal/ntfy/       the ntfy adapter: accounts and grants, the login and setup pushes, the startup safety check; the wire format stays inside
 internal/store/      SQLite (modernc.org/sqlite, pure Go), migrations
 internal/token/      random secrets and the hashes stored in their place
-internal/testutil/   integration harness over app: fake ntfy, fake directory, recording mail sender, software authenticator, test client as the proxy
+internal/testutil/   integration harness over app: fake ntfy, fake directory, recording mail sender, software authenticator, test client as the proxy; user verbs (enroll, start a login, approve, sync)
 ```
 
 ## Data model

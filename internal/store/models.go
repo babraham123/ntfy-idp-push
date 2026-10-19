@@ -13,7 +13,7 @@ import (
 
 // ---- users
 
-const userCols = `id, username, ntfy_grants_json, disabled_at, created_at, email, display_name, synced_at, welcomed_at`
+const userCols = `id, username, ntfy_grants_json, disabled_at, created_at, email, display_name, synced_at, welcomed_at, ntfy_reset_pending`
 
 func scanUser(row interface{ Scan(...any) error }) (*model.User, error) {
 	var u model.User
@@ -21,7 +21,7 @@ func scanUser(row interface{ Scan(...any) error }) (*model.User, error) {
 	var disabled, synced, welcomed sql.NullInt64
 	var created int64
 	if err := row.Scan(&u.ID, &u.Username, &grants, &disabled, &created, &u.Email, &u.DisplayName,
-		&synced, &welcomed); err != nil {
+		&synced, &welcomed, &u.NtfyResetPending); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}

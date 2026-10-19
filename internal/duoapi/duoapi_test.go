@@ -421,7 +421,7 @@ func TestV5JSONEnrollAndStatus(t *testing.T) {
 			duoapigo.JSONParams{"user_id": r.UserID, "factor": "auto", "device": "auto"})
 		done <- result{body, err}
 	}()
-	if st := approve(t, h, a, h.Ntfy.NextPublish(t).Click); st != 200 {
+	if st := h.Approve(t, a, h.Ntfy.NextPublish(t).Click); st != 200 {
 		t.Fatalf("approve: %d", st)
 	}
 	res := <-done
@@ -447,16 +447,4 @@ func TestV5JSONEnrollAndStatus(t *testing.T) {
 	if s := status(); s != "invalid" {
 		t.Fatalf("after revocation: %s", s)
 	}
-}
-
-// approve performs the approve page's passkey flow for the challenge at clickURL.
-func approve(t *testing.T, h *testutil.Harness, a *testutil.Authenticator, clickURL string) int {
-	t.Helper()
-	path := testutil.LocalPath(t, clickURL)
-	resp, opts := h.Do(t, testutil.Request{Method: "GET", Path: path + "/options"})
-	if resp.StatusCode != 200 {
-		return resp.StatusCode
-	}
-	resp, _ = h.Do(t, testutil.Request{Method: "POST", Path: path + "/assert", Body: a.Get(t, opts)})
-	return resp.StatusCode
 }

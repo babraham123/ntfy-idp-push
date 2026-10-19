@@ -21,26 +21,27 @@ type SyncCounts struct {
 	Created, Welcomed, Deleted, Updated int
 }
 
-// Sync runs one directory sync round; without a directory it refuses with ErrNoDirectory and
-// changes nothing. A directory that fails skips the round and changes nothing, since deletes
+// Sync runs one directory sync round and reports what it changed; without a directory it refuses
+// with ErrNoDirectory and changes nothing. A directory that fails skips the round and changes nothing, since deletes
 // cannot be undone and a broken directory would delete everyone.
 // The round first reconciles accounts: it creates listed people, records profiles, and deletes
 // the users it manages that the directory no longer lists. Only then does it send owed welcomes, so
 // a slow or failing mail server never holds up a deletion. A failure for one user does not stop
 // the round; every failure is logged, and they are returned together.
-func (s *Service) Sync(ctx context.Context) error {
+func (s *Service) Sync(ctx context.Context) (SyncCounts, error) {
+	var n SyncCounts
 	if s.dir == nil {
-		return ErrNoDirectory
+		return n, ErrNoDirectory
 	}
 	people, err := s.dir.List(ctx)
 	if err != nil {
 		s.Log.Warn("directory sync skipped", "err", err)
 		s.store.Audit(ctx, "", "sync_skipped", map[string]any{"error": err.Error()})
-		return err
+		return n, err
 	}
 	users, err := s.store.Users(ctx)
 	if err != nil {
-		return err
+		return n, err
 	}
 	// One view of ntfy's users for the whole round.
 	acc := s.ntfy().Accounts()
@@ -50,7 +51,6 @@ func (s *Service) Sync(ctx context.Context) error {
 	}
 	listed := make(map[string]bool, len(people))
 	now := time.Now()
-	var n SyncCounts
 	var errs []error
 	fail := func(username string, err error) {
 		s.Log.Warn("directory sync", "user", username, "err", err)
@@ -120,7 +120,7 @@ func (s *Service) Sync(ctx context.Context) error {
 		"created": n.Created, "welcomed": n.Welcomed, "deleted": n.Deleted, "updated": n.Updated,
 		"failed": len(errs),
 	})
-	return errors.Join(errs...)
+	return n, errors.Join(errs...)
 }
 
 // ProvisionFromDirectory provisions a user the directory lists, records their directory profile,

@@ -3,10 +3,8 @@ package core_test
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/url"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,53 +18,6 @@ import (
 	"github.com/babraham123/ntfy-idp-push/internal/testutil"
 	"github.com/babraham123/ntfy-idp-push/internal/token"
 )
-
-var callSeq atomic.Int32
-
-// authCall runs an Authelia-shaped auth request in the background. Calls differ by hostname to
-// bypass replay guard.
-func authCall(h *testutil.Harness, user, device string) <-chan *authapi.AuthResult {
-	out := make(chan *authapi.AuthResult, 1)
-	seq := callSeq.Add(1)
-	go func() {
-		r, err := h.Duo(testutil.IKey, testutil.SKey).Auth("push",
-			authapi.AuthUsername(user),
-			authapi.AuthDevice(device),
-			authapi.AuthIpAddr("203.0.113.7"),
-			func(v *url.Values) { v.Set("hostname", fmt.Sprintf("laptop-%d", seq)) },
-			authapi.AuthDisplayUsername(user),
-			// Authelia sends pushinfo as "target%20url=<url>".
-			authapi.AuthPushinfo("target%20url=https://app.example.com/dashboard"))
-		if err != nil {
-			r = &authapi.AuthResult{}
-			r.Response.Result = "error: " + err.Error()
-		}
-		out <- r
-	}()
-	return out
-}
-
-func wait(t *testing.T, ch <-chan *authapi.AuthResult) *authapi.AuthResult {
-	t.Helper()
-	select {
-	case r := <-ch:
-		return r
-	case <-time.After(20 * time.Second):
-		t.Fatal("auth did not return")
-		return nil
-	}
-}
-
-func approve(t *testing.T, h *testutil.Harness, a *testutil.Authenticator, click string) int {
-	t.Helper()
-	path := testutil.LocalPath(t, click)
-	resp, opts := h.Do(t, testutil.Request{Method: "GET", Path: path + "/options"})
-	if resp.StatusCode != 200 {
-		return resp.StatusCode
-	}
-	resp, _ = h.Do(t, testutil.Request{Method: "POST", Path: path + "/assert", Body: a.Get(t, opts)})
-	return resp.StatusCode
-}
 
 func pushAction(m ntfy.Message, label string) ntfy.Action {
 	for _, a := range m.Actions {
@@ -107,7 +58,7 @@ func TestAutheliaLoginApprovedWithPasskey(t *testing.T) {
 		t.Fatalf("device %+v", d)
 	}
 
-	res := authCall(h, "alice", d.Device)
+	res := h.StartLogin("alice", d.Device)
 	m := h.Ntfy.NextPublish(t)
 	if m.Topic != dev.Topic || m.Title != ntfy.LoginTitle || m.Priority != 4 {
 		t.Fatalf("push %+v", m)
@@ -125,16 +76,16 @@ func TestAutheliaLoginApprovedWithPasskey(t *testing.T) {
 		t.Fatalf("approve page: %d", resp.StatusCode)
 	}
 
-	if st := approve(t, h, a, m.Click); st != 200 {
+	if st := h.Approve(t, a, m.Click); st != 200 {
 		t.Fatalf("approve: %d", st)
 	}
-	r := wait(t, res)
+	r := testutil.Await(t, res)
 	if r.Response.Result != "allow" || r.Response.Status != "allow" {
 		t.Fatalf("auth %+v", r.Response)
 	}
 
 	// Single use: the page and a second assertion both answer 410, and the push is cleared.
-	if st := approve(t, h, a, m.Click); st != 410 {
+	if st := h.Approve(t, a, m.Click); st != 410 {
 		t.Fatalf("reuse: %d", st)
 	}
 	resp, _ = h.Do(t, testutil.Request{Method: "GET", Path: testutil.LocalPath(t, m.Click)})
@@ -152,25 +103,25 @@ func TestReadingThePushDoesNotApprove(t *testing.T) {
 	other := h.Enroll(t, "alice", testutil.NewAuthenticator(t, testutil.PublicURL))
 	attacker := testutil.NewAuthenticator(t, testutil.PublicURL)
 
-	res := authCall(h, "alice", phone.DeviceID)
+	res := h.StartLogin("alice", phone.DeviceID)
 	m := h.Ntfy.NextPublish(t)
 	// A passkey from no device, and one from the user's other phone, are both refused.
-	if st := approve(t, h, attacker, m.Click); st != 403 {
+	if st := h.Approve(t, attacker, m.Click); st != 403 {
 		t.Fatalf("unknown passkey: %d", st)
 	}
-	if st := approve(t, h, other.Auth, m.Click); st != 403 {
+	if st := h.Approve(t, other.Auth, m.Click); st != 403 {
 		t.Fatalf("other device's passkey: %d", st)
 	}
 	// A right passkey from the wrong origin (phishing page) is refused.
 	phished := *phone.Auth
 	phished.Origin = "https://push.test.evil.example"
-	if st := approve(t, h, &phished, m.Click); st != 403 {
+	if st := h.Approve(t, &phished, m.Click); st != 403 {
 		t.Fatalf("wrong origin: %d", st)
 	}
 	// Without user verification it is refused too.
 	noUV := *phone.Auth
 	noUV.Flags &^= testutil.FlagUV
-	if st := approve(t, h, &noUV, m.Click); st != 403 {
+	if st := h.Approve(t, &noUV, m.Click); st != 403 {
 		t.Fatalf("no UV: %d", st)
 	}
 	// Cross-site posts are refused outright.
@@ -179,10 +130,10 @@ func TestReadingThePushDoesNotApprove(t *testing.T) {
 	if resp.StatusCode != 403 {
 		t.Fatalf("cross-origin: %d", resp.StatusCode)
 	}
-	if st := approve(t, h, phone.Auth, m.Click); st != 200 {
+	if st := h.Approve(t, phone.Auth, m.Click); st != 200 {
 		t.Fatalf("right passkey: %d", st)
 	}
-	if r := wait(t, res); r.Response.Result != "allow" {
+	if r := testutil.Await(t, res); r.Response.Result != "allow" {
 		t.Fatalf("auth %+v", r.Response)
 	}
 }
@@ -192,7 +143,7 @@ func TestDenyFraudTimeout(t *testing.T) {
 	dev := h.Enroll(t, "alice", testutil.NewAuthenticator(t, testutil.PublicURL))
 
 	t.Run("deny action", func(t *testing.T) {
-		res := authCall(h, "alice", dev.DeviceID)
+		res := h.StartLogin("alice", dev.DeviceID)
 		m := h.Ntfy.NextPublish(t)
 		deny := pushAction(m, "Deny")
 		// The ntfy app posts the token without an Origin header.
@@ -205,28 +156,28 @@ func TestDenyFraudTimeout(t *testing.T) {
 		if resp.StatusCode != 200 {
 			t.Fatalf("deny: %d", resp.StatusCode)
 		}
-		if r := wait(t, res); r.Response.Result != "deny" || r.Response.Status != "deny" {
+		if r := testutil.Await(t, res); r.Response.Result != "deny" || r.Response.Status != "deny" {
 			t.Fatalf("auth %+v", r.Response)
 		}
 	})
 	t.Run("fraud", func(t *testing.T) {
-		res := authCall(h, "alice", dev.DeviceID)
+		res := h.StartLogin("alice", dev.DeviceID)
 		m := h.Ntfy.NextPublish(t)
 		resp, _ := h.Do(t, testutil.Request{Method: "POST", Path: testutil.LocalPath(t, m.Click) + "/fraud", Body: []byte("{}")})
 		if resp.StatusCode != 200 {
 			t.Fatalf("fraud: %d", resp.StatusCode)
 		}
-		if r := wait(t, res); r.Response.Result != "deny" || r.Response.Status != "fraud" {
+		if r := testutil.Await(t, res); r.Response.Result != "deny" || r.Response.Status != "fraud" {
 			t.Fatalf("auth %+v", r.Response)
 		}
 	})
 	t.Run("timeout", func(t *testing.T) {
-		res := authCall(h, "alice", dev.DeviceID)
+		res := h.StartLogin("alice", dev.DeviceID)
 		m := h.Ntfy.NextPublish(t)
-		if r := wait(t, res); r.Response.Result != "deny" || r.Response.Status != "timeout" {
+		if r := testutil.Await(t, res); r.Response.Result != "deny" || r.Response.Status != "timeout" {
 			t.Fatalf("auth %+v", r.Response)
 		}
-		if st := approve(t, h, dev.Auth, m.Click); st != 410 {
+		if st := h.Approve(t, dev.Auth, m.Click); st != 410 {
 			t.Fatalf("approve after timeout: %d", st)
 		}
 	})
@@ -236,16 +187,16 @@ func TestRetriedLoginJoinsPendingPush(t *testing.T) {
 	h := testutil.NewHarness(t, nil)
 	dev := h.Enroll(t, "alice", testutil.NewAuthenticator(t, testutil.PublicURL))
 
-	first := authCall(h, "alice", dev.DeviceID)
+	first := h.StartLogin("alice", dev.DeviceID)
 	m := h.Ntfy.NextPublish(t)
-	second := authCall(h, "alice", dev.DeviceID)
+	second := h.StartLogin("alice", dev.DeviceID)
 	// The second login waits on the same push: nothing new reaches the phone.
 	h.Ntfy.NoPublish(t, 500*time.Millisecond)
-	if st := approve(t, h, dev.Auth, m.Click); st != 200 {
+	if st := h.Approve(t, dev.Auth, m.Click); st != 200 {
 		t.Fatalf("approve: %d", st)
 	}
 	for _, res := range []<-chan *authapi.AuthResult{first, second} {
-		if r := wait(t, res); r.Response.Result != "allow" {
+		if r := testutil.Await(t, res); r.Response.Result != "allow" {
 			t.Fatalf("auth %+v", r.Response)
 		}
 	}
@@ -258,26 +209,26 @@ func TestPushesPerUserLimited(t *testing.T) {
 
 	// Each decided push frees the phone for the next, up to the burst.
 	for i := 0; i < 3; i++ {
-		res := authCall(h, "alice", dev.DeviceID)
+		res := h.StartLogin("alice", dev.DeviceID)
 		m := h.Ntfy.NextPublish(t)
 		deny := pushAction(m, "Deny")
 		h.Do(t, testutil.Request{Method: "POST", Path: testutil.LocalPath(t, deny.URL), Body: []byte(deny.Body),
 			Header: map[string]string{"Origin": "", "Content-Type": "text/plain"}})
-		if r := wait(t, res); r.Response.Status != "deny" {
+		if r := testutil.Await(t, res); r.Response.Status != "deny" {
 			t.Fatalf("push %d: %+v", i, r.Response)
 		}
 	}
-	if r := wait(t, authCall(h, "alice", dev.DeviceID)); r.Response.Result != "deny" || r.Response.Status_Msg != "Too many sign-in requests" {
+	if r := testutil.Await(t, h.StartLogin("alice", dev.DeviceID)); r.Response.Result != "deny" || r.Response.Status_Msg != "Too many sign-in requests" {
 		t.Fatalf("fourth push %+v", r.Response)
 	}
 	h.Ntfy.NoPublish(t, 200*time.Millisecond)
 	// The allowance is per user.
-	res := authCall(h, "bob", bob.DeviceID)
+	res := h.StartLogin("bob", bob.DeviceID)
 	m := h.Ntfy.NextPublish(t)
-	if st := approve(t, h, bob.Auth, m.Click); st != 200 {
+	if st := h.Approve(t, bob.Auth, m.Click); st != 200 {
 		t.Fatalf("approve bob: %d", st)
 	}
-	if r := wait(t, res); r.Response.Result != "allow" {
+	if r := testutil.Await(t, res); r.Response.Result != "allow" {
 		t.Fatalf("bob %+v", r.Response)
 	}
 }
@@ -372,11 +323,11 @@ func TestPreauth(t *testing.T) {
 	// Device times have one-second resolution; approving a login on older afterwards makes it the
 	// most recent.
 	time.Sleep(1100 * time.Millisecond)
-	used := authCall(h, "alice", older.DeviceID)
-	if st := approve(t, h, older.Auth, h.Ntfy.NextPublish(t).Click); st != 200 {
+	used := h.StartLogin("alice", older.DeviceID)
+	if st := h.Approve(t, older.Auth, h.Ntfy.NextPublish(t).Click); st != 200 {
 		t.Fatalf("approve: %d", st)
 	}
-	if r := wait(t, used); r.Response.Result != "allow" {
+	if r := testutil.Await(t, used); r.Response.Result != "allow" {
 		t.Fatalf("auth %+v", r.Response)
 	}
 	u, _, _ := h.Svc.DevicesOf(ctx, "alice")
@@ -386,7 +337,7 @@ func TestPreauth(t *testing.T) {
 			t.Fatalf("devices for %+v: %+v", ref, res)
 		}
 	}
-	pending := authCall(h, "alice", "auto")
+	pending := h.StartLogin("alice", "auto")
 	if m := h.Ntfy.NextPublish(t); m.Topic != older.Topic {
 		t.Fatalf("device=auto pushed to %s, want %s", m.Topic, older.Topic)
 	}
@@ -394,7 +345,7 @@ func TestPreauth(t *testing.T) {
 	if err := h.Svc.SetUserDisabled(ctx, "alice", true); err != nil {
 		t.Fatal(err)
 	}
-	if r := wait(t, pending); r.Response.Result != "deny" {
+	if r := testutil.Await(t, pending); r.Response.Result != "deny" {
 		t.Fatalf("pending auth after disable: %+v", r.Response)
 	}
 	if err := refused(core.UserRef{Username: "alice"}); !errors.Is(err, core.ErrUserDisabled) {
@@ -414,7 +365,7 @@ func TestPreauth(t *testing.T) {
 func TestRevokeDevice(t *testing.T) {
 	h := testutil.NewHarness(t, nil)
 	dev := h.Enroll(t, "alice", testutil.NewAuthenticator(t, testutil.PublicURL))
-	res := authCall(h, "alice", dev.DeviceID)
+	res := h.StartLogin("alice", dev.DeviceID)
 	m := h.Ntfy.NextPublish(t)
 
 	// Revoked from the self-service page: pending login denied, grant removed, device gone.
@@ -429,10 +380,10 @@ func TestRevokeDevice(t *testing.T) {
 	if h.HasDevice(t, "alice", dev.DeviceID) {
 		t.Fatal("device row kept after a successful revoke")
 	}
-	if r := wait(t, res); r.Response.Result != "deny" {
+	if r := testutil.Await(t, res); r.Response.Result != "deny" {
 		t.Fatalf("pending auth after revoke: %+v", r.Response)
 	}
-	if st := approve(t, h, dev.Auth, m.Click); st != 410 {
+	if st := h.Approve(t, dev.Auth, m.Click); st != 410 {
 		t.Fatalf("approve after revoke: %d", st)
 	}
 	if p := h.Ntfy.Grant("alice", dev.Topic); p != "" {
@@ -764,14 +715,14 @@ func TestAuthOutlastsWriteTimeoutAfterReload(t *testing.T) {
 	dev := h.Enroll(t, "alice", testutil.NewAuthenticator(t, testutil.PublicURL))
 	h.Reload(t, func(c *config.Config) { c.PushTimeout = config.Duration(20 * time.Second) })
 
-	res := authCall(h, "alice", dev.DeviceID)
+	res := h.StartLogin("alice", dev.DeviceID)
 	m := h.Ntfy.NextPublish(t)
 	// Answer after the server's write timeout but within push-timeout.
 	time.Sleep(h.Server.Config.WriteTimeout + time.Second)
-	if st := approve(t, h, dev.Auth, m.Click); st != 200 {
+	if st := h.Approve(t, dev.Auth, m.Click); st != 200 {
 		t.Fatalf("approve: %d", st)
 	}
-	if r := wait(t, res); r.Response.Result != "allow" {
+	if r := testutil.Await(t, res); r.Response.Result != "allow" {
 		t.Fatalf("auth: %+v", r.Response)
 	}
 }
@@ -781,28 +732,28 @@ func TestPendingLoginBlockedByLaterDisable(t *testing.T) {
 	t.Run("user disable", func(t *testing.T) {
 		h := testutil.NewHarness(t, nil)
 		dev := h.Enroll(t, "alice", testutil.NewAuthenticator(t, testutil.PublicURL))
-		res := authCall(h, "alice", dev.DeviceID)
+		res := h.StartLogin("alice", dev.DeviceID)
 		m := h.Ntfy.NextPublish(t)
 		if err := h.Svc.SetUserDisabled(ctx, "alice", true); err != nil {
 			t.Fatal(err)
 		}
-		if r := wait(t, res); r.Response.Result != "deny" {
+		if r := testutil.Await(t, res); r.Response.Result != "deny" {
 			t.Fatalf("auth after disable: %+v", r.Response)
 		}
-		if st := approve(t, h, dev.Auth, m.Click); st != 410 {
+		if st := h.Approve(t, dev.Auth, m.Click); st != 410 {
 			t.Fatalf("approve after disable: %d", st)
 		}
 	})
 	t.Run("kill switch", func(t *testing.T) {
 		h := testutil.NewHarness(t, nil)
 		dev := h.Enroll(t, "alice", testutil.NewAuthenticator(t, testutil.PublicURL))
-		res := authCall(h, "alice", dev.DeviceID)
+		res := h.StartLogin("alice", dev.DeviceID)
 		m := h.Ntfy.NextPublish(t)
 		h.Reload(t, func(c *config.Config) { c.PushDisabled = true })
-		if r := wait(t, res); r.Response.Result != "deny" {
+		if r := testutil.Await(t, res); r.Response.Result != "deny" {
 			t.Fatalf("auth after kill switch: %+v", r.Response)
 		}
-		if st := approve(t, h, dev.Auth, m.Click); st != 410 {
+		if st := h.Approve(t, dev.Auth, m.Click); st != 410 {
 			t.Fatalf("approve after kill switch: %d", st)
 		}
 	})
@@ -811,13 +762,13 @@ func TestPendingLoginBlockedByLaterDisable(t *testing.T) {
 		// logins: valid passkey and CLI break-glass approvals are still refused.
 		h := testutil.NewHarness(t, func(c *config.Config) { c.PushTimeout = config.Duration(2 * time.Second) })
 		dev := h.Enroll(t, "alice", testutil.NewAuthenticator(t, testutil.PublicURL))
-		authCall(h, "alice", dev.DeviceID)
+		h.StartLogin("alice", dev.DeviceID)
 		m := h.Ntfy.NextPublish(t)
 		u, _, _ := h.Svc.DevicesOf(ctx, "alice")
 		if err := h.Store.SetUserDisabled(ctx, u.ID, true); err != nil {
 			t.Fatal(err)
 		}
-		if st := approve(t, h, dev.Auth, m.Click); st != 403 {
+		if st := h.Approve(t, dev.Auth, m.Click); st != 403 {
 			t.Fatalf("approve for disabled user: %d", st)
 		}
 		id := strings.TrimPrefix(testutil.LocalPath(t, m.Click), "/challenge/")
@@ -833,7 +784,7 @@ func TestSyncedPasskeyLockedOutWhenPolicyTightened(t *testing.T) {
 	a := testutil.NewAuthenticator(t, testutil.PublicURL)
 	a.Flags |= testutil.FlagBE | testutil.FlagBS
 	dev := h.Enroll(t, "alice", a)
-	res := authCall(h, "alice", dev.DeviceID)
+	res := h.StartLogin("alice", dev.DeviceID)
 	m := h.Ntfy.NextPublish(t)
 	path := testutil.LocalPath(t, m.Click)
 	// Options fetched while synced passkeys were allowed, asserted after they no longer are.
@@ -844,10 +795,10 @@ func TestSyncedPasskeyLockedOutWhenPolicyTightened(t *testing.T) {
 	if resp.StatusCode != 403 {
 		t.Fatalf("synced assertion after policy change: %d", resp.StatusCode)
 	}
-	if st := approve(t, h, a, m.Click); st != 403 {
+	if st := h.Approve(t, a, m.Click); st != 403 {
 		t.Fatalf("synced passkey approved after policy change: %d", st)
 	}
-	if r := wait(t, res); r.Response.Result != "deny" {
+	if r := testutil.Await(t, res); r.Response.Result != "deny" {
 		t.Fatalf("auth %+v", r.Response)
 	}
 }
@@ -857,7 +808,7 @@ func TestRevokeResumesAfterNtfyFailure(t *testing.T) {
 	h := testutil.NewHarness(t, nil)
 	lost := h.Enroll(t, "alice", testutil.NewAuthenticator(t, testutil.PublicURL))
 	kept := h.Enroll(t, "alice", testutil.NewAuthenticator(t, testutil.PublicURL))
-	res := authCall(h, "alice", lost.DeviceID)
+	res := h.StartLogin("alice", lost.DeviceID)
 	m := h.Ntfy.NextPublish(t)
 
 	h.Ntfy.FailNext("DELETE", "/v1/users/access", 1)
@@ -865,10 +816,10 @@ func TestRevokeResumesAfterNtfyFailure(t *testing.T) {
 		t.Fatal("revoke reported success while ntfy failed")
 	}
 	// Locally revoked regardless: nothing can approve, preauth no longer lists it.
-	if r := wait(t, res); r.Response.Result != "deny" {
+	if r := testutil.Await(t, res); r.Response.Result != "deny" {
 		t.Fatalf("pending auth: %+v", r.Response)
 	}
-	if st := approve(t, h, lost.Auth, m.Click); st != 410 {
+	if st := h.Approve(t, lost.Auth, m.Click); st != 410 {
 		t.Fatalf("approve after failed revoke: %d", st)
 	}
 	pre, _ := h.Duo(testutil.IKey, testutil.SKey).Preauth(authapi.PreauthUsername("alice"))
@@ -939,8 +890,8 @@ func TestPurgeFinishesInterruptedReset(t *testing.T) {
 	if h.Ntfy.Grant("alice", kept.Topic) != config.PermReadOnly || h.Ntfy.Grant("alice", lost.Topic) != "" {
 		t.Fatalf("grants after reset: %+v", h.Ntfy.User("alice").Grants)
 	}
-	if pending, _ := h.Store.PendingNtfyResets(ctx); len(pending) != 0 {
-		t.Fatalf("resets still pending: %v", pending)
+	if userNamed(t, h, "alice").NtfyResetPending {
+		t.Fatal("reset still pending")
 	}
 }
 
@@ -982,8 +933,8 @@ func TestResetWhileUserDisabled(t *testing.T) {
 		t.Fatal("ntfy user not recreated")
 	}
 	wantGrants(map[string]string{"alice-*": config.PermReadWrite, "alerts": config.PermReadOnly, kept.Topic: config.PermReadOnly})
-	if pending, _ := h.Store.PendingNtfyResets(ctx); len(pending) != 0 {
-		t.Fatalf("resets still pending: %v", pending)
+	if userNamed(t, h, "alice").NtfyResetPending {
+		t.Fatal("reset still pending")
 	}
 	if h.HasDevice(t, "alice", lost.DeviceID) {
 		t.Fatal("device row kept")
@@ -1166,13 +1117,13 @@ func TestLoginEligibility(t *testing.T) {
 			duo := h.Duo(testutil.IKey, testutil.SKey)
 
 			// A push already on the phone when the state changes.
-			pending := authCall(h, "alice", dev.DeviceID)
+			pending := h.StartLogin("alice", dev.DeviceID)
 			m := h.Ntfy.NextPublish(t)
 			c.block(t, h, dev)
-			if r := wait(t, pending); r.Response.Result != "deny" {
+			if r := testutil.Await(t, pending); r.Response.Result != "deny" {
 				t.Fatalf("pending login: %+v", r.Response)
 			}
-			if st := approve(t, h, dev.Auth, m.Click); st != c.assert {
+			if st := h.Approve(t, dev.Auth, m.Click); st != c.assert {
 				t.Fatalf("approve: %d, want %d", st, c.assert)
 			}
 

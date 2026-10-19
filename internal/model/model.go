@@ -25,6 +25,9 @@ type User struct {
 	// WelcomedAt is when the last welcome email was sent; nil means the user is owed one, which the
 	// next sync round sends.
 	WelcomedAt *time.Time
+	// NtfyResetPending is set while a requested ntfy user reset has not finished; the purge job
+	// retries it.
+	NtfyResetPending bool
 }
 
 // Enabled reports whether the user may enroll and sign in.

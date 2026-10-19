@@ -96,14 +96,10 @@ func auditCount(t *testing.T, h *testutil.Harness, user, event string) int {
 	return len(h.Audit(t, user, event))
 }
 
-func wantSyncCounts(t *testing.T, h *testutil.Harness, created, welcomed, deleted, updated int) {
+func wantSyncCounts(t *testing.T, got core.SyncCounts, created, welcomed, deleted, updated int) {
 	t.Helper()
-	got := lastAudit(t, h, "sync")
-	want := map[string]any{"created": created, "welcomed": welcomed, "deleted": deleted, "updated": updated}
-	for k, v := range want {
-		if got[k] != float64(v.(int)) {
-			t.Fatalf("sync counts %v, want %v", got, want)
-		}
+	if want := (core.SyncCounts{Created: created, Welcomed: welcomed, Deleted: deleted, Updated: updated}); got != want {
+		t.Fatalf("sync counts %+v, want %+v", got, want)
 	}
 }
 
@@ -119,12 +115,9 @@ func preauthResult(t *testing.T, h *testutil.Harness, user string) *authapi.Prea
 // A person new to the directory gets an ntfy account with enroll-access and exactly one welcome
 // email whose password signs the app in; later rounds send nothing and only track profile changes.
 func TestSyncProvisionsAndWelcomesOnce(t *testing.T) {
-	ctx := context.Background()
 	h := testutil.NewHarness(t, nil)
 	h.Dir.Set(carol, dave)
-	if err := h.Svc.Sync(ctx); err != nil {
-		t.Fatal(err)
-	}
+	n := h.Sync(t)
 	for _, p := range []directory.Person{carol, dave} {
 		if h.Ntfy.Grant(p.Username, p.Username+"-*") != config.PermReadWrite || h.Ntfy.Grant(p.Username, "alerts") != config.PermReadOnly {
 			t.Fatalf("enroll-access not applied to %s: %+v", p.Username, h.Ntfy.User(p.Username))
@@ -138,15 +131,13 @@ func TestSyncProvisionsAndWelcomesOnce(t *testing.T) {
 			t.Fatalf("preauth after sync: %+v", pre.Response)
 		}
 	}
-	wantSyncCounts(t, h, 2, 2, 0, 0)
+	wantSyncCounts(t, n, 2, 2, 0, 0)
 
 	password := h.Ntfy.Password("carol")
 	moved := carol
 	moved.Email, moved.DisplayName = "carol@elsewhere.example", "Carol D."
 	h.Dir.Set(moved, dave)
-	if err := h.Svc.Sync(ctx); err != nil {
-		t.Fatal(err)
-	}
+	n = h.Sync(t)
 	if n := len(h.Mail.Sent()); n != 2 {
 		t.Fatalf("%d emails after the second round, want the 2 welcomes", n)
 	}
@@ -156,7 +147,7 @@ func TestSyncProvisionsAndWelcomesOnce(t *testing.T) {
 	if u := userNamed(t, h, "carol"); u.Email != moved.Email || u.DisplayName != moved.DisplayName {
 		t.Fatalf("profile not updated: %+v", u.User)
 	}
-	wantSyncCounts(t, h, 0, 0, 0, 1)
+	wantSyncCounts(t, n, 0, 0, 0, 1)
 }
 
 // The directory decides who has an account: a user it stops listing is deleted with their phones
@@ -165,12 +156,10 @@ func TestSyncProvisionsAndWelcomesOnce(t *testing.T) {
 func TestSyncDeletes(t *testing.T) {
 	ctx := context.Background()
 	h := testutil.NewHarness(t, nil)
-	sync := func(people ...directory.Person) {
+	sync := func(people ...directory.Person) core.SyncCounts {
 		t.Helper()
 		h.Dir.Set(people...)
-		if err := h.Svc.Sync(ctx); err != nil {
-			t.Fatal(err)
-		}
+		return h.Sync(t)
 	}
 	wantPreauth := func(result, msg string) {
 		t.Helper()
@@ -185,8 +174,8 @@ func TestSyncDeletes(t *testing.T) {
 	dev := h.Enroll(t, "carol", testutil.NewAuthenticator(t, testutil.PublicURL))
 	wantPreauth("auth", "")
 
-	sync(dave)
-	wantSyncCounts(t, h, 0, 0, 1, 0)
+	n := sync(dave)
+	wantSyncCounts(t, n, 0, 0, 1, 0)
 	if h.HasDevice(t, "carol", dev.DeviceID) || h.Ntfy.User("carol") != nil || h.Ntfy.Grant("carol", dev.Topic) != "" {
 		t.Fatalf("a dropped user kept a device or ntfy account: %+v", h.Ntfy.User("carol"))
 	}
@@ -195,23 +184,23 @@ func TestSyncDeletes(t *testing.T) {
 	}
 	wantPreauth("enroll", "")
 	// Gone stays gone: nobody is deleted twice.
-	sync(dave)
-	wantSyncCounts(t, h, 0, 0, 0, 0)
+	n = sync(dave)
+	wantSyncCounts(t, n, 0, 0, 0, 0)
 	if h.Ntfy.User("carol") != nil {
 		t.Fatal("a dropped user was recreated")
 	}
 
-	sync(carol, dave)
-	wantSyncCounts(t, h, 1, 1, 0, 0)
+	n = sync(carol, dave)
+	wantSyncCounts(t, n, 1, 1, 0, 0)
 	emails := 2
 	checkWelcome(t, h, welcomeTo(t, h, carol.Email, emails), carol)
 
 	if err := h.Svc.SetUserDisabled(ctx, "carol", true); err != nil {
 		t.Fatal(err)
 	}
-	sync(carol, dave)
+	n = sync(carol, dave)
 	wantPreauth("deny", "user disabled")
-	wantSyncCounts(t, h, 0, 0, 0, 0)
+	wantSyncCounts(t, n, 0, 0, 0, 0)
 	welcomeTo(t, h, carol.Email, emails)
 }
 
@@ -221,12 +210,10 @@ func TestSyncDeletes(t *testing.T) {
 func TestSyncDeletesOnlyManagedUsers(t *testing.T) {
 	ctx := context.Background()
 	h := testutil.NewHarness(t, nil)
-	sync := func(people ...directory.Person) {
+	sync := func(people ...directory.Person) core.SyncCounts {
 		t.Helper()
 		h.Dir.Set(people...)
-		if err := h.Svc.Sync(ctx); err != nil {
-			t.Fatal(err)
-		}
+		return h.Sync(t)
 	}
 	wantKept := func(user string, dev testutil.Enrolled) {
 		t.Helper()
@@ -244,21 +231,21 @@ func TestSyncDeletesOnlyManagedUsers(t *testing.T) {
 	sync(carol)
 	erinDev := h.Enroll(t, "erin", testutil.NewAuthenticator(t, testutil.PublicURL))
 
-	sync(dave)
-	wantSyncCounts(t, h, 1, 1, 1, 0)
+	n := sync(dave)
+	wantSyncCounts(t, n, 1, 1, 1, 0)
 	wantGone("carol")
 	wantKept("erin", erinDev)
 
-	sync()
-	wantSyncCounts(t, h, 0, 0, 1, 0)
+	n = sync()
+	wantSyncCounts(t, n, 0, 0, 1, 0)
 	wantGone("dave")
 	wantKept("erin", erinDev)
 
 	erin := directory.Person{Username: "erin", Email: "erin@example.com"}
-	sync(erin)
-	wantSyncCounts(t, h, 0, 1, 0, 1)
-	sync()
-	wantSyncCounts(t, h, 0, 0, 1, 0)
+	n = sync(erin)
+	wantSyncCounts(t, n, 0, 1, 0, 1)
+	n = sync()
+	wantSyncCounts(t, n, 0, 0, 1, 0)
 	wantGone("erin")
 }
 
@@ -268,13 +255,16 @@ func TestSyncDeletesBeforeWelcoming(t *testing.T) {
 	ctx := context.Background()
 	h := testutil.NewHarness(t, nil)
 	h.Dir.Set(carol)
-	if err := h.Svc.Sync(ctx); err != nil {
-		t.Fatal(err)
-	}
+	h.Sync(t)
 	held := h.Mail.Block()
 	h.Dir.Set(dave)
+	var n core.SyncCounts
 	done := make(chan error, 1)
-	go func() { done <- h.Svc.Sync(ctx) }()
+	go func() {
+		var err error
+		n, err = h.Svc.Sync(ctx)
+		done <- err
+	}()
 	select {
 	case m := <-held:
 		if m.To != dave.Email {
@@ -291,22 +281,20 @@ func TestSyncDeletesBeforeWelcoming(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkWelcome(t, h, welcomeTo(t, h, dave.Email, 1), dave)
-	wantSyncCounts(t, h, 1, 1, 1, 0)
+	wantSyncCounts(t, n, 1, 1, 1, 0)
 }
 
 // A round asks ntfy for its user list once, however many accounts it creates and welcomes, and a
 // round with nothing to do never asks.
 func TestSyncListsNtfyUsersOnce(t *testing.T) {
-	ctx := context.Background()
 	h := testutil.NewHarness(t, nil)
 	erin := directory.Person{Username: "erin", Email: "erin@example.com"}
 	people := []directory.Person{carol, dave, erin}
 	h.Dir.Set(people...)
+	var n core.SyncCounts
 	for round, want := range []int{1, 0} {
 		before := h.Ntfy.UserLists()
-		if err := h.Svc.Sync(ctx); err != nil {
-			t.Fatal(err)
-		}
+		n = h.Sync(t)
 		if n := h.Ntfy.UserLists() - before; n != want {
 			t.Fatalf("round %d listed ntfy users %d times, want %d", round, n, want)
 		}
@@ -314,7 +302,7 @@ func TestSyncListsNtfyUsersOnce(t *testing.T) {
 	for _, p := range people {
 		checkWelcome(t, h, welcomeTo(t, h, p.Email, 1), p)
 	}
-	wantSyncCounts(t, h, 0, 0, 0, 0)
+	wantSyncCounts(t, n, 0, 0, 0, 0)
 }
 
 // A directory that fails changes nothing: deleting everyone on a broken directory could not be
@@ -323,11 +311,9 @@ func TestSyncSkipsBrokenDirectory(t *testing.T) {
 	ctx := context.Background()
 	h := testutil.NewHarness(t, nil)
 	h.Dir.Set(carol)
-	if err := h.Svc.Sync(ctx); err != nil {
-		t.Fatal(err)
-	}
+	h.Sync(t)
 	h.Dir.Fail(errors.New("ldap: connection refused"))
-	err := h.Svc.Sync(ctx)
+	_, err := h.Svc.Sync(ctx)
 	if err == nil {
 		t.Fatal("sync with a broken directory succeeded")
 	}
@@ -346,9 +332,7 @@ func TestSyncSkipsBrokenDirectory(t *testing.T) {
 
 	h.Dir.Fail(nil)
 	h.Dir.Set()
-	if err := h.Svc.Sync(ctx); err != nil {
-		t.Fatal(err)
-	}
+	h.Sync(t)
 	if _, _, err := h.Svc.DevicesOf(ctx, "carol"); !errors.Is(err, core.ErrUnknownUser) {
 		t.Fatalf("carol after an empty round: %v", err)
 	}
@@ -364,7 +348,7 @@ func TestSyncRetriesFailedWelcome(t *testing.T) {
 	h := testutil.NewHarness(t, nil)
 	h.Mail.Fail(errors.New("smtp: connection refused"))
 	h.Dir.Set(carol, dave)
-	err := h.Svc.Sync(ctx)
+	n, err := h.Svc.Sync(ctx)
 	if err == nil {
 		t.Fatal("sync hid the failed welcomes")
 	}
@@ -379,19 +363,17 @@ func TestSyncRetriesFailedWelcome(t *testing.T) {
 			t.Fatalf("%d welcome_failed entries for %s", n, p.Username)
 		}
 	}
-	wantSyncCounts(t, h, 2, 0, 0, 0)
+	wantSyncCounts(t, n, 2, 0, 0, 0)
 
 	h.Mail.Fail(nil)
-	if err := h.Svc.Sync(ctx); err != nil {
-		t.Fatal(err)
-	}
+	n = h.Sync(t)
 	for _, p := range []directory.Person{carol, dave} {
 		checkWelcome(t, h, welcomeTo(t, h, p.Email, 1), p)
 		if u := userNamed(t, h, p.Username); u.WelcomedAt == nil {
 			t.Fatalf("%s not marked welcomed", p.Username)
 		}
 	}
-	wantSyncCounts(t, h, 0, 2, 0, 0)
+	wantSyncCounts(t, n, 0, 2, 0, 0)
 }
 
 // user welcome resends the welcome with a new password; the old one stops working.
@@ -399,9 +381,7 @@ func TestWelcomeRotatesPassword(t *testing.T) {
 	ctx := context.Background()
 	h := testutil.NewHarness(t, nil)
 	h.Dir.Set(carol)
-	if err := h.Svc.Sync(ctx); err != nil {
-		t.Fatal(err)
-	}
+	h.Sync(t)
 	first := checkWelcome(t, h, welcomeTo(t, h, carol.Email, 1), carol)
 	if err := h.Svc.Welcome(ctx, "carol"); err != nil {
 		t.Fatal(err)
@@ -426,9 +406,7 @@ func TestWelcomeRotatesPassword(t *testing.T) {
 		t.Fatalf("welcome with mail down: %v", err)
 	}
 	h.Mail.Fail(nil)
-	if err := h.Svc.Sync(ctx); err != nil {
-		t.Fatal(err)
-	}
+	h.Sync(t)
 	checkWelcome(t, h, welcomeTo(t, h, carol.Email, 3), carol)
 }
 
@@ -473,9 +451,7 @@ func TestResetSendsWelcome(t *testing.T) {
 	ctx := context.Background()
 	h := testutil.NewHarness(t, nil)
 	h.Dir.Set(carol)
-	if err := h.Svc.Sync(ctx); err != nil {
-		t.Fatal(err)
-	}
+	h.Sync(t)
 	lost := h.Enroll(t, "carol", testutil.NewAuthenticator(t, testutil.PublicURL))
 	h.Enroll(t, "carol", testutil.NewAuthenticator(t, testutil.PublicURL))
 
@@ -501,9 +477,7 @@ func TestResetSendsWelcome(t *testing.T) {
 		t.Fatal("undelivered welcome marked as sent")
 	}
 	h.Mail.Fail(nil)
-	if err := h.Svc.Sync(ctx); err != nil {
-		t.Fatal(err)
-	}
+	h.Sync(t)
 	checkWelcome(t, h, welcomeTo(t, h, carol.Email, 4), carol)
 }
 
@@ -513,9 +487,7 @@ func TestInterruptedWelcomeStaysOwed(t *testing.T) {
 	ctx := context.Background()
 	h := testutil.NewHarness(t, nil)
 	h.Dir.Set(carol)
-	if err := h.Svc.Sync(ctx); err != nil {
-		t.Fatal(err)
-	}
+	h.Sync(t)
 	dev := h.Enroll(t, "carol", testutil.NewAuthenticator(t, testutil.PublicURL))
 	before := h.Ntfy.Password("carol")
 
@@ -550,11 +522,9 @@ func TestInterruptedWelcomeStaysOwed(t *testing.T) {
 		t.Fatal("an interrupted welcome was marked as sent")
 	}
 
-	if err := h.Svc.Sync(ctx); err != nil {
-		t.Fatal(err)
-	}
+	n := h.Sync(t)
 	checkWelcome(t, h, welcomeTo(t, h, carol.Email, 2), carol)
-	wantSyncCounts(t, h, 0, 1, 0, 0)
+	wantSyncCounts(t, n, 0, 1, 0, 0)
 }
 
 // Overlapping welcomes each send an email, and the last one sent carries the password ntfy holds.
@@ -562,9 +532,7 @@ func TestConcurrentWelcomes(t *testing.T) {
 	ctx := context.Background()
 	h := testutil.NewHarness(t, nil)
 	h.Dir.Set(carol)
-	if err := h.Svc.Sync(ctx); err != nil {
-		t.Fatal(err)
-	}
+	h.Sync(t)
 	held := h.Mail.Block()
 	errs := make(chan error, 2)
 	for range 2 {
@@ -593,7 +561,7 @@ func TestProvisionManual(t *testing.T) {
 	ctx := context.Background()
 	h := testutil.NewHarness(t, testutil.NoDirectory)
 	h.Dir.Set(dave)
-	if err := h.Svc.Sync(ctx); !errors.Is(err, core.ErrNoDirectory) || core.KindOf(err) != core.Refused {
+	if _, err := h.Svc.Sync(ctx); !errors.Is(err, core.ErrNoDirectory) || core.KindOf(err) != core.Refused {
 		t.Fatalf("sync without a directory: %v", err)
 	}
 	if _, err := h.Svc.ProvisionFromDirectory(ctx, "dave"); !errors.Is(err, core.ErrNoDirectory) {
@@ -649,10 +617,8 @@ func TestProvisionManual(t *testing.T) {
 	checkWelcome(t, h, welcomeTo(t, h, erin.Email, 1), erin)
 
 	h.Restart(t, func(c *config.Config) { c.DirectoryType = "ldap" })
-	if err := h.Svc.Sync(ctx); err != nil {
-		t.Fatal(err)
-	}
-	wantSyncCounts(t, h, 1, 1, 0, 0)
+	n := h.Sync(t)
+	wantSyncCounts(t, n, 1, 1, 0, 0)
 	for _, name := range []string{"carol", "erin"} {
 		if h.Ntfy.User(name) == nil {
 			t.Fatalf("the first directory round deleted %s, provisioned by hand", name)

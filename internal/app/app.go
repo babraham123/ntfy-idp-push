@@ -161,7 +161,7 @@ func (a *App) Serve(ctx context.Context, reload <-chan struct{}, load func() (*c
 	} else {
 		// Sync logs its own failures. directory-sync-interval is restart-only, so the startup value
 		// holds for the process.
-		go every(ctx, a.Cfg.DirectorySyncInterval.D(), func() { _ = a.Svc.Sync(ctx) })
+		go every(ctx, a.Cfg.DirectorySyncInterval.D(), func() { _, _ = a.Svc.Sync(ctx) })
 	}
 
 	for {
