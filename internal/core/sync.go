@@ -1,20 +1,17 @@
 package core
 
 // The directory, when one is configured, controls who has an ntfy account. Sync converges the store
-// and ntfy on the directory every round. Without one, ProvisionManual creates accounts. Welcome emails the user their credentials. The ntfy password exists only in the email,
-// so every path that invalidates the password (a new account, a reset) marks a welcome as owed
-// before it changes anything, and ends in Welcome. The next sync round sends any welcome still owed.
+// and ntfy on the directory every round. Without one, ProvisionManual creates accounts. Either way a
+// new account ends in the welcome (see credentials.go), and a round sends any welcome still owed.
 
 import (
 	"context"
 	"errors"
 	"fmt"
 	netmail "net/mail"
-	"sync"
 	"time"
 
 	"github.com/babraham123/ntfy-idp-push/internal/directory"
-	"github.com/babraham123/ntfy-idp-push/internal/mail"
 	"github.com/babraham123/ntfy-idp-push/internal/model"
 	"github.com/babraham123/ntfy-idp-push/internal/ntfy"
 )
@@ -199,110 +196,4 @@ func (s *Service) recordProfile(ctx context.Context, u *model.User, p directory.
 		u.SyncedAt = syncedAt
 	}
 	return nil
-}
-
-// Welcome gives the user a new random ntfy password and emails it with the server URL, app links,
-// and a subscribe link per default topic. Older passwords fail. A welcome that does not complete
-// stays owed, so the next sync round retries it.
-func (s *Service) Welcome(ctx context.Context, username string) error {
-	_, err := s.welcome(ctx, s.ntfy().Accounts(), username, false)
-	return err
-}
-
-// welcome sends the welcome, or with owedOnly, sends it only if one is still owed. It reports
-// whether an email was sent.
-//
-// The owed marker is written before the password changes, and the success stamp only after the
-// email is accepted, so a crash or a failure anywhere in between leaves the welcome owed. The
-// bookkeeping ignores ctx's cancellation: a client that hangs up mid-send must not leave a
-// password nobody received and no welcome owed. Welcomes for one user run one at a time, so the
-// last email sent always carries the password ntfy holds.
-func (s *Service) welcome(ctx context.Context, acc *ntfy.Accounts, username string, owedOnly bool) (bool, error) {
-	unlock := s.welcoming.lock(username)
-	defer unlock()
-	// Read under the lock: an overlapping welcome may have just sent one.
-	u, err := s.user(ctx, username)
-	if err != nil {
-		return false, err
-	}
-	if owedOnly && u.WelcomedAt != nil {
-		return false, nil
-	}
-	book := context.WithoutCancel(ctx)
-	if err := s.store.SetUserWelcomed(book, u.ID, nil); err != nil {
-		return false, err
-	}
-	if err := s.sendWelcome(ctx, acc, u); err != nil {
-		s.store.Audit(book, username, "welcome_failed", map[string]any{"error": err.Error()})
-		return false, err
-	}
-	now := time.Now()
-	if err := s.store.SetUserWelcomed(book, u.ID, &now); err != nil {
-		return false, err
-	}
-	s.store.Audit(book, username, "welcome_sent", map[string]any{"email": u.Email})
-	return true, nil
-}
-
-func (s *Service) sendWelcome(ctx context.Context, acc *ntfy.Accounts, u *model.User) error {
-	if u.Email == "" {
-		return ErrNoEmail
-	}
-	if !u.Enabled() {
-		return ErrUserDisabled
-	}
-	password, err := s.setNtfyPassword(ctx, acc, u.Username)
-	if err != nil {
-		return err
-	}
-	h := s.DefaultHandoff(u.Username)
-	w := mail.Welcome{Username: u.Username, DisplayName: u.DisplayName, Password: password, ServerURL: h.Server}
-	for _, l := range h.Links {
-		w.Topics = append(w.Topics, mail.TopicLink{Topic: l.Topic, URL: l.URL})
-	}
-	msg, err := mail.RenderWelcome(w)
-	if err != nil {
-		return err
-	}
-	msg.To = u.Email
-	if err := s.mail.Send(ctx, msg); err != nil {
-		return fmt.Errorf("send welcome email: %w", err)
-	}
-	return nil
-}
-
-// keyedMutex is a mutex per key. A key's entry lives only while someone holds or waits for it.
-// The zero value is ready to use.
-type keyedMutex struct {
-	mu    sync.Mutex
-	locks map[string]*keyedLock
-}
-
-type keyedLock struct {
-	sync.Mutex
-	refs int
-}
-
-// lock locks key and returns its unlock.
-func (k *keyedMutex) lock(key string) (unlock func()) {
-	k.mu.Lock()
-	if k.locks == nil {
-		k.locks = map[string]*keyedLock{}
-	}
-	l := k.locks[key]
-	if l == nil {
-		l = &keyedLock{}
-		k.locks[key] = l
-	}
-	l.refs++
-	k.mu.Unlock()
-	l.Lock()
-	return func() {
-		l.Unlock()
-		k.mu.Lock()
-		if l.refs--; l.refs == 0 {
-			delete(k.locks, key)
-		}
-		k.mu.Unlock()
-	}
 }

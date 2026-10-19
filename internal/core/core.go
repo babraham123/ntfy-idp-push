@@ -25,7 +25,6 @@ import (
 	"github.com/babraham123/ntfy-idp-push/internal/model"
 	"github.com/babraham123/ntfy-idp-push/internal/ntfy"
 	"github.com/babraham123/ntfy-idp-push/internal/store"
-	"github.com/babraham123/ntfy-idp-push/internal/token"
 	"github.com/babraham123/ntfy-idp-push/internal/webauthn"
 )
 
@@ -129,12 +128,24 @@ func ValidUsername(u string) error {
 	return nil
 }
 
-// Provision safely ensures the ntfy account exists with enroll-access grants without creating push
-// resources.
-func (s *Service) Provision(ctx context.Context, username string) (*model.User, error) {
-	return s.provision(ctx, s.ntfy().Accounts(), username)
+// ensureUser is the user row for username, created if it is new. A disabled user is refused: this
+// is the gate every way in (provisioning, enrollment) passes through.
+func (s *Service) ensureUser(ctx context.Context, username string) (*model.User, error) {
+	if err := ValidUsername(username); err != nil {
+		return nil, err
+	}
+	u, err := s.store.EnsureUser(ctx, username, uuid.NewString())
+	if err != nil {
+		return nil, err
+	}
+	if !u.Enabled() {
+		return nil, ErrUserDisabled
+	}
+	return u, nil
 }
 
+// provision ensures the ntfy account exists with enroll-access grants without creating push
+// resources. It is idempotent; the first call makes preauth answer "enroll" instead of "deny".
 func (s *Service) provision(ctx context.Context, acc *ntfy.Accounts, username string) (*model.User, error) {
 	if err := ValidUsername(username); err != nil {
 		return nil, err
@@ -144,12 +155,9 @@ func (s *Service) provision(ctx context.Context, acc *ntfy.Accounts, username st
 	if err != nil {
 		return nil, err
 	}
-	u, err := s.store.EnsureUser(ctx, username, uuid.NewString())
+	u, err := s.ensureUser(ctx, username)
 	if err != nil {
 		return nil, err
-	}
-	if !u.Enabled() {
-		return nil, ErrUserDisabled
 	}
 	if err := s.applyNtfyAccount(ctx, acc, u, grants); err != nil {
 		return nil, err
@@ -164,29 +172,19 @@ type TopicLink struct {
 	URL   string
 }
 
-// Handoff is what an ntfy app needs to subscribe a user to topics: the server URL and one deep
-// link per topic. It carries no credentials; the app must already be signed in as the user.
-type Handoff struct {
-	Username string
-	// Server is ntfy-base-url, for apps that subscribe by hand instead of opening a link.
-	Server string
-	Links  []TopicLink
+// topicLink is the subscribe link for topic as username. It carries no credentials; the app must
+// already be signed in as the user.
+func (s *Service) topicLink(username, topic string) TopicLink {
+	return TopicLink{Topic: topic, URL: ntfyLink(s.Config(), topic, username)}
 }
 
-// Handoff builds the subscribe links for topics, expanding ${user}.
-func (s *Service) Handoff(username string, topics []string) *Handoff {
-	cfg := s.Config()
-	h := &Handoff{Username: username, Server: cfg.NtfyBaseURL}
-	for _, t := range topics {
-		t = config.Expand(t, username)
-		h.Links = append(h.Links, TopicLink{Topic: t, URL: ntfyLink(cfg, t, username)})
+// defaultTopicLinks is one subscribe link per default-topics entry, ${user} expanded.
+func (s *Service) defaultTopicLinks(username string) []TopicLink {
+	var out []TopicLink
+	for _, t := range s.Config().DefaultTopics {
+		out = append(out, s.topicLink(username, config.Expand(t, username)))
 	}
-	return h
-}
-
-// DefaultHandoff is Handoff for the configured default-topics.
-func (s *Service) DefaultHandoff(username string) *Handoff {
-	return s.Handoff(username, s.Config().DefaultTopics)
+	return out
 }
 
 // ntfyLink is the deep link the ntfy app opens to subscribe to topic as username.
@@ -223,32 +221,9 @@ func (s *Service) Purge(ctx context.Context) {
 	} else if err := s.removeDevices(ctx, unverified); err != nil {
 		s.Log.Warn("purge: unverified devices", "err", err)
 	}
-	if err := s.Reconcile(ctx); err != nil {
+	if err := s.reconcile(ctx); err != nil {
 		s.Log.Warn("purge: reconcile revocations", "err", err)
 	}
-}
-
-// SetNtfyPassword provisions username and replaces its ntfy password with a random one, returned
-// for the user to sign their apps in with. Tokens of apps already signed in remain valid.
-func (s *Service) SetNtfyPassword(ctx context.Context, username string) (string, error) {
-	return s.setNtfyPassword(ctx, s.ntfy().Accounts(), username)
-}
-
-func (s *Service) setNtfyPassword(ctx context.Context, acc *ntfy.Accounts, username string) (string, error) {
-	if _, err := s.provision(ctx, acc, username); err != nil {
-		return "", err
-	}
-	password := token.Random(18)
-	if err := s.ntfy().ChangePassword(ctx, username, password); err != nil {
-		return "", err
-	}
-	s.store.Audit(ctx, username, "ntfy_password_set", nil)
-	return password, nil
-}
-
-// AuditLog is the last limit audit entries, for one user or all.
-func (s *Service) AuditLog(ctx context.Context, username string, limit int) ([]model.AuditEntry, error) {
-	return s.store.AuditLog(ctx, username, limit)
 }
 
 // StartupChecks fails closed on an ntfy setup that would let anyone but the phone read pushes.

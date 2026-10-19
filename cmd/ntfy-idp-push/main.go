@@ -172,7 +172,7 @@ func run(args []string, out io.Writer, log *slog.Logger) error {
 		if len(rest) > 0 {
 			user = rest[0]
 		}
-		entries, err := svc.AuditLog(ctx, user, 100)
+		entries, err := a.Store.AuditLog(ctx, user, 100)
 		if err != nil {
 			return err
 		}
@@ -295,7 +295,10 @@ func userCmd(ctx context.Context, svc *core.Service, args []string, out io.Write
 	case "disable", "enable":
 		return svc.SetUserDisabled(ctx, arg, sub == "disable")
 	case "delete":
-		return svc.DeleteUser(ctx, arg, *keepNtfy)
+		if *keepNtfy {
+			return svc.ForgetUser(ctx, arg)
+		}
+		return svc.DeleteUser(ctx, arg)
 	case "approve":
 		return svc.AdminApprove(ctx, arg)
 	case "reset-ntfy":
@@ -332,7 +335,7 @@ func deviceCmd(ctx context.Context, svc *core.Service, args []string, out io.Wri
 		}
 		return tw.Flush()
 	case "revoke":
-		if err := svc.RevokeDevice(ctx, pos[1], *reset, *force, "cli"); err != nil {
+		if err := svc.RevokeDevice(ctx, pos[1], core.Revocation{Actor: "cli", ResetNtfyUser: *reset, ForceReset: *force}); err != nil {
 			return err
 		}
 		if *reset {

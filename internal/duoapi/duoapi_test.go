@@ -21,6 +21,7 @@ import (
 	"github.com/skip2/go-qrcode"
 
 	"github.com/babraham123/ntfy-idp-push/internal/config"
+	"github.com/babraham123/ntfy-idp-push/internal/core"
 	"github.com/babraham123/ntfy-idp-push/internal/duoapi"
 	"github.com/babraham123/ntfy-idp-push/internal/testutil"
 )
@@ -440,7 +441,7 @@ func TestV5JSONEnrollAndStatus(t *testing.T) {
 	if err := json.Unmarshal(b, &finished); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.Svc.RevokeDevice(context.Background(), finished.Device, false, false, "test"); err != nil {
+	if err := h.Svc.RevokeDevice(context.Background(), finished.Device, core.Revocation{Actor: "test"}); err != nil {
 		t.Fatal(err)
 	}
 	if s := status(); s != "invalid" {

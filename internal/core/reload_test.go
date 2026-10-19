@@ -16,12 +16,12 @@ func TestReloadRotatesNtfyToken(t *testing.T) {
 	ctx := context.Background()
 	h := testutil.NewHarness(t, nil)
 	h.Ntfy.AdminToken = "tk_rotated"
-	if _, err := h.Svc.Provision(ctx, "alice"); err == nil {
+	if err := h.Svc.StartupChecks(ctx); err == nil {
 		t.Fatal("fake ntfy accepted the stale token")
 	}
 	h.Reload(t, func(c *config.Config) { c.NtfyAdminToken = "tk_rotated" })
-	if _, err := h.Svc.Provision(ctx, "alice"); err != nil {
-		t.Fatalf("provision after reload: %v", err)
+	if err := h.Svc.StartupChecks(ctx); err != nil {
+		t.Fatalf("ntfy call after reload: %v", err)
 	}
 
 	next := *h.Cfg

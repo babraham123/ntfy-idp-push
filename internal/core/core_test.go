@@ -14,6 +14,7 @@ import (
 
 	"github.com/babraham123/ntfy-idp-push/internal/config"
 	"github.com/babraham123/ntfy-idp-push/internal/core"
+	"github.com/babraham123/ntfy-idp-push/internal/directory"
 	"github.com/babraham123/ntfy-idp-push/internal/model"
 	"github.com/babraham123/ntfy-idp-push/internal/ntfy"
 	"github.com/babraham123/ntfy-idp-push/internal/testutil"
@@ -477,14 +478,14 @@ func TestRevokeWithNtfyReset(t *testing.T) {
 	kept := h.Enroll(t, "alice", testutil.NewAuthenticator(t, testutil.PublicURL))
 
 	h.Ntfy.AddForeignGrant("alice", "manual-topic", config.PermReadWrite)
-	if err := h.Svc.RevokeDevice(ctx, lost.DeviceID, true, false, "test"); err == nil {
+	if err := h.Svc.RevokeDevice(ctx, lost.DeviceID, core.Revocation{Actor: "test", ResetNtfyUser: true}); err == nil {
 		t.Fatal("reset with a foreign grant must be refused without --force")
 	}
 	// The refusal left the device in place.
 	if !h.HasDevice(t, "alice", lost.DeviceID) {
 		t.Fatal("device removed despite refusal")
 	}
-	if err := h.Svc.RevokeDevice(ctx, lost.DeviceID, true, true, "test"); err != nil {
+	if err := h.Svc.RevokeDevice(ctx, lost.DeviceID, core.Revocation{Actor: "test", ResetNtfyUser: true, ForceReset: true}); err != nil {
 		t.Fatal(err)
 	}
 	u := h.Ntfy.User("alice")
@@ -559,7 +560,9 @@ func TestUnverifiedDeviceHidden(t *testing.T) {
 func TestProvision(t *testing.T) {
 	h := testutil.NewHarness(t, nil)
 	ctx := context.Background()
-	if _, err := h.Svc.Provision(ctx, "dana"); err != nil {
+	dana := directory.Person{Username: "dana", Email: "dana@example.com"}
+	h.Dir.Set(dana)
+	if _, err := h.Svc.ProvisionFromDirectory(ctx, "dana"); err != nil {
 		t.Fatal(err)
 	}
 	if h.Ntfy.User("dana") == nil || h.Ntfy.Grant("dana", "dana-*") != config.PermReadWrite || h.Ntfy.Grant("dana", "alerts") != config.PermReadOnly {
@@ -571,19 +574,27 @@ func TestProvision(t *testing.T) {
 		t.Fatalf("preauth after provision: %+v", pre.Response)
 	}
 
-	// The default handoff subscribes to every default topic, ${user} expanded.
-	hd := h.Svc.DefaultHandoff("dana")
-	if hd.Server != h.Cfg.NtfyBaseURL || len(hd.Links) != 2 ||
-		hd.Links[0] != (core.TopicLink{Topic: "alerts", URL: ntfyLink(h, "alerts", "dana")}) ||
-		hd.Links[1] != (core.TopicLink{Topic: "dana-inbox", URL: ntfyLink(h, "dana-inbox", "dana")}) {
-		t.Fatalf("default handoff %+v", hd)
+	// The welcome subscribes to every default topic, ${user} expanded, with the password ntfy holds.
+	sent := h.Mail.To(dana.Email)
+	if len(sent) != 1 {
+		t.Fatalf("%d welcomes", len(sent))
+	}
+	for _, want := range []string{"Server URL: " + h.Cfg.NtfyBaseURL, ntfyLink(h, "alerts", "dana"), ntfyLink(h, "dana-inbox", "dana")} {
+		if !strings.Contains(sent[0].Text, want) {
+			t.Fatalf("welcome lacks %q:\n%s", want, sent[0].Text)
+		}
+	}
+	before := h.Ntfy.Password("dana")
+	if !strings.Contains(sent[0].Text, before) {
+		t.Fatal("welcome does not carry ntfy's password")
 	}
 
-	// A new ntfy password replaces the old one and is returned once.
-	before := h.Ntfy.Password("dana")
-	pw, err := h.Svc.SetNtfyPassword(ctx, "dana")
-	if err != nil || pw == "" || pw == before || h.Ntfy.Password("dana") != pw {
-		t.Fatalf("ntfy password: %q %v", pw, err)
+	// A resent welcome replaces the password; the old one is gone.
+	if err := h.Svc.Welcome(ctx, "dana"); err != nil {
+		t.Fatal(err)
+	}
+	if after := h.Ntfy.Password("dana"); after == before || !strings.Contains(h.Mail.To(dana.Email)[1].Text, after) {
+		t.Fatalf("ntfy password after resend: %q", after)
 	}
 }
 
@@ -595,7 +606,7 @@ func ntfyLink(h *testutil.Harness, topic, user string) string {
 func TestProvisionRefusesUsernameThatReachesPushTopics(t *testing.T) {
 	// "${user}-*" for a user named "push" would be "push-*": every push topic.
 	h := testutil.NewHarness(t, nil)
-	if _, err := h.Svc.Provision(context.Background(), "push"); err == nil {
+	if _, st, _ := h.FinishEnroll(t, "push", "", testutil.NewAuthenticator(t, testutil.PublicURL)); st == 200 {
 		t.Fatal("provisioning user \"push\" must be refused")
 	}
 	if h.Ntfy.Grant("push", "push-*") != "" {
@@ -622,7 +633,7 @@ func TestDeleteUser(t *testing.T) {
 	h := testutil.NewHarness(t, nil)
 	ctx := context.Background()
 	h.Enroll(t, "alice", testutil.NewAuthenticator(t, testutil.PublicURL))
-	if err := h.Svc.DeleteUser(ctx, "alice", false); err != nil {
+	if err := h.Svc.DeleteUser(ctx, "alice"); err != nil {
 		t.Fatal(err)
 	}
 	if h.Ntfy.User("alice") != nil {
@@ -632,14 +643,9 @@ func TestDeleteUser(t *testing.T) {
 	if pre.Response.Result != "enroll" {
 		t.Fatalf("preauth after delete: %+v", pre.Response)
 	}
-	entries, _ := h.Svc.AuditLog(ctx, "alice", 100)
-	events := map[string]bool{}
-	for _, e := range entries {
-		events[e.Event] = true
-	}
 	for _, want := range []string{"provision", "device_enrolled", "device_verified", "device_revoked", "user_deleted"} {
-		if !events[want] {
-			t.Fatalf("audit lacks %q: %v", want, events)
+		if len(h.Audit(t, "alice", want)) == 0 {
+			t.Fatalf("audit lacks %q", want)
 		}
 	}
 }
@@ -694,11 +700,11 @@ func TestCleanupWhenNtfyUserAlreadyGone(t *testing.T) {
 	h.Enroll(t, "alice", testutil.NewAuthenticator(t, testutil.PublicURL))
 	stale := h.Enroll(t, "alice", testutil.NewAuthenticator(t, testutil.PublicURL))
 	h.Ntfy.FailNext("DELETE", "/v1/users/access", 1)
-	_ = h.Svc.RevokeDevice(ctx, stale.DeviceID, false, false, "test")
+	_ = h.Svc.RevokeDevice(ctx, stale.DeviceID, core.Revocation{Actor: "test"})
 
 	// An ntfy admin removed the user by hand: there is nothing left to revoke there.
 	h.Ntfy.DeleteUser("alice")
-	if err := h.Svc.RevokeDevice(ctx, first.DeviceID, false, false, "test"); err != nil {
+	if err := h.Svc.RevokeDevice(ctx, first.DeviceID, core.Revocation{Actor: "test"}); err != nil {
 		t.Fatalf("revoke: %v", err)
 	}
 	if h.HasDevice(t, "alice", first.DeviceID) {
@@ -708,7 +714,7 @@ func TestCleanupWhenNtfyUserAlreadyGone(t *testing.T) {
 	if h.HasDevice(t, "alice", stale.DeviceID) {
 		t.Fatal("purge did not finish the revoke")
 	}
-	if err := h.Svc.DeleteUser(ctx, "alice", false); err != nil {
+	if err := h.Svc.DeleteUser(ctx, "alice"); err != nil {
 		t.Fatalf("delete user: %v", err)
 	}
 	if _, _, err := h.Svc.DevicesOf(ctx, "alice"); !errors.Is(err, core.ErrUnknownUser) {
@@ -847,7 +853,7 @@ func TestRevokeResumesAfterNtfyFailure(t *testing.T) {
 	m := h.Ntfy.NextPublish(t)
 
 	h.Ntfy.FailNext("DELETE", "/v1/users/access", 1)
-	if err := h.Svc.RevokeDevice(ctx, lost.DeviceID, false, false, "test"); err == nil {
+	if err := h.Svc.RevokeDevice(ctx, lost.DeviceID, core.Revocation{Actor: "test"}); err == nil {
 		t.Fatal("revoke reported success while ntfy failed")
 	}
 	// Locally revoked regardless: nothing can approve, preauth no longer lists it.
@@ -866,7 +872,7 @@ func TestRevokeResumesAfterNtfyFailure(t *testing.T) {
 	}
 
 	// Re-running finishes the job.
-	if err := h.Svc.RevokeDevice(ctx, lost.DeviceID, false, false, "test"); err != nil {
+	if err := h.Svc.RevokeDevice(ctx, lost.DeviceID, core.Revocation{Actor: "test"}); err != nil {
 		t.Fatal(err)
 	}
 	if h.Ntfy.Grant("alice", lost.Topic) != "" {
@@ -879,10 +885,10 @@ func TestRevokeResumesAfterNtfyFailure(t *testing.T) {
 	// A reset that fails is resumable the same way, and the purge job finishes plain revokes.
 	again := h.Enroll(t, "alice", testutil.NewAuthenticator(t, testutil.PublicURL))
 	h.Ntfy.FailNext("DELETE", "/v1/users", 1)
-	if err := h.Svc.RevokeDevice(ctx, again.DeviceID, true, false, "test"); err == nil {
+	if err := h.Svc.RevokeDevice(ctx, again.DeviceID, core.Revocation{Actor: "test", ResetNtfyUser: true}); err == nil {
 		t.Fatal("reset reported success while ntfy failed")
 	}
-	if err := h.Svc.RevokeDevice(ctx, again.DeviceID, true, false, "test"); err != nil {
+	if err := h.Svc.RevokeDevice(ctx, again.DeviceID, core.Revocation{Actor: "test", ResetNtfyUser: true}); err != nil {
 		t.Fatal(err)
 	}
 	if h.Ntfy.Grant("alice", kept.Topic) != config.PermReadOnly || h.Ntfy.Grant("alice", again.Topic) != "" {
@@ -890,7 +896,7 @@ func TestRevokeResumesAfterNtfyFailure(t *testing.T) {
 	}
 	third := h.Enroll(t, "alice", testutil.NewAuthenticator(t, testutil.PublicURL))
 	h.Ntfy.FailNext("DELETE", "/v1/users/access", 1)
-	_ = h.Svc.RevokeDevice(ctx, third.DeviceID, false, false, "test")
+	_ = h.Svc.RevokeDevice(ctx, third.DeviceID, core.Revocation{Actor: "test"})
 	h.Svc.Purge(ctx)
 	if h.HasDevice(t, "alice", third.DeviceID) || h.Ntfy.Grant("alice", third.Topic) != "" {
 		t.Fatal("purge did not finish the revoke")
@@ -907,7 +913,7 @@ func TestPurgeFinishesInterruptedReset(t *testing.T) {
 	before := h.Ntfy.Password("alice")
 
 	h.Ntfy.FailNext("DELETE", "/v1/users/access", 1)
-	if err := h.Svc.RevokeDevice(ctx, lost.DeviceID, true, false, "test"); err == nil {
+	if err := h.Svc.RevokeDevice(ctx, lost.DeviceID, core.Revocation{Actor: "test", ResetNtfyUser: true}); err == nil {
 		t.Fatal("revoke reported success while ntfy failed")
 	}
 	if h.Ntfy.Password("alice") != before {
@@ -961,7 +967,7 @@ func TestResetWhileUserDisabled(t *testing.T) {
 	}
 
 	before := h.Ntfy.Password("alice")
-	if err := h.Svc.RevokeDevice(ctx, lost.DeviceID, true, false, "test"); err != nil {
+	if err := h.Svc.RevokeDevice(ctx, lost.DeviceID, core.Revocation{Actor: "test", ResetNtfyUser: true}); err != nil {
 		t.Fatalf("revoke with reset: %v", err)
 	}
 	if h.Ntfy.Password("alice") == before {
@@ -977,9 +983,7 @@ func TestResetWhileUserDisabled(t *testing.T) {
 
 	// Nothing is left for the purge job.
 	after := h.Ntfy.Password("alice")
-	if err := h.Svc.Reconcile(ctx); err != nil {
-		t.Fatal(err)
-	}
+	h.Svc.Purge(ctx)
 	if h.Ntfy.Password("alice") != after {
 		t.Fatal("reconcile reset the ntfy user again")
 	}
@@ -996,9 +1000,9 @@ func TestResetWhileUserDisabled(t *testing.T) {
 	if pre.Response.Result != "deny" {
 		t.Fatalf("preauth after reset of a disabled user: %+v", pre.Response)
 	}
-	// Onboarding still refuses a disabled user.
-	if _, err := h.Svc.Provision(ctx, "alice"); !errors.Is(err, core.ErrUserDisabled) {
-		t.Fatalf("provision of a disabled user: %v", err)
+	// Enrollment still refuses a disabled user.
+	if _, _, st := h.BeginEnroll(t, "alice", "", "Again"); st != 403 {
+		t.Fatalf("enrollment of a disabled user: %d", st)
 	}
 }
 
@@ -1006,7 +1010,7 @@ func TestResetRefusesForeignGrantUnderPushPrefix(t *testing.T) {
 	h := testutil.NewHarness(t, nil)
 	dev := h.Enroll(t, "alice", testutil.NewAuthenticator(t, testutil.PublicURL))
 	h.Ntfy.AddForeignGrant("alice", "push-ops", config.PermReadOnly)
-	if err := h.Svc.RevokeDevice(context.Background(), dev.DeviceID, true, false, "test"); err == nil {
+	if err := h.Svc.RevokeDevice(context.Background(), dev.DeviceID, core.Revocation{Actor: "test", ResetNtfyUser: true}); err == nil {
 		t.Fatal("reset removed a grant the shim did not make")
 	}
 	if err := h.Svc.ResetNtfyUser(context.Background(), "alice", false); err == nil {

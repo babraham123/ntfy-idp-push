@@ -58,7 +58,7 @@ type IdPEnrollment struct {
 
 // StartIdPEnrollment provisions username and issues an enrollment code, the IdP-driven way in.
 func (s *Service) StartIdPEnrollment(ctx context.Context, username string) (*IdPEnrollment, error) {
-	u, err := s.Provision(ctx, username)
+	u, err := s.provision(ctx, s.ntfy().Accounts(), username)
 	if err != nil {
 		return nil, err
 	}
@@ -147,16 +147,10 @@ func (s *Service) BeginEnrollment(ctx context.Context, r EnrollRequest) (handle 
 			return "", nil, err
 		}
 	}
-	if err := ValidUsername(username); err != nil {
-		return "", nil, err
-	}
 	name := deviceName(r.DeviceName)
-	u, err := s.store.EnsureUser(ctx, username, uuid.NewString())
+	u, err := s.ensureUser(ctx, username)
 	if err != nil {
 		return "", nil, err
-	}
-	if !u.Enabled() {
-		return "", nil, ErrUserDisabled
 	}
 	options, session, err := s.rp.BeginRegistration(u, name)
 	if err != nil {
@@ -190,8 +184,10 @@ func (s *Service) takeEnrollment(handle string) *pendingEnrollment {
 
 type Enrollment struct {
 	Device *model.Device
-	// Handoff subscribes the phone's ntfy app to the device's topic.
-	Handoff *Handoff
+	// Server is the ntfy server URL, for apps that subscribe by hand, and Link subscribes the
+	// phone's ntfy app to the device's topic.
+	Server string
+	Link   TopicLink
 	// ResultToken lets the result page act for this device for EnrollResultTTL (see EnrolledDevice).
 	ResultToken string
 }
@@ -212,10 +208,8 @@ func (s *Service) FinishEnrollment(ctx context.Context, handle, signedIn string,
 		return nil, ErrIdentityChanged
 	}
 	cfg := s.Config()
-	u, err := s.store.UserByName(ctx, p.username)
-	if errors.Is(err, store.ErrNotFound) {
-		return nil, ErrUnknownUser
-	} else if err != nil {
+	u, err := s.user(ctx, p.username)
+	if err != nil {
 		return nil, err
 	}
 	if !u.Enabled() {
@@ -287,7 +281,7 @@ func (s *Service) EnrolledDevice(ctx context.Context, resultToken string) (*mode
 
 // connectDevice does enrollment's ntfy side: account, topic grant and setup push.
 func (s *Service) connectDevice(ctx context.Context, dev *model.Device, verifyToken string) (*Enrollment, error) {
-	if _, err := s.Provision(ctx, dev.Username); err != nil {
+	if _, err := s.provision(ctx, s.ntfy().Accounts(), dev.Username); err != nil {
 		return nil, err
 	}
 	if err := s.grantDevice(ctx, dev); err != nil {
@@ -296,7 +290,7 @@ func (s *Service) connectDevice(ctx context.Context, dev *model.Device, verifyTo
 	if err := s.publishSetup(ctx, dev, verifyToken); err != nil {
 		return nil, err
 	}
-	return &Enrollment{Device: dev, Handoff: s.Handoff(dev.Username, []string{dev.NtfyTopic})}, nil
+	return &Enrollment{Device: dev, Server: s.Config().NtfyBaseURL, Link: s.topicLink(dev.Username, dev.NtfyTopic)}, nil
 }
 
 func (s *Service) publishSetup(ctx context.Context, dev *model.Device, verifyToken string) error {

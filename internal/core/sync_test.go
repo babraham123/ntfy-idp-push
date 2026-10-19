@@ -80,36 +80,20 @@ func userNamed(t *testing.T, h *testutil.Harness, name string) core.UserSummary 
 // lastAudit returns the newest audit entry for event, decoded.
 func lastAudit(t *testing.T, h *testutil.Harness, event string) map[string]any {
 	t.Helper()
-	entries, err := h.Svc.AuditLog(context.Background(), "", 1000)
-	if err != nil {
+	entries := h.Audit(t, "", event)
+	if len(entries) == 0 {
+		t.Fatalf("no %s audit entry", event)
+	}
+	var d map[string]any
+	if err := json.Unmarshal([]byte(entries[0].Detail), &d); err != nil {
 		t.Fatal(err)
 	}
-	for _, e := range entries {
-		if e.Event == event {
-			var d map[string]any
-			if err := json.Unmarshal([]byte(e.Detail), &d); err != nil {
-				t.Fatal(err)
-			}
-			return d
-		}
-	}
-	t.Fatalf("no %s audit entry", event)
-	return nil
+	return d
 }
 
 func auditCount(t *testing.T, h *testutil.Harness, user, event string) int {
 	t.Helper()
-	entries, err := h.Svc.AuditLog(context.Background(), user, 1000)
-	if err != nil {
-		t.Fatal(err)
-	}
-	n := 0
-	for _, e := range entries {
-		if e.Event == event {
-			n++
-		}
-	}
-	return n
+	return len(h.Audit(t, user, event))
 }
 
 func wantSyncCounts(t *testing.T, h *testutil.Harness, created, welcomed, deleted, updated int) {
@@ -428,9 +412,7 @@ func TestWelcomeRotatesPassword(t *testing.T) {
 	}
 
 	// Someone enrolled outside the directory has no address to send to.
-	if _, err := h.Svc.Provision(ctx, "erin"); err != nil {
-		t.Fatal(err)
-	}
+	h.Enroll(t, "erin", testutil.NewAuthenticator(t, testutil.PublicURL))
 	if err := h.Svc.Welcome(ctx, "erin"); !errors.Is(err, core.ErrNoEmail) || core.KindOf(err) != core.Refused {
 		t.Fatalf("welcome without an email: %v", err)
 	}
@@ -501,7 +483,7 @@ func TestResetSendsWelcome(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkWelcome(t, h, welcomeTo(t, h, carol.Email, 2), carol)
-	if err := h.Svc.RevokeDevice(ctx, lost.DeviceID, true, false, "test"); err != nil {
+	if err := h.Svc.RevokeDevice(ctx, lost.DeviceID, core.Revocation{Actor: "test", ResetNtfyUser: true}); err != nil {
 		t.Fatal(err)
 	}
 	checkWelcome(t, h, welcomeTo(t, h, carol.Email, 3), carol)

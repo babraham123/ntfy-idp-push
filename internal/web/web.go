@@ -450,7 +450,7 @@ func (s *Server) finishEnrollment(w http.ResponseWriter, r *http.Request, signed
 		s.jsonFail(w, err, "enroll: finish")
 		return
 	}
-	link := res.Handoff.Links[0].URL
+	link := res.Link.URL
 	qr, err := qrDataURL(link)
 	if err != nil {
 		s.jsonFail(w, err, "enroll: qr")
@@ -461,7 +461,7 @@ func (s *Server) finishEnrollment(w http.ResponseWriter, r *http.Request, signed
 		"device":       res.Device.ID,
 		"topic":        res.Device.NtfyTopic,
 		"username":     res.Device.Username,
-		"server":       res.Handoff.Server,
+		"server":       res.Server,
 		"ntfy_link":    link,
 		"qr":           qr,
 		"result_token": res.ResultToken,

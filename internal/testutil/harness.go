@@ -23,6 +23,7 @@ import (
 	"github.com/babraham123/ntfy-idp-push/internal/config"
 	"github.com/babraham123/ntfy-idp-push/internal/core"
 	"github.com/babraham123/ntfy-idp-push/internal/directory"
+	"github.com/babraham123/ntfy-idp-push/internal/model"
 	"github.com/babraham123/ntfy-idp-push/internal/ntfy"
 	"github.com/babraham123/ntfy-idp-push/internal/store"
 )
@@ -172,6 +173,23 @@ func (h *Harness) HasDevice(t *testing.T, user, id string) bool {
 		}
 	}
 	return false
+}
+
+// Audit returns user's audit entries with event ("" for every user), newest first, as the CLI's
+// audit command reads them.
+func (h *Harness) Audit(t *testing.T, user, event string) []model.AuditEntry {
+	t.Helper()
+	entries, err := h.Store.AuditLog(context.Background(), user, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []model.AuditEntry
+	for _, e := range entries {
+		if e.Event == event {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // Restart rebuilds the service on the same database with a changed config, as a restart would.
