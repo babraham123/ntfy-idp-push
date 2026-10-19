@@ -2,6 +2,7 @@ package directory
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -97,6 +98,36 @@ func TestFileGroupFilter(t *testing.T) {
 		}
 		if names := usernames(got); !reflect.DeepEqual(names, c.want) {
 			t.Errorf("group %q: got %v, want %v", c.group, names, c.want)
+		}
+	}
+}
+
+// Check requires the group to have a member, since the file defines groups only through
+// memberships; a disabled member counts. Without a group, it only parses the file.
+func TestFileCheck(t *testing.T) {
+	path := writeDB(t, autheliaDB)
+	for _, c := range []struct {
+		path, group, wantErr string // wantErr "" passes
+		noGroup              bool
+	}{
+		{path, "dev", "", false},
+		{path, "ops", "", false}, // bob, disabled, is its only member
+		{path, "", "", false},
+		{path, "Dev", `"Dev"`, true},
+		{path, "nobody", `"nobody"`, true},
+		{writeDB(t, "users: [\n"), "", "parse", false},
+		{filepath.Join(t.TempDir(), "absent.yml"), "dev", "absent.yml", false},
+	} {
+		src, err := New(Config{Type: "file", File: c.path, Group: c.group})
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = src.Check(context.Background())
+		if c.wantErr == "" && err != nil || c.wantErr != "" && (err == nil || !strings.Contains(err.Error(), c.wantErr)) {
+			t.Errorf("%s group %q: got %v, want %q", filepath.Base(c.path), c.group, err, c.wantErr)
+		}
+		if errors.Is(err, ErrNoGroup) != c.noGroup {
+			t.Errorf("group %q: %v is ErrNoGroup: %v", c.group, err, !c.noGroup)
 		}
 	}
 }

@@ -23,7 +23,14 @@ type Person struct {
 // Source lists the directory's people, sorted by username.
 type Source interface {
 	List(ctx context.Context) ([]Person, error)
+	// Check reports a source that cannot work as configured: one that cannot be reached or bound
+	// to, or whose configured group does not exist. A missing group otherwise lists nobody, which
+	// the sync believes.
+	Check(ctx context.Context) error
 }
+
+// ErrNoGroup is Check's error for a configured group the directory does not have.
+var ErrNoGroup = errors.New("group does not exist")
 
 // Config selects and configures a Source; it mirrors the directory-* configuration keys.
 type Config struct {

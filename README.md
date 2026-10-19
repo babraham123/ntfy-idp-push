@@ -55,10 +55,10 @@ The directory decides who gets an ntfy account. Once at startup and then every `
 
 - creates an account for each new person, applies `enroll-access`, and sends one welcome email: ntfy server URL, username, a random password shown only there, app links, the "Manage users" steps that sign the app in, and an `ntfy://` link per `default-topics` entry;
 - keeps email and display name current;
-- deletes users absent from the directory or marked disabled, with their devices and ntfy account; a person who returns starts over with a new account and welcome;
+- deletes users it has listed once they are absent from the directory, and users marked disabled, with their devices and ntfy account; a person who returns starts over with a new account and welcome;
 - never changes a `user disable` made by an admin.
 
-A directory that errors or lists nobody skips the round and changes nothing (audit `sync_skipped`), since deletes cannot be undone. The next round retries unsent welcome emails. Resetting a user's ntfy account (`user reset-ntfy`, `device revoke --reset-ntfy-user`) sends a new welcome, since the recreated account's password is unknown.
+A directory that errors skips the round and changes nothing (audit `sync_skipped`), since deletes cannot be undone. The next round retries unsent welcome emails. Resetting a user's ntfy account (`user reset-ntfy`, `device revoke --reset-ntfy-user`) sends a new welcome, since the recreated account's password is unknown.
 
 `directory-type: ldap` takes Authelia's LDAP settings: `directory-ldap-address` (`ldaps://` or `ldap://` with `directory-ldap-start-tls`), `directory-ldap-base-dn`, the bind `directory-ldap-user` and `directory-ldap-password` (or `-file`), `directory-ldap-users-filter` (default `(objectClass=person)`; it lists users, so no `{input}` placeholder), and the `directory-ldap-attribute-*` names (defaults `uid`, `mail`, `displayName`, `memberOf`). `directory-ldap-group-dn` limits the sync to one group's members, filtered by the server. An LDAP server with a certificate from a private CA needs `directory-ldap-ca-file`, a PEM bundle trusted besides the system roots; put it in `./config` and set `directory-ldap-ca-file: /etc/ntfy-idp-push/ldap-ca.pem`.
 
@@ -117,7 +117,7 @@ access_control:
 
 **First enrollment:** Users must register another second factor in Authelia (TOTP or browser passkey) to pass the `two_factor` policy before enrolling their phone at `/enroll`. Admins can bypass this with a single-use link via `enroll-link <user>`. authentik uses its own Duo stage (`/auth/v2/enroll`).
 
-Startup fails closed if the ntfy token lacks admin rights, anonymous reads of push topics are allowed, or the ntfy user list exceeds the client's 1 MiB response limit.
+Startup fails closed if the ntfy token lacks admin rights, anonymous reads of push topics are allowed, the ntfy user list exceeds the client's 1 MiB response limit, the LDAP bind fails, or the configured group (`directory-ldap-group-dn`, `directory-group`) does not exist.
 
 ## Backup
 

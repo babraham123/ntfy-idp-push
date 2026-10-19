@@ -25,7 +25,7 @@ type SyncCounts struct {
 // Sync runs one directory sync round. A directory that fails skips the round and changes nothing,
 // since deletes cannot be undone and a broken directory would delete everyone.
 // The round first reconciles accounts: it creates listed people, records profiles, and deletes
-// users the directory no longer lists or marks disabled. Only then does it send owed welcomes, so
+// the users it manages that the directory no longer lists or marks disabled. Only then does it send owed welcomes, so
 // a slow or failing mail server never holds up a deletion. A failure for one user does not stop
 // the round; every failure is logged, and they are returned together.
 func (s *Service) Sync(ctx context.Context) error {
@@ -45,6 +45,7 @@ func (s *Service) Sync(ctx context.Context) error {
 		known[users[i].Username] = &users[i]
 	}
 	listed := make(map[string]bool, len(people))
+	disabled := make(map[string]bool)
 	now := time.Now()
 	var n SyncCounts
 	var errs []error
@@ -56,6 +57,7 @@ func (s *Service) Sync(ctx context.Context) error {
 	for _, p := range people {
 		// A disabled person is treated as absent: never created, and deleted if known.
 		if p.Disabled {
+			disabled[p.Username] = true
 			continue
 		}
 		listed[p.Username] = true
@@ -82,6 +84,12 @@ func (s *Service) Sync(ctx context.Context) error {
 
 	for _, u := range users {
 		if listed[u.Username] {
+			continue
+		}
+		// The directory removes only users it manages: those a round has listed (SyncedAt set) or
+		// that it marks disabled. Someone who enrolled through the portal or an enrollment link and
+		// was never listed is the admin's, so an empty or partial listing leaves them alone.
+		if u.SyncedAt == nil && !disabled[u.Username] {
 			continue
 		}
 		if err := s.DeleteUser(ctx, u.Username, false); err != nil {

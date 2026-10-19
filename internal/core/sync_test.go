@@ -236,6 +236,59 @@ func TestSyncDeletes(t *testing.T) {
 	welcomeTo(t, h, carol.Email, emails)
 }
 
+// The sync deletes only the users the directory manages. Someone who enrolled through the portal
+// and was never listed survives an empty round and a round listing other people; once a round has
+// listed them, dropping them deletes them. A person the directory marks disabled is deleted even if
+// no round listed them enabled.
+func TestSyncDeletesOnlyManagedUsers(t *testing.T) {
+	ctx := context.Background()
+	h := testutil.NewHarness(t, nil)
+	sync := func(people ...directory.Person) {
+		t.Helper()
+		h.Dir.Set(people...)
+		if err := h.Svc.Sync(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wantKept := func(user string, dev testutil.Enrolled) {
+		t.Helper()
+		if !h.HasDevice(t, user, dev.DeviceID) || h.Ntfy.User(user) == nil {
+			t.Fatalf("the sync removed %s, whom it never listed", user)
+		}
+	}
+	wantGone := func(user string) {
+		t.Helper()
+		if _, _, err := h.Svc.DevicesOf(ctx, user); !errors.Is(err, core.ErrUnknownUser) || h.Ntfy.User(user) != nil {
+			t.Fatalf("%s survived being dropped: %v", user, err)
+		}
+	}
+
+	sync(carol)
+	erinDev := h.Enroll(t, "erin", testutil.NewAuthenticator(t, testutil.PublicURL))
+
+	sync(dave)
+	wantSyncCounts(t, h, 1, 1, 1, 0)
+	wantGone("carol")
+	wantKept("erin", erinDev)
+
+	sync()
+	wantSyncCounts(t, h, 0, 0, 1, 0)
+	wantGone("dave")
+	wantKept("erin", erinDev)
+
+	erin := directory.Person{Username: "erin", Email: "erin@example.com"}
+	sync(erin)
+	wantSyncCounts(t, h, 0, 1, 0, 1)
+	sync()
+	wantSyncCounts(t, h, 0, 0, 1, 0)
+	wantGone("erin")
+
+	h.Enroll(t, "frank", testutil.NewAuthenticator(t, testutil.PublicURL))
+	sync(directory.Person{Username: "frank", Disabled: true})
+	wantSyncCounts(t, h, 0, 0, 1, 0)
+	wantGone("frank")
+}
+
 // Deletions come before welcomes in a round, so a stalled mail server does not keep a dropped user
 // signed in.
 func TestSyncDeletesBeforeWelcoming(t *testing.T) {
@@ -291,7 +344,7 @@ func TestSyncListsNtfyUsersOnce(t *testing.T) {
 }
 
 // A directory that fails changes nothing: deleting everyone on a broken directory could not be
-// undone. One that lists nobody is believed, and deletes everyone.
+// undone. One that lists nobody is believed, and deletes everyone it listed.
 func TestSyncSkipsBrokenDirectory(t *testing.T) {
 	ctx := context.Background()
 	h := testutil.NewHarness(t, nil)

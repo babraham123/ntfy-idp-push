@@ -118,7 +118,7 @@ Unauthenticated routes (`/token/`, `/challenge/`) are rate limited per client ad
 
 ## Provisioning
 
-The directory decides who has an account: `directory-type: ldap` (a paged search under `directory-ldap-base-dn` with `directory-ldap-users-filter`, narrowed to `directory-ldap-group-dn` when set) or `directory-type: file` (Authelia's `users_database.yml`, optionally one `directory-group`). `Sync` runs at startup and every `directory-sync-interval`. A round creates an account for each new person, records email and display name, deletes users the directory no longer lists or marks disabled (as `user delete` does), and sends owed welcome emails last, so mail trouble never delays a deletion. A directory error skips the round (`sync_skipped`), since deletes cannot be undone. A failure for one user is logged and does not stop the round. `user disable` belongs to the admin; the sync never touches it.
+The directory decides who has an account: `directory-type: ldap` (a paged search under `directory-ldap-base-dn` with `directory-ldap-users-filter`, narrowed to `directory-ldap-group-dn` when set) or `directory-type: file` (Authelia's `users_database.yml`, optionally one `directory-group`). `Sync` runs at startup and every `directory-sync-interval`. A round creates an account for each new person, records email and display name, deletes users a round has listed (`synced_at` set) once the directory drops them, and users it marks disabled (as `user delete` does), and sends owed welcome emails last, so mail trouble never delays a deletion. A directory error skips the round (`sync_skipped`), since deletes cannot be undone. A failure for one user is logged and does not stop the round. `user disable` belongs to the admin; the sync never touches it.
 
 `Provision(username)` creates the ntfy user (random password, role `user`), applies `enroll-access`, and records grants. It is idempotent and lets preauth return `enroll`. Enrollment calls it for the signed-in user; `user provision <u>` accepts only a person the directory lists.
 
@@ -156,7 +156,7 @@ authentik calls `enroll`, displays `activation_barcode` (`/token/qr?value=<activ
 | Reset the ntfy user | `user reset-ntfy <u> [--force]` | the same reset with no device revoked |
 | New ntfy password | `user welcome <u>` | the password is replaced and emailed; tokens of signed-in apps stay valid |
 | Disable / enable | `user disable|enable <u>` | preauth/auth deny; nothing deleted. The sync never changes it |
-| Delete | `user delete <u> [--keep-ntfy-user]`, or the directory | all devices revoked, ntfy user deleted unless kept. The sync deletes users the directory drops or marks disabled; a user it still lists is recreated and welcomed on the next round |
+| Delete | `user delete <u> [--keep-ntfy-user]`, or the directory | all devices revoked, ntfy user deleted unless kept. The sync deletes users it listed once the directory drops them, and users it marks disabled; a user it still lists is recreated and welcomed on the next round |
 | Kill switch | `push-disabled: true` + `SIGHUP` | every preauth/auth denies |
 | Rotate the IdP secret | `keygen --rotate` | new key written; the old one accepted for `duo-key-grace` |
 
@@ -168,7 +168,7 @@ All actions are audited (`audit`).
 
 ## Configuration
 
-See [`deploy/server.yml`](deploy/server.yml). Configuration mirrors ntfy's `server.yml`. Set keys via `NTFY_IDP_PUSH_<KEY>`. Secrets (`duo-secret-key`, `duo-secret-key-previous`, `ntfy-admin-token`, `directory-ldap-password`, `smtp-password`) support `<key>-file` or `NTFY_IDP_PUSH_<KEY>_FILE`. `directory-type`, `smtp-host` and `mail-from` are required; the directory source and the mail sender validate the rest of their keys at startup, without connecting. `SIGHUP` re-reads the configuration and applies it to the next request: keys, kill switch, `enroll-access`, `push-timeout`, `trusted-proxies`, `identity-header`, and the ntfy connection (`ntfy-base-url`, `ntfy-admin-token`, so a rotated token file takes effect without a restart). Keys bound at startup (`listen-http`, `database`, `public-url`, `webauthn-*`, `ntfy-topic-prefix`, and the `directory-*`, `smtp-*` and `mail-*` keys the directory source and mail sender are built from, secrets included) refuse the whole reload: the running configuration stays and the log names the keys.
+See [`deploy/server.yml`](deploy/server.yml). Configuration mirrors ntfy's `server.yml`. Set keys via `NTFY_IDP_PUSH_<KEY>`. Secrets (`duo-secret-key`, `duo-secret-key-previous`, `ntfy-admin-token`, `directory-ldap-password`, `smtp-password`) support `<key>-file` or `NTFY_IDP_PUSH_<KEY>_FILE`. `directory-type`, `smtp-host` and `mail-from` are required; the directory source and the mail sender validate the rest of their keys at startup, without connecting; `serve` then checks the directory. `SIGHUP` re-reads the configuration and applies it to the next request: keys, kill switch, `enroll-access`, `push-timeout`, `trusted-proxies`, `identity-header`, and the ntfy connection (`ntfy-base-url`, `ntfy-admin-token`, so a rotated token file takes effect without a restart). Keys bound at startup (`listen-http`, `database`, `public-url`, `webauthn-*`, `ntfy-topic-prefix`, and the `directory-*`, `smtp-*` and `mail-*` keys the directory source and mail sender are built from, secrets included) refuse the whole reload: the running configuration stays and the log names the keys.
 
 ### Failures
 
@@ -176,7 +176,7 @@ Every exported core operation fails with one of a closed set of errors, each of 
 
 `enroll-access` rules use `<topic-pattern>:<access>` matching ntfy's syntax, `*` wildcards, and `${user}` expansion. Validation rejects patterns matching the push topic prefix, `everyone`/`*`, duplicate pattern rules, and `default-topics` unreadable under ntfy's applied rules.
 
-Startup checks (fail closed): Valid ntfy admin token; `GET /v1/users` succeeds under the 1 MiB response cap; anonymous push topic reads are refused; the shim can publish to push topics.
+Startup checks (fail closed): Valid ntfy admin token; `GET /v1/users` succeeds under the 1 MiB response cap; anonymous push topic reads are refused; the shim can publish to push topics; the directory binds and its configured group (`directory-ldap-group-dn`, or `directory-group` with a member) exists.
 
 ## Reverse proxy
 

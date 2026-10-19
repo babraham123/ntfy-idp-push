@@ -27,7 +27,7 @@ type autheliaFile struct {
 	} `yaml:"users"`
 }
 
-func (s *fileSource) List(ctx context.Context) ([]Person, error) {
+func (s *fileSource) read(ctx context.Context) (*autheliaFile, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -38,6 +38,29 @@ func (s *fileSource) List(ctx context.Context) ([]Person, error) {
 	var f autheliaFile
 	if err := yaml.Unmarshal(b, &f); err != nil {
 		return nil, fmt.Errorf("directory: parse %s: %w", s.path, err)
+	}
+	return &f, nil
+}
+
+// Check parses the file and, with a group set, requires some user to be in it: Authelia's file has
+// no list of groups, only each user's memberships.
+func (s *fileSource) Check(ctx context.Context) error {
+	f, err := s.read(ctx)
+	if err != nil || s.group == "" {
+		return err
+	}
+	for _, u := range f.Users {
+		if slices.Contains(u.Groups, s.group) {
+			return nil
+		}
+	}
+	return fmt.Errorf("directory: group %q has no members in %s: %w", s.group, s.path, ErrNoGroup)
+}
+
+func (s *fileSource) List(ctx context.Context) ([]Person, error) {
+	f, err := s.read(ctx)
+	if err != nil {
+		return nil, err
 	}
 	people := make([]Person, 0, len(f.Users))
 	for name, u := range f.Users {

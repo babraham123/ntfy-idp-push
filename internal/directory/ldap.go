@@ -153,21 +153,57 @@ func ldapTLSConfig(cfg LDAPConfig, host string) (*tls.Config, error) {
 	return tc, nil
 }
 
-func (s *ldapSource) List(ctx context.Context) ([]Person, error) {
-	c, err := s.dial(ctx)
+// open dials and binds. done releases the connection and the watcher that closes it when ctx
+// ends: go-ldap takes no context, and closing the connection is what unblocks an in-flight request.
+func (s *ldapSource) open(ctx context.Context) (c ldapConn, done func(), err error) {
+	c, err = s.dial(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("directory: ldap connect: %w", err)
+		return nil, nil, fmt.Errorf("directory: ldap connect: %w", err)
 	}
-	defer c.Close()
-	// go-ldap takes no context; closing the connection is what unblocks an in-flight request.
 	stop := context.AfterFunc(ctx, func() { c.Close() })
-	defer stop()
-
+	done = func() {
+		stop()
+		c.Close()
+	}
 	if s.cfg.User != "" {
 		if err := c.Bind(s.cfg.User, s.cfg.Password); err != nil {
-			return nil, fmt.Errorf("directory: ldap bind: %w", ctxErr(ctx, err))
+			done()
+			return nil, nil, fmt.Errorf("directory: ldap bind: %w", ctxErr(ctx, err))
 		}
 	}
+	return c, done, nil
+}
+
+// Check connects and binds, and with a group DN set, reads that entry: a group DN that names
+// nothing would otherwise make every round list nobody.
+func (s *ldapSource) Check(ctx context.Context) error {
+	c, done, err := s.open(ctx)
+	if err != nil {
+		return err
+	}
+	defer done()
+	if s.groupDN == nil {
+		return nil
+	}
+	// "1.1" asks for no attributes: only the entry's existence matters.
+	req := ldap.NewSearchRequest(s.cfg.GroupDN, ldap.ScopeBaseObject, ldap.NeverDerefAliases, 0, 0, false,
+		"(objectClass=*)", []string{"1.1"}, nil)
+	res, err := c.Search(req)
+	if ldap.IsErrorWithCode(err, ldap.LDAPResultNoSuchObject) || (err == nil && len(res.Entries) == 0) {
+		return fmt.Errorf("directory: ldap group %q: %w", s.cfg.GroupDN, ErrNoGroup)
+	}
+	if err != nil {
+		return fmt.Errorf("directory: ldap group %q: %w", s.cfg.GroupDN, ctxErr(ctx, err))
+	}
+	return nil
+}
+
+func (s *ldapSource) List(ctx context.Context) ([]Person, error) {
+	c, done, err := s.open(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer done()
 	people, err := s.search(ctx, c)
 	if err != nil {
 		return nil, fmt.Errorf("directory: ldap search: %w", ctxErr(ctx, err))

@@ -47,14 +47,14 @@ database: "/var/lib/ntfy-idp-push/db.sqlite"
 
 # The user directory controls who has an ntfy account. Every directory-sync-interval (and once at
 # startup), the shim lists the directory. New people get an account and a welcome email with their
-# ntfy password. People absent from the directory or marked disabled are deleted, with their devices
-# and ntfy account. A directory that errors skips the round.
+# ntfy password. People it listed before and no longer lists, or marks disabled, are deleted, with
+# their devices and ntfy account. A directory that errors skips the round.
 directory-type: "ldap"                  # ldap | file; required
 directory-sync-interval: "15m"
 
 # directory-type: file reads Authelia's file user database (users_database.yml), re-read every round.
 # directory-file: "/etc/authelia/users_database.yml"
-# directory-group: ""                   # only users in this group; empty: everyone
+# directory-group: ""                   # only users in this group, which must have one; empty: everyone
 
 # directory-type: ldap. Use the same server and bind user as Authelia's ldap backend.
 directory-ldap-address: "ldaps://ldap.example.com:636"   # ldaps:// or ldap://
@@ -70,7 +70,7 @@ directory-ldap-attribute-username: "uid"
 directory-ldap-attribute-mail: "mail"
 directory-ldap-attribute-display-name: "displayName"
 directory-ldap-attribute-member-of: "memberOf"
-directory-ldap-group-dn: ""             # only members of this group DN; empty: everyone the filter finds
+directory-ldap-group-dn: ""             # only members of this group DN, which must exist; empty: everyone the filter finds
 
 # The SMTP relay for the welcome email, which carries the user's ntfy password. Port 465 is
 # implicit TLS; on any other port smtp-starttls refuses a relay that does not upgrade.

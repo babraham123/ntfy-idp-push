@@ -28,8 +28,11 @@ import (
 // fakeLDAP serves pages of entries, handing out the page index as the paging cookie the way a
 // server's opaque cursor would be used.
 type fakeLDAP struct {
-	pages    [][]*ldap.Entry
-	bindErr  error
+	pages   [][]*ldap.Entry
+	bindErr error
+	// group answers base-scope searches: the entries found, or groupErr.
+	group    []*ldap.Entry
+	groupErr error
 	searches []*ldap.SearchRequest
 	cookies  []string // cookie sent with each search
 	bound    []string
@@ -50,6 +53,12 @@ func (f *fakeLDAP) Search(req *ldap.SearchRequest) (*ldap.SearchResult, error) {
 		return nil, errors.New("ldap: connection closed")
 	}
 	f.searches = append(f.searches, req)
+	if req.Scope == ldap.ScopeBaseObject {
+		if f.groupErr != nil {
+			return nil, f.groupErr
+		}
+		return &ldap.SearchResult{Entries: f.group}, nil
+	}
 	paging, ok := ldap.FindControl(req.Controls, ldap.ControlTypePaging).(*ldap.ControlPaging)
 	if !ok {
 		return nil, errors.New("no paging control")
@@ -254,6 +263,64 @@ func TestLDAPAnonymousBind(t *testing.T) {
 	}
 	if len(f.bound) != 0 {
 		t.Errorf("bound as %v", f.bound)
+	}
+}
+
+// Check binds and, with a group DN, reads that one entry without attributes; a group the server
+// does not have fails, as does a bind it refuses.
+func TestLDAPCheck(t *testing.T) {
+	const group = "cn=push,ou=groups,dc=example,dc=com"
+	withGroup := ldapBase
+	withGroup.GroupDN = group
+	found := []*ldap.Entry{entry(group, nil)}
+	noSuchObject := ldap.NewError(ldap.LDAPResultNoSuchObject, errors.New("no such object"))
+	for _, c := range []struct {
+		name    string
+		cfg     LDAPConfig
+		f       *fakeLDAP
+		wantErr string // "" passes; the group DN itself means ErrNoGroup
+	}{
+		{"group found", withGroup, &fakeLDAP{group: found}, ""},
+		{"group missing", withGroup, &fakeLDAP{groupErr: noSuchObject}, group},
+		{"group not returned", withGroup, &fakeLDAP{}, group},
+		{"group search fails", withGroup, &fakeLDAP{groupErr: errors.New("insufficient access")}, "insufficient access"},
+		{"group bind fails", withGroup, &fakeLDAP{bindErr: errors.New("invalid credentials"), group: found}, "bind"},
+		{"no group", ldapBase, &fakeLDAP{}, ""},
+		{"no group bind fails", ldapBase, &fakeLDAP{bindErr: errors.New("invalid credentials")}, "bind"},
+	} {
+		err := newFakeSource(t, c.cfg, c.f).Check(context.Background())
+		if c.wantErr == "" && err != nil || c.wantErr != "" && (err == nil || !strings.Contains(err.Error(), c.wantErr)) {
+			t.Errorf("%s: got %v, want %q", c.name, err, c.wantErr)
+		}
+		if errors.Is(err, ErrNoGroup) != (c.wantErr == group) {
+			t.Errorf("%s: %v is ErrNoGroup: %v", c.name, err, errors.Is(err, ErrNoGroup))
+		}
+		if !reflect.DeepEqual(c.f.bound, []string{"cn=authelia,dc=example,dc=com:secret"}) {
+			t.Errorf("%s: binds %v", c.name, c.f.bound)
+		}
+		if !c.f.closed.Load() {
+			t.Errorf("%s: connection left open", c.name)
+		}
+		if c.cfg.GroupDN == "" || c.f.bindErr != nil {
+			if len(c.f.searches) != 0 {
+				t.Errorf("%s: searched %+v", c.name, c.f.searches[0])
+			}
+			continue
+		}
+		if len(c.f.searches) != 1 {
+			t.Fatalf("%s: %d searches, want 1", c.name, len(c.f.searches))
+		}
+		req := c.f.searches[0]
+		if req.BaseDN != group || req.Scope != ldap.ScopeBaseObject || req.Filter != "(objectClass=*)" ||
+			!reflect.DeepEqual(req.Attributes, []string{"1.1"}) {
+			t.Errorf("%s: search %+v", c.name, req)
+		}
+	}
+
+	dialFail := newFakeSource(t, withGroup, nil)
+	dialFail.(*ldapSource).dial = func(context.Context) (ldapConn, error) { return nil, errors.New("connection refused") }
+	if err := dialFail.Check(context.Background()); err == nil || !strings.Contains(err.Error(), "connection refused") {
+		t.Errorf("dial failure: got %v", err)
 	}
 }
 

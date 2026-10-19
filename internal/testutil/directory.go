@@ -14,9 +14,10 @@ var _ directory.Source = (*FakeDirectory)(nil)
 // FakeDirectory is a directory.Source listing whatever the test set, with the real sources'
 // contract: sorted by username. The zero value lists nobody.
 type FakeDirectory struct {
-	mu     sync.Mutex
-	people []directory.Person
-	err    error
+	mu       sync.Mutex
+	people   []directory.Person
+	err      error
+	checkErr error
 }
 
 // Set replaces the people the directory lists.
@@ -31,6 +32,22 @@ func (f *FakeDirectory) Fail(err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.err = err
+}
+
+// FailCheck makes every later Check return err; nil, the default, passes.
+func (f *FakeDirectory) FailCheck(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.checkErr = err
+}
+
+func (f *FakeDirectory) Check(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.checkErr
 }
 
 func (f *FakeDirectory) List(ctx context.Context) ([]directory.Person, error) {

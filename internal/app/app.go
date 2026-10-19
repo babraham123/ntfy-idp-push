@@ -6,6 +6,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -24,6 +25,7 @@ type App struct {
 	Cfg     *config.Config
 	Store   *store.Store
 	Svc     *core.Service
+	Dir     directory.Source
 	Handler http.Handler
 	Log     *slog.Logger
 }
@@ -38,7 +40,7 @@ func Build(cfg *config.Config, st *store.Store, log *slog.Logger, dir directory.
 	mux := http.NewServeMux()
 	duoapi.New(svc, log).Register(mux)
 	web.New(svc, log).Register(mux)
-	return &App{Cfg: cfg, Store: st, Svc: svc, Handler: web.SecurityHeaders(mux), Log: log}, nil
+	return &App{Cfg: cfg, Store: st, Svc: svc, Dir: dir, Handler: web.SecurityHeaders(mux), Log: log}, nil
 }
 
 // Open builds the configured directory source and mail sender, opens the configured database and
@@ -143,11 +145,8 @@ func every(ctx context.Context, interval time.Duration, fn func()) {
 // received on the reload channel re-reads the configuration with load and applies it; a refused
 // reload keeps the running one and is logged.
 func (a *App) Serve(ctx context.Context, reload <-chan struct{}, load func() (*config.Config, error)) error {
-	checkCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	err := a.Svc.StartupChecks(checkCtx)
-	cancel()
-	if err != nil {
-		return errors.Join(errors.New("startup check"), err)
+	if err := a.startupChecks(ctx); err != nil {
+		return err
 	}
 
 	srv := a.Server()
@@ -175,6 +174,36 @@ func (a *App) Serve(ctx context.Context, reload <-chan struct{}, load func() (*c
 			_ = srv.Shutdown(shCtx)
 			return nil
 		}
+	}
+}
+
+// startupChecks fails closed on an unsafe ntfy setup and on a directory that cannot work as
+// configured. A group that does not exist would list nobody, and the first round would delete
+// every user the directory manages.
+func (a *App) startupChecks(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if err := a.Svc.StartupChecks(ctx); err != nil {
+		return errors.Join(errors.New("startup check"), err)
+	}
+	if err := a.Dir.Check(ctx); err != nil {
+		return errors.Join(fmt.Errorf("directory check (%s)", directoryCheckKey(a.Cfg, err)), err)
+	}
+	return nil
+}
+
+// directoryCheckKey names the configuration a failed directory check points at.
+func directoryCheckKey(cfg *config.Config, err error) string {
+	ldap := cfg.DirectoryType == "ldap"
+	switch {
+	case errors.Is(err, directory.ErrNoGroup) && ldap:
+		return "directory-ldap-group-dn"
+	case errors.Is(err, directory.ErrNoGroup):
+		return "directory-group"
+	case ldap:
+		return "directory-ldap-*"
+	default:
+		return "directory-file"
 	}
 }
 
