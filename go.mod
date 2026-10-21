@@ -1,6 +1,6 @@
 module github.com/babraham123/ntfy-idp-push
 
-go 1.27.2
+go 1.27.3
 
 require (
 	github.com/duosecurity/duo_api_golang v0.3.0
