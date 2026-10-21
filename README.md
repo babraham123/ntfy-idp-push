@@ -51,20 +51,30 @@ Build the local image with `make image`. Execute CLI commands inside the contain
 
 ## Directory and email
 
-With `directory-type: ldap`, the directory decides who gets an ntfy account. Once at startup and then every `directory-sync-interval` (default `15m`), the shim lists it and:
+Setting `directory-type: ldap` enables automatic ntfy account provisioning, syncing, and welcome email delivery based on your LDAP directory.
 
-- creates an account for each new person, applies `enroll-access`, and sends one welcome email: ntfy server URL, username, a random password shown only there, app links, the "Manage users" steps that sign the app in, and an `ntfy://` link per `default-topics` entry;
-- keeps email and display name current;
-- deletes users it has listed once they are absent from the directory (a disabled LDAP account the users filter excludes is absent), with their devices and ntfy account; a person who returns starts over with a new account and welcome;
-- never changes a `user disable` made by an admin.
+**Sync Behavior**
+* Runs at startup and every `directory-sync-interval` (default `15m`).
+* **Creates** accounts for new users, applies `enroll-access`, and emails a welcome (URL, username, random password, app links, login steps, and `ntfy://` links per `default-topics`).
+* **Updates** email and display name automatically.
+* **Deletes** accounts and devices for users missing from LDAP. Returning users get a fresh account and welcome email.
+* **Preserves** manual `user disable` states.
 
-A directory that errors skips the round and changes nothing (audit `sync_skipped`), since deletes cannot be undone. The next round retries unsent welcome emails. Resetting a user's ntfy account (`user reset-ntfy`, `device revoke --reset-ntfy-user`) sends a new welcome, since the recreated account's password is unknown.
+**Manual Management**
+* `user reset-ntfy` or `device revoke --reset-ntfy-user`: Resets an account and emails a new welcome with a new password.
+* Without `directory-type`, run `user provision <user> --email <addr>` to create an account and send a welcome. These accounts ignore future LDAP syncs.
+* `user welcome <user>`: Resends the welcome email (useful for testing SMTP delivery).
 
-`directory-type: ldap` takes Authelia's LDAP settings: `directory-ldap-address` (`ldaps://` or `ldap://` with `directory-ldap-start-tls`), `directory-ldap-base-dn`, the bind `directory-ldap-user` and `directory-ldap-password` (or `-file`), `directory-ldap-users-filter` (default `(objectClass=person)`; it lists users, so no `{input}` placeholder), and the `directory-ldap-attribute-*` names (defaults `uid`, `mail`, `displayName`, `memberOf`). `directory-ldap-group-dn` limits the sync to one group's members, filtered by the server. An LDAP server with a certificate from a private CA needs `directory-ldap-ca-file`, a PEM bundle trusted besides the system roots; put it in `./config` and set `directory-ldap-ca-file: /etc/ntfy-idp-push/ldap-ca.pem`.
+**LDAP Configuration**
+* **Connection:** `directory-ldap-address` (`ldaps://` or `ldap://` with `directory-ldap-start-tls`), `directory-ldap-base-dn`, `directory-ldap-user`, and `directory-ldap-password` (or `-file`).
+* **Filters:** `directory-ldap-users-filter` (default `(objectClass=person)`) and `directory-ldap-group-dn`.
+* **Attributes:** `directory-ldap-attribute-*` (defaults: `uid`, `mail`, `displayName`, `memberOf`).
+* **Private CA:** Mount the PEM bundle in `./config` and set `directory-ldap-ca-file: /etc/ntfy-idp-push/ldap-ca.pem`.
 
-Without `directory-type`, nothing syncs (the startup log says so). `user provision <user> --email <addr>` creates the account and sends the welcome once; rerunning it with another address records that address without a new welcome (`user welcome` resends). These accounts are never deleted by a directory added later.
-
-Mail goes through `smtp-host`:`smtp-port` (default 587) with `smtp-user` and `smtp-password` (or `-file`). `smtp-starttls` (default true) refuses a relay that does not upgrade the connection; port 465 is implicit TLS. `mail-from` is required; `mail-reply-to` is optional, for instance the admins who can resend a welcome. The relay is not contacted at startup, so check delivery with `user welcome <user>`.
+**Email Configuration**
+* **Server:** `smtp-host`:`smtp-port` (default 587), `smtp-user`, `smtp-password` (or `-file`).
+* **Security:** `smtp-starttls` (default true) requires upgrade; port 465 is implicit TLS.
+* **Routing:** `mail-from` (required), `mail-reply-to` (optional).
 
 ntfy prerequisites (`server.yml`):
 
