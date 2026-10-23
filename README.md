@@ -49,7 +49,7 @@ Build the local image with `make image`. Execute CLI commands inside the contain
 
 **Configuration:** Set keys from [`deploy/server.yml`](deploy/server.yml) via environment variables as `NTFY_IDP_PUSH_<KEY>`. Load secrets (`duo-secret-key`, `duo-secret-key-previous`, `ntfy-admin-token`, `directory-ldap-password`, `smtp-password`) from files using `<key>-file` or `NTFY_IDP_PUSH_<KEY>_FILE` (ideal for Docker secrets or systemd credentials). Reload per-request settings (`push-disabled`, keys, secret files including a rotated `ntfy-admin-token`, `enroll-access`, `push-timeout`, `trusted-proxies`, `identity-header`) with `SIGHUP` (`docker compose kill -s HUP`). A reload that changes `listen-http`, `database`, `public-url`, `webauthn-*`, `ntfy-topic-prefix`, or any `directory-*`, `smtp-*` or `mail-*` key (their secret files included) is refused and logged; restart instead.
 
-## Directory and email
+## Sync and enrollment
 
 Setting `directory-type: ldap` enables automatic ntfy account provisioning, syncing, and welcome email delivery based on your LDAP directory.
 
