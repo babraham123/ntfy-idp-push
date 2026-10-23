@@ -13,6 +13,7 @@ import (
 	"github.com/babraham123/ntfy-idp-push/internal/ntfy"
 	"github.com/babraham123/ntfy-idp-push/internal/routes"
 	"github.com/babraham123/ntfy-idp-push/internal/store"
+	"github.com/babraham123/ntfy-idp-push/internal/webauthn"
 )
 
 // UserRef names a user by ID, or by username when ID is empty.
@@ -263,17 +264,18 @@ func (s *Service) Approve(ctx context.Context, id string, assertion io.Reader) e
 	if err != nil {
 		return err
 	}
-	pk, regressed, err := s.rp.FinishLogin(d.UserID, pks, c.Nonce, assertion)
+	pk, err := s.rp.FinishLogin(d.UserID, pks, c.Nonce, assertion)
+	if errors.Is(err, webauthn.ErrCloned) {
+		s.Log.Warn("passkey sign count regressed", "user", c.Username, "device", c.DeviceID)
+		s.store.Audit(ctx, c.Username, "passkey_cloned", map[string]any{"challenge": id, "device": c.DeviceID})
+		return ErrPasskeyCloned
+	}
 	if err != nil {
 		s.store.Audit(ctx, c.Username, "assertion_failed", map[string]any{"challenge": id, "err": err.Error()})
 		return passkeyFailure(err)
 	}
 	if err := s.allow(ctx, c); err != nil {
 		return err
-	}
-	if regressed {
-		s.Log.Warn("passkey sign count regressed", "user", c.Username, "device", c.DeviceID)
-		s.store.Audit(ctx, c.Username, "sign_count_regressed", map[string]any{"device": c.DeviceID})
 	}
 	if err := s.store.RecordApproval(ctx, c.DeviceID, pk); err != nil {
 		s.Log.Warn("record approval", "device", c.DeviceID, "err", err)

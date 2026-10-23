@@ -208,6 +208,37 @@ func TestRetriedLoginJoinsPendingPush(t *testing.T) {
 	}
 }
 
+func TestClonedPasskeyRefused(t *testing.T) {
+	h := testutil.NewHarness(t, nil)
+	auth := testutil.NewAuthenticator(t, testutil.PublicURL)
+	dev := h.Enroll(t, "alice", auth)
+	// A copy of the authenticator made now shares its key and counter with the original.
+	clone := *auth
+
+	res := h.StartLogin("alice", dev.DeviceID)
+	if st := h.Approve(t, auth, h.Ntfy.NextPublish(t).Click); st != 200 {
+		t.Fatalf("approve: %d", st)
+	}
+	testutil.Await(t, res)
+
+	// The clone's counter now trails the one the original advanced: its approval is refused and
+	// the login stays pending for the original, which still works.
+	res = h.StartLogin("alice", dev.DeviceID)
+	click := h.Ntfy.NextPublish(t).Click
+	if st := h.Approve(t, &clone, click); st != 403 {
+		t.Fatalf("clone approve: %d", st)
+	}
+	if n := len(h.Audit(t, "alice", "passkey_cloned")); n != 1 {
+		t.Fatalf("passkey_cloned audited %d times", n)
+	}
+	if st := h.Approve(t, auth, click); st != 200 {
+		t.Fatalf("original approve after clone: %d", st)
+	}
+	if r := testutil.Await(t, res); r.Response.Result != "allow" {
+		t.Fatalf("auth %+v", r.Response)
+	}
+}
+
 func TestPushesPerUserLimited(t *testing.T) {
 	h := testutil.NewHarness(t, nil)
 	dev := h.Enroll(t, "alice", testutil.NewAuthenticator(t, testutil.PublicURL))

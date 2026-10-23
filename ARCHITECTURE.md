@@ -108,7 +108,7 @@ Disabling a user or enabling the `push-disabled: true` kill switch causes preaut
    }
    ```
 2. `/challenge/<id>` displays the request. It calls `navigator.credentials.get()` using the nonce as the challenge, the device's passkeys as `allowCredentials`, and requires user verification.
-3. `POST /challenge/<id>/assert` verifies origin, RP ID, nonce, UP+UV, device credential ownership, and the BE flag (unless `webauthn-allow-synced`); a refused assertion is 403. State becomes `allow`.
+3. `POST /challenge/<id>/assert` verifies origin, RP ID, nonce, UP+UV, device credential ownership, the BE flag (unless `webauthn-allow-synced`), and that the signature counter advanced when the authenticator keeps one (a stale counter means a second copy of the passkey has been signing; audited as `passkey_cloned`); a refused assertion is 403. State becomes `allow`.
 4. `POST /challenge/<id>/deny` with the deny token yields `deny`; "This wasn't me" yields `fraud`.
 5. The blocked `auth` wakes and responds to the IdP. The push is then deleted from the device (ntfy `DELETE /<topic>/<sequence_id>`).
 

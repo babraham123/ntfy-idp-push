@@ -61,7 +61,10 @@ var (
 	ErrPasskeyPolicy = fail(Refused, "passkey_policy", "passkey refused by policy")
 	// ErrPasskeyRejected: the attestation or assertion did not verify (wrong origin, nonce,
 	// credential, or signature). The detail is logged, never shown.
-	ErrPasskeyRejected     = fail(Refused, "passkey_rejected", "passkey verification failed")
+	ErrPasskeyRejected = fail(Refused, "passkey_rejected", "passkey verification failed")
+	// ErrPasskeyCloned: the assertion's signature counter did not advance, so another copy of the
+	// passkey has been signing. The device must be revoked and re-enrolled.
+	ErrPasskeyCloned       = fail(Refused, "passkey_cloned", "this passkey may have been cloned; revoke the device and enroll it again")
 	ErrBadToken            = fail(Refused, "bad_token", "invalid deny token")
 	ErrEnrollmentRequired  = fail(Refused, "enrollment_required", "enrollment required")
 	ErrTooManyPushes       = fail(Refused, "too_many_pushes", "too many sign-in requests; wait before trying again")

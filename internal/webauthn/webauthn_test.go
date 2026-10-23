@@ -87,21 +87,18 @@ func TestRegisterThenLogin(t *testing.T) {
 	}
 
 	first, second := a.Get(t, opts), a.Get(t, opts) // counters 1 and 2
-	pk2, regressed, err := rp.FinishLogin(alice.ID, []model.Passkey{pk}, n, bytes.NewReader(second))
+	pk2, err := rp.FinishLogin(alice.ID, []model.Passkey{pk}, n, bytes.NewReader(second))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if regressed || pk2.SignCount != 2 || !bytes.Equal(pk2.CredID, pk.CredID) {
-		t.Fatalf("after login: sign count %d, regressed %v", pk2.SignCount, regressed)
+	if pk2.SignCount != 2 || !bytes.Equal(pk2.CredID, pk.CredID) {
+		t.Fatalf("after login: sign count %d", pk2.SignCount)
 	}
 
-	// The returned record is what gets stored, so the next login must see its counter.
-	pk3, regressed, err := rp.FinishLogin(alice.ID, []model.Passkey{pk2}, n, bytes.NewReader(first))
-	if err != nil {
-		t.Fatalf("stale counter refused: %v", err)
-	}
-	if !regressed || pk3.SignCount != 2 {
-		t.Fatalf("stale counter: sign count %d, regressed %v", pk3.SignCount, regressed)
+	// The returned record is what gets stored, so the next login must see its counter: one that
+	// has not advanced past it is a clone's.
+	if _, err := rp.FinishLogin(alice.ID, []model.Passkey{pk2}, n, bytes.NewReader(first)); !errors.Is(err, webauthn.ErrCloned) {
+		t.Fatalf("stale counter: %v", err)
 	}
 }
 
@@ -119,18 +116,18 @@ func TestLoginRefusals(t *testing.T) {
 	n := nonce(t)
 	assertion := a.Get(t, loginOptions(t, rp, []model.Passkey{pk}, n))
 
-	if _, _, err := rp.FinishLogin(alice.ID, []model.Passkey{other}, n, bytes.NewReader(assertion)); err == nil {
+	if _, err := rp.FinishLogin(alice.ID, []model.Passkey{other}, n, bytes.NewReader(assertion)); err == nil {
 		t.Fatal("assertion by another device's passkey accepted")
 	}
-	if _, _, err := rp.FinishLogin(alice.ID, []model.Passkey{pk}, nonce(t), bytes.NewReader(assertion)); err == nil {
+	if _, err := rp.FinishLogin(alice.ID, []model.Passkey{pk}, nonce(t), bytes.NewReader(assertion)); err == nil {
 		t.Fatal("assertion over another nonce accepted")
 	}
 	a.Flags |= testutil.FlagBE | testutil.FlagBS
-	if _, _, err := rp.FinishLogin(alice.ID, []model.Passkey{pk}, n, bytes.NewReader(a.Get(t, loginOptions(t, rp, []model.Passkey{pk}, n)))); err == nil {
+	if _, err := rp.FinishLogin(alice.ID, []model.Passkey{pk}, n, bytes.NewReader(a.Get(t, loginOptions(t, rp, []model.Passkey{pk}, n)))); err == nil {
 		t.Fatal("backup-eligible assertion accepted")
 	}
 	a.Flags = 0
-	if _, _, err := rp.FinishLogin(alice.ID, []model.Passkey{pk}, n, bytes.NewReader(a.Get(t, loginOptions(t, rp, []model.Passkey{pk}, n)))); err == nil {
+	if _, err := rp.FinishLogin(alice.ID, []model.Passkey{pk}, n, bytes.NewReader(a.Get(t, loginOptions(t, rp, []model.Passkey{pk}, n)))); err == nil {
 		t.Fatal("assertion without user verification accepted")
 	}
 }
@@ -149,7 +146,7 @@ func TestSyncedPasskeyPolicy(t *testing.T) {
 	}
 	n := nonce(t)
 	assertion := a.Get(t, loginOptions(t, lenient, []model.Passkey{pk}, n))
-	if _, _, err := lenient.FinishLogin(alice.ID, []model.Passkey{pk}, n, bytes.NewReader(assertion)); err != nil {
+	if _, err := lenient.FinishLogin(alice.ID, []model.Passkey{pk}, n, bytes.NewReader(assertion)); err != nil {
 		t.Fatalf("lenient login with a synced passkey: %v", err)
 	}
 
@@ -157,7 +154,7 @@ func TestSyncedPasskeyPolicy(t *testing.T) {
 	if _, err := strict.BeginLogin(alice.ID, []model.Passkey{pk}, n); !errors.Is(err, webauthn.ErrNoUsableCredential) {
 		t.Fatalf("strict begin with a synced passkey: %v", err)
 	}
-	if _, _, err := strict.FinishLogin(alice.ID, []model.Passkey{pk}, n, bytes.NewReader(assertion)); !errors.Is(err, webauthn.ErrNoUsableCredential) {
+	if _, err := strict.FinishLogin(alice.ID, []model.Passkey{pk}, n, bytes.NewReader(assertion)); !errors.Is(err, webauthn.ErrNoUsableCredential) {
 		t.Fatalf("strict finish with a synced passkey: %v", err)
 	}
 }

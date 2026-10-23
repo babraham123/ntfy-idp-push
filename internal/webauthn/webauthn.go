@@ -24,6 +24,9 @@ var (
 	ErrNoUsableCredential = errors.New("no passkey of this device is allowed; enroll a device-bound passkey")
 	// ErrMalformed is a browser response that does not parse as WebAuthn JSON.
 	ErrMalformed = errors.New("malformed WebAuthn response")
+	// ErrCloned is an assertion whose signature counter did not advance past the stored one: a
+	// second copy of the passkey has been signing.
+	ErrCloned = errors.New("passkey signature counter went backwards; the passkey may be cloned")
 )
 
 type Config struct {
@@ -156,26 +159,29 @@ func (rp *RP) BeginLogin(userID string, passkeys []model.Passkey, nonce []byte) 
 	return json.Marshal(opts)
 }
 
-// FinishLogin verifies an assertion (UP/UV required, BE refused unless synced allowed) and returns
-// the updated passkey. signCountRegressed flags non-advancing counters (caller logs, not refuses).
-func (rp *RP) FinishLogin(userID string, passkeys []model.Passkey, nonce []byte, assertion io.Reader) (_ model.Passkey, signCountRegressed bool, _ error) {
+// FinishLogin verifies an assertion (UP/UV required, BE refused unless synced allowed, counter
+// advanced unless the authenticator keeps none) and returns the updated passkey.
+func (rp *RP) FinishLogin(userID string, passkeys []model.Passkey, nonce []byte, assertion io.Reader) (model.Passkey, error) {
 	o, _, session, err := rp.loginSession(userID, passkeys, nonce)
 	if err != nil {
-		return model.Passkey{}, false, err
+		return model.Passkey{}, err
 	}
 	parsed, err := protocol.ParseCredentialRequestResponseBody(assertion)
 	if err != nil {
-		return model.Passkey{}, false, fmt.Errorf("%w: %w", ErrMalformed, describe(err))
+		return model.Passkey{}, fmt.Errorf("%w: %w", ErrMalformed, describe(err))
 	}
 	cred, err := rp.wa.ValidateLogin(o, *session, parsed)
 	if err != nil {
-		return model.Passkey{}, false, describe(err)
+		return model.Passkey{}, describe(err)
 	}
 	if !parsed.Response.AuthenticatorData.Flags.HasUserVerified() {
-		return model.Passkey{}, false, ErrNotUserVerified
+		return model.Passkey{}, ErrNotUserVerified
 	}
 	if !rp.cfg.AllowSynced && parsed.Response.AuthenticatorData.Flags.HasBackupEligible() {
-		return model.Passkey{}, false, ErrSynced
+		return model.Passkey{}, ErrSynced
+	}
+	if cred.Authenticator.CloneWarning {
+		return model.Passkey{}, ErrCloned
 	}
 	for _, p := range passkeys {
 		if !bytes.Equal(p.CredID, cred.ID) {
@@ -184,16 +190,16 @@ func (rp *RP) FinishLogin(userID string, passkeys []model.Passkey, nonce []byte,
 		// Only the counter moves; the rest of the record stays as registered.
 		stored, err := unmarshal(p.CredentialJSON)
 		if err != nil {
-			return model.Passkey{}, false, err
+			return model.Passkey{}, err
 		}
 		stored.Authenticator.SignCount = cred.Authenticator.SignCount
 		if p.CredentialJSON, err = json.Marshal(stored); err != nil {
-			return model.Passkey{}, false, err
+			return model.Passkey{}, err
 		}
 		p.SignCount = cred.Authenticator.SignCount
-		return p, cred.Authenticator.CloneWarning, nil
+		return p, nil
 	}
-	return model.Passkey{}, false, errors.New("asserted credential is not among the device's passkeys")
+	return model.Passkey{}, errors.New("asserted credential is not among the device's passkeys")
 }
 
 func unmarshal(b []byte) (gowebauthn.Credential, error) {
