@@ -91,6 +91,7 @@ auth-tokens: ["idp-push:tk_…:ntfy-idp-push"]
 > - The proxy must **overwrite or strip** a client-sent `Remote-User` on **every** route, bypassed ones included. Forward-auth middlewares that copy the IdP's response headers onto the upstream request do this for protected routes; check what your proxy does on bypassed ones.
 > - Port 8080 must be reachable **only through the proxy**: no host port, no other containers on that network.
 > - `trusted-proxies` must be **the proxy's address alone** (a `/32` or `/128`), never the network it sits on.
+> - The proxy must **append the client address to `X-Forwarded-For`**. The public routes are rate limited per client address taken from that header; without it every client shares the proxy's one allowance, and anyone can exhaust it for everyone.
 
 Supported proxies, each with the directive that sets the header:
 

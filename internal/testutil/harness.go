@@ -189,17 +189,25 @@ func (h *Harness) Sync(t *testing.T) core.SyncCounts {
 
 var loginSeq atomic.Int32
 
+// LoginIP is the client address StartLogin reports.
+const LoginIP = "203.0.113.7"
+
 // StartLogin runs an Authelia-shaped auth call for user's device in the background: the push
 // goes out at once, the result arrives on the channel once the push is decided. Calls differ by
 // hostname so that the replay guard tells them apart.
 func (h *Harness) StartLogin(user, device string) <-chan *authapi.AuthResult {
+	return h.StartLoginFrom(user, device, LoginIP)
+}
+
+// StartLoginFrom is StartLogin for a login from ip.
+func (h *Harness) StartLoginFrom(user, device, ip string) <-chan *authapi.AuthResult {
 	out := make(chan *authapi.AuthResult, 1)
 	seq := loginSeq.Add(1)
 	go func() {
 		r, err := h.Duo(IKey, SKey).Auth("push",
 			authapi.AuthUsername(user),
 			authapi.AuthDevice(device),
-			authapi.AuthIpAddr("203.0.113.7"),
+			authapi.AuthIpAddr(ip),
 			func(v *url.Values) { v.Set("hostname", fmt.Sprintf("laptop-%d", seq)) },
 			authapi.AuthDisplayUsername(user),
 			// Authelia sends pushinfo as "target%20url=<url>".

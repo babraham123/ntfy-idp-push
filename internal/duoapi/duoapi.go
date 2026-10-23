@@ -160,6 +160,7 @@ var denyMessages = map[core.Reason]string{
 	core.ErrNotOwner.Reason:           "Unknown device",
 	core.ErrEnrollmentRequired.Reason: "Enrollment required",
 	core.ErrTooManyPushes.Reason:      "Too many sign-in requests",
+	core.ErrPushPending.Reason:        "A sign-in request from another address is pending",
 }
 
 // deny is the Duo response for a login refused with err.

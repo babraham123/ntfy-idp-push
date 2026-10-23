@@ -87,7 +87,7 @@ Request validation order:
 
 `/auth/v2/auth` blocks up to `push-timeout`, extending its write deadline. Reloading `push-timeout` applies to subsequent requests.
 
-An `auth` for a device that already has a pending push joins that push instead of sending another: every login waiting on it gets its decision. Beyond that, each user gets a burst of 3 pushes refilled one per 30 s; further `auth` calls answer `deny` (`status_msg: Too many sign-in requests`) without touching the phone, so a stolen password cannot be turned into push bombing.
+An `auth` for a device that already has a pending push from the same client address joins that push instead of sending another: every login waiting on it gets its decision. One from another address is denied (`status_msg: A sign-in request from another address is pending`), so one approval never admits a second party. Beyond that, each user gets a burst of 3 pushes refilled one per 30 s; further `auth` calls answer `deny` (`status_msg: Too many sign-in requests`) without touching the phone, so a stolen password cannot be turned into push bombing.
 
 Disabling a user or enabling the `push-disabled: true` kill switch causes preauth/auth to return `deny`. This affects in-flight logins: pending challenges are denied, and eligibility is re-verified upon approval and immediately before `auth` returns `allow`.
 

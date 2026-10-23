@@ -65,6 +65,7 @@ var (
 	ErrBadToken            = fail(Refused, "bad_token", "invalid deny token")
 	ErrEnrollmentRequired  = fail(Refused, "enrollment_required", "enrollment required")
 	ErrTooManyPushes       = fail(Refused, "too_many_pushes", "too many sign-in requests; wait before trying again")
+	ErrPushPending         = fail(Refused, "push_pending", "a sign-in request from another address is waiting on the phone")
 	ErrNotInDirectory      = fail(Refused, "not_in_directory", "user is not in the directory")
 	ErrNoDirectory         = fail(Refused, "no_directory", "no directory is configured")
 	ErrDirectoryConfigured = fail(Refused, "directory_configured", "a directory is configured and decides each user's email")

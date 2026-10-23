@@ -192,6 +192,12 @@ func TestRetriedLoginJoinsPendingPush(t *testing.T) {
 	second := h.StartLogin("alice", dev.DeviceID)
 	// The second login waits on the same push: nothing new reaches the phone.
 	h.Ntfy.NoPublish(t, 500*time.Millisecond)
+	// A login from elsewhere is refused outright: the approval must not admit it too.
+	if r := testutil.Await(t, h.StartLoginFrom("alice", dev.DeviceID, "198.51.100.9")); r.Response.Result != "deny" ||
+		r.Response.Status_Msg != "A sign-in request from another address is pending" {
+		t.Fatalf("login from another address: %+v", r.Response)
+	}
+	h.Ntfy.NoPublish(t, 200*time.Millisecond)
 	if st := h.Approve(t, dev.Auth, m.Click); st != 200 {
 		t.Fatalf("approve: %d", st)
 	}
