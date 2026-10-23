@@ -130,6 +130,19 @@ access_control:
 
 Startup fails closed if the ntfy token lacks admin rights, anonymous reads of push topics are allowed, the ntfy user list exceeds the client's 1 MiB response limit, the LDAP bind fails, or `directory-ldap-group-dn` does not exist.
 
+## A user's first sign-in
+
+What Naomi and her admin do, from a fresh account to an approved login.
+
+1. **Account.** The next directory sync finds Naomi in LDAP, creates her ntfy account and emails her a welcome. Without a directory, the admin runs `user provision naomi --email naomi@example.com`. The email carries the ntfy server URL, her username and a one-time password, plus app store links.
+2. **ntfy app.** On her phone, Naomi installs ntfy, opens *Settings → Manage users → Add*, and enters the server URL, username and password from the email. The password is never needed again.
+3. **Authelia on the phone.** Naomi opens any protected site in her phone's browser and signs into Authelia with her password and an existing second factor (TOTP, or a browser passkey). The `two_factor` policy on `/enroll` requires this, so a stolen password alone cannot enroll a phone. An admin can skip it by sending her a single-use link from `enroll-link naomi` instead.
+4. **Enroll.** Still on the phone, she opens `https://push.example.com/enroll`, names the device and taps *Create passkey*. The phone's biometric prompt creates a device-bound passkey. The result page then shows a *Subscribe in ntfy* button (Android) or the server URL and topic to add by hand (iOS).
+5. **Activate.** A "Finish setup" push arrives in ntfy. Tapping it opens the shim, and *Activate* marks the phone active. Until this tap, the device cannot approve anything, and it is purged if the tap never comes.
+6. **Sign in on the desktop.** Naomi signs into Authelia on her laptop with her password and picks *Push*. Authelia calls the shim's Duo API, and a "Sign-in request" push reaches her phone naming her, the laptop's IP and the site she is heading to.
+7. **Approve on the phone.** Tapping the push opens the approve page. *Approve with passkey* triggers the biometric prompt and signs the challenge; the laptop's Authelia tab is let through. *Deny* in the notification or *This wasn't me* on the page denies it, and nothing after 60 seconds times it out.
+8. **Later.** `/devices` in Authelia lists her phones and revokes one; `device revoke` does the same from the CLI. A lost phone's ntfy account is reset with `user reset-ntfy naomi`, which emails a new welcome.
+
 ## Backup
 
 The database stores all passkeys. Losing it requires re-enrolling all phones. The `backup` command streams a consistent copy safely while the server runs (`-` outputs to stdout):
