@@ -2,6 +2,7 @@ package web
 
 import (
 	"errors"
+	"html/template"
 	"net/http"
 	"strings"
 
@@ -21,6 +22,35 @@ func platform(r *http.Request) string {
 		return "ios"
 	}
 	return "desktop"
+}
+
+// subscribeData fills the ntfy-subscribe template. The enrollment page sets only Platform and its
+// script fills in the rest.
+type subscribeData struct {
+	Platform, Topic, Server string
+	// Intent is core's intent:// link for the Android button; html/template would otherwise
+	// replace the non-web scheme.
+	Intent, QR template.URL
+}
+
+// subscribePage is where the welcome email's topic links lead, as mail clients drop ntfy:// links.
+// It is public: the phone opening it is not signed in to the proxy, and it serves only the user's
+// default topics, which name nothing secret.
+func (s *Server) subscribePage(w http.ResponseWriter, r *http.Request) {
+	user := r.URL.Query().Get("user")
+	l, err := s.svc.DefaultTopicLink(user, r.PathValue("topic"))
+	if err != nil {
+		s.pageFail(w, err, "subscribe")
+		return
+	}
+	sub := subscribeData{Platform: platform(r), Topic: l.Topic, Server: s.svc.Config().NtfyBaseURL, Intent: template.URL(l.Intent)}
+	if sub.Platform == "desktop" {
+		if sub.QR, err = qrDataURL(l.URL); err != nil {
+			s.pageFail(w, err, "subscribe: qr")
+			return
+		}
+	}
+	s.render(w, http.StatusOK, "subscribe.html", map[string]any{"User": user, "Subscribe": sub})
 }
 
 func (s *Server) devicesPage(w http.ResponseWriter, r *http.Request) {

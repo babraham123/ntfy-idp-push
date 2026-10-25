@@ -15,6 +15,7 @@ const (
 	Devices   = "/devices"
 	Token     = "/token"
 	Challenge = "/challenge"
+	Subscribe = "/subscribe"
 	Static    = "/static/"
 	Health    = "/healthz"
 )
@@ -51,6 +52,12 @@ func ApproveURL(public, challengeID string) string {
 
 // DenyURL is the login push's Deny action target.
 func DenyURL(public, challengeID string) string { return ApproveURL(public, challengeID) + "/deny" }
+
+// SubscribeURL is the page that subscribes user's ntfy app to topic. Mail clients drop links with
+// an ntfy:// scheme, so the welcome email links here and the page hands out the deep link.
+func SubscribeURL(public, topic, user string) string {
+	return public + Subscribe + "/" + url.PathEscape(topic) + "?user=" + url.QueryEscape(user)
+}
 
 // QRURL renders an enrollment URL as a barcode for the IdP's enrollment screen.
 func QRURL(public, enrollURL string) string {

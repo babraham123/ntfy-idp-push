@@ -1,0 +1,35 @@
+{{template "head" (print "Subscribe to " .Subscribe.Topic)}}
+<h1>Subscribe to {{.Subscribe.Topic}}</h1>
+<p>Do this <em>on the phone</em>, in the ntfy app signed in as <strong>{{.User}}</strong> with the credentials from your welcome email.</p>
+{{template "ntfy-subscribe" .Subscribe}}
+<p id="status" role="status"></p>
+<script src="/static/app.js" referrerpolicy="no-referrer"></script>
+{{template "foot"}}
+{{/* ntfy-subscribe is how the ntfy app on this browser's platform subscribes to a topic. The
+enrollment page renders it empty and its script fills it in. */}}
+{{define "ntfy-subscribe"}}
+  {{if eq .Platform "android"}}
+  <p><a class="button ntfy-link" href="{{with .Intent}}{{.}}{{else}}#{{end}}">Subscribe in ntfy</a></p>
+  {{else if eq .Platform "desktop"}}
+  <h3>Android</h3>
+  <p>Scan this with the phone to subscribe in ntfy:</p>
+  <img id="qr"{{with .QR}} src="{{.}}"{{end}} alt="QR code for the ntfy link" width="240" height="240">
+  {{end}}
+  {{if ne .Platform "ios"}}
+  <p class="note">If the app does not subscribe, add topic <code class="ntfy-topic">{{.Topic}}</code> on server <code class="ntfy-server">{{.Server}}</code> manually.</p>
+  {{end}}
+  {{if ne .Platform "android"}}
+  {{if eq .Platform "desktop"}}<h3>iPhone or iPad</h3>{{end}}
+  <p>The ntfy iOS app does not open ntfy:// links, so subscribe by hand:</p>
+  <dl>
+    <dt>Server URL</dt><dd><code class="ntfy-server">{{.Server}}</code> <button type="button" data-copy="server">Copy</button></dd>
+    <dt>Topic</dt><dd><code class="ntfy-topic">{{.Topic}}</code> <button type="button" data-copy="topic">Copy</button></dd>
+  </dl>
+  <ol>
+    <li>Open ntfy and tap <strong>+</strong>.</li>
+    <li>Turn on <strong>Use another server</strong> and paste the server URL.</li>
+    <li>Paste the topic.</li>
+    <li>Tap <strong>Subscribe</strong>.</li>
+  </ol>
+  {{end}}
+{{end}}

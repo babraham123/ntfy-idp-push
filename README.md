@@ -55,7 +55,7 @@ Setting `directory-type: ldap` enables automatic ntfy account provisioning, sync
 
 **Sync Behavior**
 * Runs at startup and every `directory-sync-interval` (default `15m`).
-* **Creates** accounts for new users, applies `enroll-access`, and emails a welcome (URL, username, random password, app links, login steps, and `ntfy://` links per `default-topics`).
+* **Creates** accounts for new users, applies `enroll-access`, and emails a welcome (URL, username, random password, app links, login steps, and a link per `default-topics` entry to a `/subscribe` page that hands the phone the topic's `ntfy://` link, since mail clients drop `ntfy://` links).
 * **Updates** email and display name automatically.
 * **Deletes** accounts and devices for users missing from LDAP. Returning users get a fresh account and welcome email.
 * **Preserves** manual `user disable` states.
@@ -120,7 +120,7 @@ duo_api:
 access_control:
   rules:
     - domain: push.example.com
-      resources: ['^/token/', '^/challenge/', '^/auth/v2/', '^/static/']
+      resources: ['^/token/', '^/challenge/', '^/subscribe/', '^/auth/v2/', '^/static/']
       policy: bypass
     - domain: push.example.com
       policy: two_factor                    # a stolen password alone must not enroll a phone
@@ -200,6 +200,7 @@ Devices
 | `/token/qr` | Public (shim-issued codes only) | QR for an enrollment URL, shown by the IdP |
 | `/challenge/<id>`<br>`/challenge/<id>/options`<br>`/challenge/<id>/assert`<br>`/challenge/<id>/fraud` | Public (passkey) | approve a sign-in, or report fraud |
 | `/challenge/<id>/deny` | Public (deny token) | the ntfy app's Deny action |
+| `/subscribe/<topic>?user=<user>` | Public (the user's `default-topics` only) | subscribe from a welcome email link |
 | `/static/` | Public | page assets |
 | `/auth/v2/ping`<br>`/auth/v2/check`<br>`/auth/v2/preauth`<br>`/auth/v2/auth`<br>`/auth/v2/enroll`<br>`/auth/v2/enroll_status` | Internal (IdP server; HMAC-signed except `ping`) | Duo Auth API |
 | `/healthz` | Internal | health check |

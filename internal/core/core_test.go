@@ -45,6 +45,9 @@ func TestAutheliaLoginApprovedWithPasskey(t *testing.T) {
 	if want := ntfyLink(h, dev.Topic, "alice"); dev.NtfyLink != want || dev.Server != h.Cfg.NtfyBaseURL {
 		t.Fatalf("ntfy link %q server %q, want %q", dev.NtfyLink, dev.Server, want)
 	}
+	if want := intentLink(h, dev.Topic, "alice"); dev.IntentLink != want {
+		t.Fatalf("intent link %q, want %q", dev.IntentLink, want)
+	}
 
 	pre, err := h.Duo(testutil.IKey, testutil.SKey).Preauth(authapi.PreauthUsername("alice"))
 	if err != nil {
@@ -574,11 +577,10 @@ func TestProvision(t *testing.T) {
 	if len(sent) != 1 {
 		t.Fatalf("%d welcomes", len(sent))
 	}
-	for _, want := range []string{"Server URL: " + h.Cfg.NtfyBaseURL, ntfyLink(h, "alerts", "dana"), ntfyLink(h, "dana-inbox", "dana")} {
-		if !strings.Contains(sent[0].Text, want) {
-			t.Fatalf("welcome lacks %q:\n%s", want, sent[0].Text)
-		}
+	if !strings.Contains(sent[0].Text, "Server URL: "+h.Cfg.NtfyBaseURL) {
+		t.Fatalf("welcome lacks the server URL:\n%s", sent[0].Text)
 	}
+	checkSubscribeLinks(t, h, sent[0], "dana")
 	before := h.Ntfy.Password("dana")
 	if !strings.Contains(sent[0].Text, before) {
 		t.Fatal("welcome does not carry ntfy's password")
@@ -596,6 +598,13 @@ func TestProvision(t *testing.T) {
 // ntfyLink is the subscribe link for topic as user on the harness's plain-HTTP ntfy server.
 func ntfyLink(h *testutil.Harness, topic, user string) string {
 	return "ntfy://" + strings.TrimPrefix(h.Cfg.NtfyBaseURL, "http://") + "/" + topic + "?secure=false&user=" + user
+}
+
+// intentLink is ntfyLink as the Android button's Chrome intent, which falls back to ntfy's Play
+// Store listing.
+func intentLink(h *testutil.Harness, topic, user string) string {
+	return "intent://" + strings.TrimPrefix(h.Cfg.NtfyBaseURL, "http://") + "/" + topic + "?secure=false&user=" + user +
+		"#Intent;scheme=ntfy;package=io.heckel.ntfy;end"
 }
 
 func TestProvisionRefusesUsernameThatReachesPushTopics(t *testing.T) {

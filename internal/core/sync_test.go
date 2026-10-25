@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"html"
 	"regexp"
 	"strings"
 	"testing"
@@ -15,6 +16,7 @@ import (
 	"github.com/babraham123/ntfy-idp-push/internal/core"
 	"github.com/babraham123/ntfy-idp-push/internal/directory"
 	"github.com/babraham123/ntfy-idp-push/internal/mail"
+	"github.com/babraham123/ntfy-idp-push/internal/routes"
 	"github.com/babraham123/ntfy-idp-push/internal/testutil"
 )
 
@@ -52,14 +54,33 @@ func checkWelcome(t *testing.T, h *testutil.Harness, m mail.Message, p directory
 	for _, want := range []string{
 		"Username:   " + p.Username,
 		"Server URL: " + h.Cfg.NtfyBaseURL,
-		ntfyLink(h, "alerts", p.Username),
-		ntfyLink(h, p.Username+"-inbox", p.Username),
 	} {
 		if !strings.Contains(m.Text, want) {
 			t.Fatalf("welcome lacks %q:\n%s", want, m.Text)
 		}
 	}
+	checkSubscribeLinks(t, h, m, p.Username)
 	return pw[1]
+}
+
+// checkSubscribeLinks asserts that m links each of user's default topics to a page that hands an
+// Android phone the topic's intent link. Mail clients drop ntfy:// links, so m must not carry them.
+func checkSubscribeLinks(t *testing.T, h *testutil.Harness, m mail.Message, user string) {
+	t.Helper()
+	if strings.Contains(m.Text+m.HTML, "ntfy://") {
+		t.Fatalf("welcome carries an ntfy:// link:\n%s", m.HTML)
+	}
+	for _, topic := range []string{"alerts", user + "-inbox"} {
+		link := routes.SubscribeURL(testutil.PublicURL, topic, user)
+		if !strings.Contains(m.Text, link) || !strings.Contains(m.HTML, `href="`+html.EscapeString(link)+`"`) {
+			t.Fatalf("welcome lacks %q:\n%s", link, m.HTML)
+		}
+		resp, b := h.Do(t, testutil.Request{Method: "GET", Path: testutil.LocalPath(t, link),
+			Header: map[string]string{"User-Agent": "Mozilla/5.0 (Linux; Android 15; Pixel 9)"}})
+		if want := `href="` + html.EscapeString(intentLink(h, topic, user)) + `"`; resp.StatusCode != 200 || !strings.Contains(string(b), want) {
+			t.Fatalf("subscribe page for %s: %d, want %s:\n%s", topic, resp.StatusCode, want, b)
+		}
+	}
 }
 
 func userNamed(t *testing.T, h *testutil.Harness, name string) core.UserSummary {

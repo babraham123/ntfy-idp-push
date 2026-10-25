@@ -15,6 +15,7 @@ import (
 	"github.com/babraham123/ntfy-idp-push/internal/mail"
 	"github.com/babraham123/ntfy-idp-push/internal/model"
 	"github.com/babraham123/ntfy-idp-push/internal/ntfy"
+	"github.com/babraham123/ntfy-idp-push/internal/routes"
 	"github.com/babraham123/ntfy-idp-push/internal/token"
 )
 
@@ -86,7 +87,7 @@ func (s *Service) sendWelcome(ctx context.Context, acc *ntfy.Accounts, u *model.
 	s.store.Audit(ctx, u.Username, "ntfy_password_set", nil)
 	w := mail.Welcome{Username: u.Username, DisplayName: u.DisplayName, Password: password, ServerURL: s.Config().NtfyBaseURL}
 	for _, l := range s.defaultTopicLinks(u.Username) {
-		w.Topics = append(w.Topics, mail.TopicLink{Topic: l.Topic, URL: l.URL})
+		w.Topics = append(w.Topics, mail.TopicLink{Topic: l.Topic, URL: routes.SubscribeURL(s.Config().PublicURL, l.Topic, u.Username)})
 	}
 	msg, err := mail.RenderWelcome(w)
 	if err != nil {

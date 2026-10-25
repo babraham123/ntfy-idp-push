@@ -18,6 +18,9 @@ func TestURLShapes(t *testing.T) {
 	if got := routes.QRURL(public, routes.EnrollURL(public, "c")); got != public+"/token/qr?value=https%3A%2F%2Fpush.test%2Ftoken%2F%23c" {
 		t.Errorf("QRURL %q", got)
 	}
+	if got := routes.SubscribeURL(public, "a b/c", "dé"); got != public+"/subscribe/a%20b%2Fc?user=d%C3%A9" {
+		t.Errorf("SubscribeURL %q", got)
+	}
 	if got := routes.DenyURL(public, "ch"); got != public+"/challenge/ch/deny" {
 		t.Errorf("DenyURL %q", got)
 	}

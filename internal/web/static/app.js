@@ -138,23 +138,12 @@ if (invalidLink && !enrollCode) {
 // showResult fills in the result section the page rendered for this browser's platform.
 function showResult(done) {
   const fill = (cls, set) => document.querySelectorAll("." + cls).forEach(set);
-  fill("ntfy-link", (el) => { el.href = done.ntfy_link; });
+  fill("ntfy-link", (el) => { el.href = done.intent_link; });
   fill("ntfy-server", (el) => { el.textContent = done.server; });
   fill("ntfy-topic", (el) => { el.textContent = done.topic; });
   fill("ntfy-user", (el) => { el.textContent = done.username; });
   const qr = document.getElementById("qr");
   if (qr) qr.src = done.qr;
-  const copyable = { server: done.server, topic: done.topic };
-  document.querySelectorAll("[data-copy]").forEach((b) => {
-    b.addEventListener("click", async () => {
-      try {
-        await navigator.clipboard.writeText(copyable[b.dataset.copy]);
-        status("Copied.");
-      } catch (err) {
-        status("Copy failed: " + err.message);
-      }
-    });
-  });
   document.getElementById("done").hidden = false;
 }
 
@@ -169,6 +158,18 @@ function wireResult(token) {
     }
   });
 }
+
+// Copy buttons copy the server URL or topic the page shows, filled in by the server or showResult.
+document.querySelectorAll("[data-copy]").forEach((b) => {
+  b.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(document.querySelector(".ntfy-" + b.dataset.copy).textContent);
+      status("Copied.");
+    } catch (err) {
+      status("Copy failed: " + err.message);
+    }
+  });
+});
 
 const verifyForm = document.getElementById("verify");
 if (verifyForm) {

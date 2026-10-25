@@ -78,6 +78,8 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.Handle("POST "+tok+"/resend", s.limit(s.sameOrigin(s.enrollResend)))
 	mux.Handle("GET "+tok+"/qr", s.limit(s.enrollQR))
 
+	mux.Handle("GET "+routes.Subscribe+"/{topic}", s.limit(s.subscribePage))
+
 	mux.Handle("GET "+ch+"/{id}", s.limit(s.approvePage))
 	mux.Handle("GET "+ch+"/{id}/options", s.limit(s.assertionOptions))
 	mux.Handle("POST "+ch+"/{id}/assert", s.limit(s.sameOrigin(s.assert)))
@@ -377,7 +379,7 @@ func (s *Server) enrollPage(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	s.render(w, http.StatusOK, "enroll.html", map[string]string{"User": user, "Base": routes.Enroll, "Platform": platform(r)})
+	s.render(w, http.StatusOK, "enroll.html", map[string]any{"User": user, "Base": routes.Enroll, "Subscribe": subscribeData{Platform: platform(r)}})
 }
 
 // tokenPage is the token route: a shim-issued enrollment code is the whole credential. The code is
@@ -386,7 +388,7 @@ func (s *Server) enrollPage(w http.ResponseWriter, r *http.Request) {
 // begin finds it gone.
 func (s *Server) tokenPage(w http.ResponseWriter, r *http.Request) {
 	_, invalid := s.failMessage(core.ErrInvalidCode, "")
-	s.render(w, http.StatusOK, "enroll.html", map[string]any{"User": "", "Base": routes.Token, "Platform": platform(r), "Invalid": invalid})
+	s.render(w, http.StatusOK, "enroll.html", map[string]any{"User": "", "Base": routes.Token, "Subscribe": subscribeData{Platform: platform(r)}, "Invalid": invalid})
 }
 
 // staleLink answers every other GET on /token, links that put a code in the path among them, with
@@ -463,6 +465,7 @@ func (s *Server) finishEnrollment(w http.ResponseWriter, r *http.Request, signed
 		"username":     res.Device.Username,
 		"server":       res.Server,
 		"ntfy_link":    link,
+		"intent_link":  res.Link.Intent,
 		"qr":           qr,
 		"result_token": res.ResultToken,
 	})

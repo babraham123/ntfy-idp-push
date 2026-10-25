@@ -20,13 +20,12 @@
 </li>
 <li>Add your account: in ntfy, open <b>Settings</b> &rarr; <b>Manage users</b> &rarr; <b>Add</b>, then enter the server URL, username and password above.</li>
 {{- if .Topics}}
-<li>Subscribe: on the phone with ntfy installed, open each link below.
+<li>Subscribe: on the phone with ntfy installed, open each link below and follow its steps.
 <ul>
 {{- range .Topics}}
 <li><a href="{{.URL}}">{{.Topic}}</a></li>
 {{- end}}
 </ul>
-If a link does not open the app, tap + in ntfy, choose &ldquo;Use another server&rdquo;, and enter the server URL and the topic name.
 </li>
 {{- end}}
 </ol>

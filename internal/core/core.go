@@ -172,12 +172,16 @@ func (s *Service) provision(ctx context.Context, acc *ntfy.Accounts, username st
 type TopicLink struct {
 	Topic string
 	URL   string
+	// Intent is URL as a Chrome intent:// link, for Android's tap button: it opens ntfy's Play Store
+	// listing when the app is not installed. It needs a tap, so QR codes carry URL.
+	Intent string
 }
 
 // topicLink is the subscribe link for topic as username. It carries no credentials; the app must
 // already be signed in as the user.
 func (s *Service) topicLink(username, topic string) TopicLink {
-	return TopicLink{Topic: topic, URL: ntfyLink(s.Config(), topic, username)}
+	link := ntfyLink(s.Config(), topic, username)
+	return TopicLink{Topic: topic, URL: link, Intent: intentLink(link)}
 }
 
 // defaultTopicLinks is one subscribe link per default-topics entry, ${user} expanded.
@@ -187,6 +191,19 @@ func (s *Service) defaultTopicLinks(username string) []TopicLink {
 		out = append(out, s.topicLink(username, config.Expand(t, username)))
 	}
 	return out
+}
+
+// DefaultTopicLink is the subscribe link for topic, which must be one of username's default
+// topics: the subscribe page serves only the links the welcome email names.
+func (s *Service) DefaultTopicLink(username, topic string) (TopicLink, error) {
+	if ValidUsername(username) == nil {
+		for _, l := range s.defaultTopicLinks(username) {
+			if l.Topic == topic {
+				return l, nil
+			}
+		}
+	}
+	return TopicLink{}, ErrUnknownTopic
 }
 
 // ntfyLink is the deep link the ntfy app opens to subscribe to topic as username.
@@ -204,6 +221,14 @@ func ntfyLink(cfg *config.Config, topic, username string) string {
 		link += "?" + q.Encode()
 	}
 	return link
+}
+
+// ntfyAndroidPackage is the ntfy Android app's ID on Google Play and F-Droid alike.
+const ntfyAndroidPackage = "io.heckel.ntfy"
+
+// intentLink is the Chrome intent:// form of an ntfy:// link.
+func intentLink(ntfyLink string) string {
+	return "intent://" + strings.TrimPrefix(ntfyLink, "ntfy://") + "#Intent;scheme=ntfy;package=" + ntfyAndroidPackage + ";end"
 }
 
 // Purge expires challenges/records, removes unverified devices, and reconciles unfinished

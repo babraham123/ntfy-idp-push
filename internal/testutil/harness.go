@@ -351,7 +351,7 @@ func LocalPath(t *testing.T, u string) string {
 }
 
 type Enrolled struct {
-	DeviceID, Topic, NtfyLink string
+	DeviceID, Topic, NtfyLink, IntentLink string
 	// Server is the ntfy server URL the result page shows for subscribing by hand.
 	Server string
 	// ResultToken authorizes the enrollment result page's resend action.
@@ -427,11 +427,12 @@ func (h *Harness) FinishEnroll(t *testing.T, user, link string, a *Authenticator
 		Device      string `json:"device"`
 		Topic       string `json:"topic"`
 		NtfyLink    string `json:"ntfy_link"`
+		IntentLink  string `json:"intent_link"`
 		Server      string `json:"server"`
 		ResultToken string `json:"result_token"`
 	}
 	_ = json.Unmarshal(b, &out)
-	return Enrolled{DeviceID: out.Device, Topic: out.Topic, NtfyLink: out.NtfyLink, Server: out.Server,
+	return Enrolled{DeviceID: out.Device, Topic: out.Topic, NtfyLink: out.NtfyLink, IntentLink: out.IntentLink, Server: out.Server,
 		ResultToken: out.ResultToken, Auth: a}, resp.StatusCode, b
 }
 
