@@ -197,7 +197,6 @@ Devices
 | `/token/#<code>`<br>`/token/begin`<br>`/token/finish` | Public (enrollment code, from the fragment, in the `begin` body) | enroll from an `enroll-link` or authentik activation link |
 | `/token/resend` | Public (result-page token) | resend the setup push |
 | `/token/verify/<device>#t=<token>` | Public (token from the setup push's fragment, in the form body) | activate the device |
-| `/token/qr` | Public (shim-issued codes only) | QR for an enrollment URL, shown by the IdP |
 | `/challenge/<id>`<br>`/challenge/<id>/options`<br>`/challenge/<id>/assert`<br>`/challenge/<id>/fraud` | Public (passkey) | approve a sign-in, or report fraud |
 | `/challenge/<id>/deny` | Public (deny token) | the ntfy app's Deny action |
 | `/subscribe/<topic>?user=<user>` | Public (the user's `default-topics` only) | subscribe from a welcome email link |

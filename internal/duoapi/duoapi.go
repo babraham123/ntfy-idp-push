@@ -18,6 +18,7 @@ import (
 
 	"github.com/babraham123/ntfy-idp-push/internal/core"
 	"github.com/babraham123/ntfy-idp-push/internal/model"
+	"github.com/babraham123/ntfy-idp-push/internal/qr"
 )
 
 const maxBody = 64 << 10
@@ -293,8 +294,14 @@ func (h *Handler) enroll(w http.ResponseWriter, r *http.Request, p params) {
 		h.internal(w, err)
 		return
 	}
+	// Inline, the barcode never travels in a request the proxy logs; authentik shows it as an <img>.
+	barcode, err := qr.DataURL(e.URL)
+	if err != nil {
+		h.internal(w, err)
+		return
+	}
 	writeOK(w, map[string]any{
-		"activation_barcode": e.BarcodeURL,
+		"activation_barcode": barcode,
 		"activation_code":    e.Code,
 		"activation_url":     e.URL,
 		"expiration":         e.ExpiresAt.Unix(),

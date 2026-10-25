@@ -82,7 +82,7 @@ Request validation order:
 | `GET /auth/v2/check` | signed; `{"time":…}` |
 | `POST /auth/v2/preauth` | unknown user or no verified device → `enroll` with `enroll_portal_url` (or `deny` if unset); otherwise `auth` with one `phone` device per enrolled phone, capability `push` |
 | `POST /auth/v2/auth` | user by `username` or `user_id`; `factor` must be `push` or `auto`; `device=auto` picks the most recently used device; publishes the push and blocks until decided or `push-timeout` |
-| `POST /auth/v2/enroll` | IdP-driven enrollment: returns `user_id`, `activation_code`, `activation_url`, `activation_barcode` (`/token/qr`), `expiration` |
+| `POST /auth/v2/enroll` | IdP-driven enrollment: returns `user_id`, `activation_code`, `activation_url`, `activation_barcode` (an inline `data:` URL), `expiration` |
 | `POST /auth/v2/enroll_status` | `waiting` → `success` once the device is verified; `invalid` for an unknown, expired or revoked enrollment |
 
 `/auth/v2/auth` blocks up to `push-timeout`, extending its write deadline. Reloading `push-timeout` applies to subsequent requests.
@@ -145,7 +145,7 @@ IdPs must require a second factor on the identity routes to prevent attackers fr
 
 ### IdP-driven enrollment
 
-authentik calls `enroll`, displays `activation_barcode` (`/token/qr?value=<activation url>`, generated only for shim-issued codes), and polls `enroll_status`. Phones scan the code and enroll via `/token/#<code>` without an IdP session; the code serves as proof. Used codes persist for the unverified device's lifetime to accommodate IdP polling.
+authentik calls `enroll`, displays `activation_barcode` (a `data:image/png` QR of the activation URL, inlined so the code never appears in a request line the proxy logs), and polls `enroll_status`. Phones scan the code and enroll via `/token/#<code>` without an IdP session; the code serves as proof. Used codes persist for the unverified device's lifetime to accommodate IdP polling.
 
 ## Revocation
 

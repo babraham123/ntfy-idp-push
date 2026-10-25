@@ -347,10 +347,21 @@ func TestV5JSONEnrollAndStatus(t *testing.T) {
 	if r.Username != "carol" || r.UserID == "" || r.ActivationCode == "" || r.Expiration <= time.Now().Unix() {
 		t.Fatalf("enroll response: %+v", r)
 	}
-	// The phone's link carries the code in its fragment, and the barcode is a QR of that link.
-	if r.ActivationURL != testutil.PublicURL+"/token/#"+r.ActivationCode ||
-		r.ActivationBarcode != testutil.PublicURL+"/token/qr?value="+url.QueryEscape(r.ActivationURL) {
-		t.Fatalf("activation links: %+v", r)
+	// The phone's link carries the code in its fragment, and the barcode is an inline QR of that
+	// link, so the code never appears in a URL the browser requests.
+	if r.ActivationURL != testutil.PublicURL+"/token/#"+r.ActivationCode {
+		t.Fatalf("activation url: %+v", r)
+	}
+	want, err := qrcode.Encode(r.ActivationURL, qrcode.Medium, 320)
+	if err != nil {
+		t.Fatal(err)
+	}
+	png, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(r.ActivationBarcode, "data:image/png;base64,"))
+	if !strings.HasPrefix(r.ActivationBarcode, "data:image/png;base64,") || err != nil || !bytes.Equal(png, want) {
+		t.Fatalf("activation barcode is not a QR of the activation URL: %.60s… %v", r.ActivationBarcode, err)
+	}
+	if resp, _ := h.Do(t, testutil.Request{Method: "GET", Path: "/token/qr?value=" + url.QueryEscape(r.ActivationURL)}); resp.Header.Get("Content-Type") == "image/png" {
+		t.Fatal("the shim still serves QR images by URL")
 	}
 	// The ntfy account exists (provisioned) but nothing push-related yet.
 	if h.Ntfy.User("carol") == nil {
@@ -371,20 +382,6 @@ func TestV5JSONEnrollAndStatus(t *testing.T) {
 	}
 	if s := status(); s != "waiting" {
 		t.Fatalf("before enrollment: %s", s)
-	}
-
-	// The barcode renders only for the issued URL.
-	resp, png := h.Do(t, testutil.Request{Method: "GET", Path: testutil.LocalPath(t, r.ActivationBarcode)})
-	want, err := qrcode.Encode(r.ActivationURL, qrcode.Medium, 320)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != 200 || resp.Header.Get("Content-Type") != "image/png" || !bytes.Equal(png, want) {
-		t.Fatalf("barcode: %d %s, QR of the activation URL: %v", resp.StatusCode, resp.Header.Get("Content-Type"), bytes.Equal(png, want))
-	}
-	resp, _ = h.Do(t, testutil.Request{Method: "GET", Path: "/token/qr?value=" + url.QueryEscape("https://evil.example/")})
-	if resp.StatusCode != 404 {
-		t.Fatalf("arbitrary QR value: %d", resp.StatusCode)
 	}
 
 	// The phone scans the code and enrolls on the token routes, without any IdP session.

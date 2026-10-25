@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"embed"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"html/template"
@@ -20,10 +19,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/skip2/go-qrcode"
 	"golang.org/x/time/rate"
 
 	"github.com/babraham123/ntfy-idp-push/internal/core"
+	"github.com/babraham123/ntfy-idp-push/internal/qr"
 	"github.com/babraham123/ntfy-idp-push/internal/routes"
 )
 
@@ -76,7 +75,6 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.Handle("GET "+tok+"/verify/{device}", s.limit(s.verifyPage))
 	mux.Handle("POST "+tok+"/verify/{device}", s.limit(s.sameOrigin(s.verifyDevice)))
 	mux.Handle("POST "+tok+"/resend", s.limit(s.sameOrigin(s.enrollResend)))
-	mux.Handle("GET "+tok+"/qr", s.limit(s.enrollQR))
 
 	mux.Handle("GET "+routes.Subscribe+"/{topic}", s.limit(s.subscribePage))
 
@@ -364,11 +362,8 @@ func (s *Server) static(w http.ResponseWriter, r *http.Request) {
 }
 
 func qrDataURL(content string) (template.URL, error) {
-	png, err := qrcode.Encode(content, qrcode.Medium, 320)
-	if err != nil {
-		return "", err
-	}
-	return template.URL("data:image/png;base64," + base64.StdEncoding.EncodeToString(png)), nil
+	u, err := qr.DataURL(content)
+	return template.URL(u), err
 }
 
 // ---- enrollment
@@ -562,25 +557,4 @@ func (s *Server) fraud(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"result": "fraud"})
-}
-
-// ---- QR for IdP-driven enrollment
-
-// enrollQR renders QR codes only for shim-issued enrollment codes (preventing general-purpose QR
-// abuse).
-func (s *Server) enrollQR(w http.ResponseWriter, r *http.Request) {
-	content, err := s.svc.EnrollBarcode(r.Context(), r.URL.Query().Get("value"))
-	if err != nil {
-		st, msg := s.failure(err, "enroll: qr")
-		http.Error(w, msg, st)
-		return
-	}
-	png, err := qrcode.Encode(content, qrcode.Medium, 320)
-	if err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "image/png")
-	w.Header().Set("Cache-Control", "no-store")
-	w.Write(png)
 }

@@ -19,13 +19,12 @@ import (
 )
 
 // EnrollLink is a single-use enrollment link that identifies its user by itself: the page URL the
-// phone opens, with the code in its fragment; the URL of a QR image of it for a screen the phone
-// scans; and when it stops working. The code is the credential; the URLs are how it travels.
+// phone opens, with the code in its fragment, and when it stops working. The code is the
+// credential; the URL is how it travels.
 type EnrollLink struct {
-	Code       string
-	URL        string
-	BarcodeURL string
-	ExpiresAt  time.Time
+	Code      string
+	URL       string
+	ExpiresAt time.Time
 }
 
 // CreateEnrollLink mints an enrollment link for username, valid for ttl.
@@ -44,24 +43,7 @@ func (s *Service) CreateEnrollLink(ctx context.Context, username string, ttl tim
 }
 
 func (s *Service) enrollLink(code string, expires time.Time) *EnrollLink {
-	public := s.Config().PublicURL
-	u := routes.EnrollURL(public, code)
-	return &EnrollLink{Code: code, URL: u, BarcodeURL: routes.QRURL(public, u), ExpiresAt: expires}
-}
-
-// EnrollBarcode is what the QR image for a presented enrollment link encodes: the link itself,
-// when it is one the shim issued and its code is still usable. Only such links get a barcode, so
-// the QR route cannot be used to encode anything else. A link that is not the shim's is
-// ErrNoEnrollLink; one whose code is used or expired is ErrInvalidCode.
-func (s *Service) EnrollBarcode(ctx context.Context, link string) (string, error) {
-	code := routes.EnrollCode(s.Config().PublicURL, link)
-	if code == "" {
-		return "", ErrNoEnrollLink
-	}
-	if _, err := s.resolveEnrollCode(ctx, code); err != nil {
-		return "", err
-	}
-	return routes.EnrollURL(s.Config().PublicURL, code), nil
+	return &EnrollLink{Code: code, URL: routes.EnrollURL(s.Config().PublicURL, code), ExpiresAt: expires}
 }
 
 // resolveEnrollCode returns the username an unused, unexpired code was issued for.

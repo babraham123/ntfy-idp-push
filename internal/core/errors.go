@@ -83,7 +83,6 @@ var (
 
 	ErrUnknownUser   = fail(NotFound, "unknown_user", "unknown user")
 	ErrUnknownDevice = fail(NotFound, "unknown_device", "unknown device")
-	ErrNoEnrollLink  = fail(NotFound, "no_enroll_link", "not an enrollment link")
 	ErrUnknownTopic  = fail(NotFound, "unknown_topic", "not one of your default topics")
 
 	ErrInvalidName  = fail(Invalid, "invalid_name", "invalid username")
