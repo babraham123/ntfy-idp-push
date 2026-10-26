@@ -33,6 +33,11 @@
     {
       "matchManagers": ["dockerfile"],
       "groupName": "container base images"
+    },
+    {
+      "description": "The compose file follows this repo's own image; a digest pin would go stale with every release",
+      "matchPackageNames": ["ghcr.io/babraham123/ntfy-idp-push"],
+      "enabled": false
     }
   ]
 }
