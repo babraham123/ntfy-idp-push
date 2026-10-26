@@ -8,7 +8,7 @@
 # never publish the port on the host.
 services:
   ntfy-idp-push:
-    image: ghcr.io/babraham123/ntfy-idp-push:latest
+    image: ghcr.io/babraham123/ntfy-idp-push:latest@sha256:1a5af4a0e1ee7033aa0c62cbca73faeec465c067fd3e081632581d8b2c18c272
     restart: unless-stopped
     networks: [proxy]
     # The binary is static and writes only to the state volume, so the rest of the container can be
