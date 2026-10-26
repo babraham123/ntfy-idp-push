@@ -22,6 +22,11 @@
   ],
   "packageRules": [
     {
+      "description": "A pin locks the version already in use, so there is no new release to wait out",
+      "matchUpdateTypes": ["pin", "pinDigest"],
+      "minimumReleaseAge": "0 days"
+    },
+    {
       "matchManagers": ["gomod"],
       "matchUpdateTypes": ["minor", "patch", "digest"],
       "groupName": "Go modules"
