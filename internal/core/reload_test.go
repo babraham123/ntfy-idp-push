@@ -26,12 +26,12 @@ func TestReloadRotatesNtfyToken(t *testing.T) {
 
 	next := *h.Cfg
 	next.PublicURL = "https://elsewhere.test"
-	next.WebAuthnAllowSynced = !next.WebAuthnAllowSynced
+	next.NtfyTopicPrefix = "login-"
 	if err := next.Validate(); err != nil {
 		t.Fatal(err)
 	}
 	err := h.Svc.Reload(&next)
-	if !errors.Is(err, core.ErrRestartRequired) || err.Error() != "restart required: public-url, webauthn-allow-synced changed" {
+	if !errors.Is(err, core.ErrRestartRequired) || err.Error() != "restart required: public-url, ntfy-topic-prefix changed" {
 		t.Fatalf("restart-only keys: %v", err)
 	}
 	if h.Svc.Config().PublicURL != testutil.PublicURL {

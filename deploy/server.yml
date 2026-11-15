@@ -39,10 +39,6 @@ enroll-access:
   - "alerts:ro"
 enroll-access-reconcile: false
 
-webauthn-allow-synced: false
-# Default true: a passkey without an attestation statement could come from any software
-# authenticator, and "device-bound" would be only a promise the client makes.
-webauthn-require-attestation: true
 database: "/var/lib/ntfy-idp-push/db.sqlite"
 
 # The user directory controls who has an ntfy account. Every directory-sync-interval (and once at

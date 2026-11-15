@@ -56,8 +56,8 @@ var (
 	ErrNotOwner        = fail(Refused, "not_owner", "device does not belong to user")
 	ErrForeignGrants   = fail(Refused, "foreign_grants", "ntfy user has grants the shim did not make; use --force")
 	ErrIdentityChanged = fail(Refused, "identity_changed", "identity changed during enrollment")
-	// ErrPasskeyPolicy is a webauthn refusal of the passkey (synced, no attestation, no user
-	// verification, or none usable); the text names the reason.
+	// ErrPasskeyPolicy is a webauthn refusal of the passkey (no user verification); the text names
+	// the reason.
 	ErrPasskeyPolicy = fail(Refused, "passkey_policy", "passkey refused by policy")
 	// ErrPasskeyRejected: the attestation or assertion did not verify (wrong origin, nonce,
 	// credential, or signature). The detail is logged, never shown.

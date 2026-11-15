@@ -155,17 +155,37 @@ func (s *Service) ProvisionFromDirectory(ctx context.Context, username string) (
 	if s.dir == nil {
 		return nil, ErrNoDirectory
 	}
-	people, err := s.dir.List(ctx)
+	p, err := s.listed(ctx, username)
 	if err != nil {
 		return nil, err
 	}
+	now := time.Now()
+	return s.provisionAndWelcome(ctx, s.ntfy().Accounts(), p, &now)
+}
+
+// listed is the directory's entry for username, or ErrNotInDirectory. The directory must be
+// configured.
+func (s *Service) listed(ctx context.Context, username string) (directory.Person, error) {
+	people, err := s.dir.List(ctx)
+	if err != nil {
+		return directory.Person{}, err
+	}
 	for _, p := range people {
 		if p.Username == username {
-			now := time.Now()
-			return s.provisionAndWelcome(ctx, s.ntfy().Accounts(), p, &now)
+			return p, nil
 		}
 	}
-	return nil, ErrNotInDirectory
+	return directory.Person{}, ErrNotInDirectory
+}
+
+// requireListed refuses username with ErrNotInDirectory when a directory is configured and does
+// not list them: with a directory, it alone decides who has an account.
+func (s *Service) requireListed(ctx context.Context, username string) error {
+	if s.dir == nil {
+		return nil
+	}
+	_, err := s.listed(ctx, username)
+	return err
 }
 
 // ProvisionManual provisions a user when no directory is configured, records email as their

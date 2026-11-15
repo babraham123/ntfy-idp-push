@@ -145,25 +145,12 @@ func (s *Service) Authenticate(ctx context.Context, r AuthRequest) (model.Challe
 		r.Timeout = cfg.PushTimeout.D()
 	}
 	bg := context.WithoutCancel(ctx)
-	// A push already on the phone is answered once for every login waiting on it: a retried
-	// login joins it instead of stacking a second request on the screen. Only a login from the
-	// same address may join: the push names one address, and the approval must not also admit a
-	// stranger who happened to present the password at the same time.
-	if c, err := s.pendingFor(ctx, d.ID); err != nil {
-		return model.StateDeny, err
-	} else if c != nil && c.IPAddr != r.IPAddr {
-		s.store.Audit(ctx, u.Username, "push_refused", map[string]any{"challenge": c.ID, "device": d.ID, "ipaddr": r.IPAddr})
-		return model.StateDeny, ErrPushPending
-	} else if c != nil {
-		s.store.Audit(ctx, u.Username, "push_joined", map[string]any{"challenge": c.ID, "device": d.ID, "ipaddr": r.IPAddr})
-		return s.await(ctx, bg, u, d, c)
-	}
-	if !s.pushAllowed(u.Username) {
-		return model.StateDeny, ErrTooManyPushes
-	}
-	c, denyToken, err := s.createChallenge(ctx, d, r)
+	c, denyToken, err := s.claimPush(ctx, u, d, r)
 	if err != nil {
 		return model.StateDeny, err
+	}
+	if denyToken == "" {
+		return s.await(ctx, bg, u, d, c)
 	}
 	if err := s.ntfy().SendLogin(ctx, ntfy.Login{
 		Topic: d.NtfyTopic, ChallengeID: c.ID, Text: Describe(c),
@@ -174,6 +161,33 @@ func (s *Service) Authenticate(ctx context.Context, r AuthRequest) (model.Challe
 	}
 	s.store.Audit(ctx, u.Username, "push_sent", map[string]any{"challenge": c.ID, "device": d.ID, "ipaddr": r.IPAddr})
 	return s.await(ctx, bg, u, d, c)
+}
+
+// claimPush is the challenge the login waits on: a new one with its deny token, or the device's
+// pending one with an empty token when the login joins it.
+//
+// A push already on the phone is answered once for every login waiting on it: a retried login
+// joins it instead of stacking a second request on the screen. Only a login from the same address
+// may join: the push names one address, and the approval must not also admit a stranger who
+// happened to present the password at the same time. The device's lock makes looking for the
+// pending push and creating a new one a single step, so simultaneous logins cannot each create one.
+func (s *Service) claimPush(ctx context.Context, u *model.User, d *model.Device, r AuthRequest) (*model.Challenge, string, error) {
+	unlock := s.pushing.lock(d.ID)
+	defer unlock()
+	c, err := s.pendingFor(ctx, d.ID)
+	switch {
+	case err != nil:
+		return nil, "", err
+	case c != nil && c.IPAddr != r.IPAddr:
+		s.store.Audit(ctx, u.Username, "push_refused", map[string]any{"challenge": c.ID, "device": d.ID, "ipaddr": r.IPAddr})
+		return nil, "", ErrPushPending
+	case c != nil:
+		s.store.Audit(ctx, u.Username, "push_joined", map[string]any{"challenge": c.ID, "device": d.ID, "ipaddr": r.IPAddr})
+		return c, "", nil
+	case !s.pushAllowed(u.Username):
+		return nil, "", ErrTooManyPushes
+	}
+	return s.createChallenge(ctx, d, r)
 }
 
 // await blocks on c and turns its decision into the login's result.

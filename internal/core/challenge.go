@@ -27,6 +27,19 @@ import (
 // pollInterval bounds how long a decision made by another process (the CLI) takes to be seen.
 const pollInterval = time.Second
 
+// abandonGrace is how long a challenge stays pending once no auth call waits on it, so that a
+// retry arriving just after the first request dropped rejoins the same push.
+const abandonGrace = 8 * time.Second
+
+// waiters tracks the auth calls in this process blocked on one challenge.
+type waiters struct {
+	// decided is closed once the challenge leaves pending.
+	decided chan struct{}
+	n       int
+	// abandon times the challenge out after abandonGrace with no waiters.
+	abandon *time.Timer
+}
+
 // eligible is the login eligibility rule. A nil u or d checks only what is known so far, as
 // preauth does before and after the lookup.
 func eligible(cfg *config.Config, u *model.User, d *model.Device) error {
@@ -99,7 +112,7 @@ func (s *Service) createChallenge(ctx context.Context, d *model.Device, r AuthRe
 		ExpiresAt:       now.Add(r.Timeout),
 	}
 	s.waitMu.Lock()
-	s.waiters[c.ID] = make(chan struct{})
+	s.waiting[c.ID] = &waiters{decided: make(chan struct{})}
 	s.waitMu.Unlock()
 	if err := s.store.CreateChallenge(ctx, c); err != nil {
 		s.release(c.ID)
@@ -108,14 +121,62 @@ func (s *Service) createChallenge(ctx context.Context, d *model.Device, r AuthRe
 	return c, denyToken, nil
 }
 
-// release wakes the auth call waiting on challenge id, if it is in this process.
+// release wakes the auth calls waiting on challenge id, if they are in this process.
 func (s *Service) release(id string) {
 	s.waitMu.Lock()
-	if ch, ok := s.waiters[id]; ok {
-		close(ch)
-		delete(s.waiters, id)
+	if w, ok := s.waiting[id]; ok {
+		close(w.decided)
+		if w.abandon != nil {
+			w.abandon.Stop()
+		}
+		delete(s.waiting, id)
 	}
 	s.waitMu.Unlock()
+}
+
+// join counts an auth call as waiting on challenge id and returns the channel closed on decision.
+// It cancels a pending abandonment, which is how a retry rejoins.
+func (s *Service) join(id string) <-chan struct{} {
+	s.waitMu.Lock()
+	defer s.waitMu.Unlock()
+	w := s.waiting[id]
+	if w == nil {
+		// A challenge this process did not create, such as one left by a restart.
+		w = &waiters{decided: make(chan struct{})}
+		s.waiting[id] = w
+	}
+	w.n++
+	if w.abandon != nil {
+		w.abandon.Stop()
+		w.abandon = nil
+	}
+	return w.decided
+}
+
+// leave uncounts an auth call that stopped waiting on challenge id. The last one to leave starts
+// the abandonment: unless another call joins within abandonGrace, the challenge times out and its
+// push is cleared.
+func (s *Service) leave(id string) {
+	s.waitMu.Lock()
+	defer s.waitMu.Unlock()
+	w := s.waiting[id]
+	if w == nil {
+		return
+	}
+	if w.n--; w.n > 0 {
+		return
+	}
+	w.abandon = time.AfterFunc(s.abandonGrace, func() {
+		s.waitMu.Lock()
+		idle := s.waiting[id] == w && w.n == 0
+		s.waitMu.Unlock()
+		if !idle {
+			return
+		}
+		if err := s.decide(context.Background(), id, model.StateTimeout); err != nil && !errors.Is(err, ErrGone) {
+			s.Log.Error("abandoned challenge", "challenge", id, "err", err)
+		}
+	})
 }
 
 // decide moves a pending challenge to state, once. An allow is refused with ErrUserDisabled or
@@ -158,15 +219,12 @@ func (s *Service) clearPush(c *model.Challenge) {
 	}
 }
 
-// wait blocks until the challenge decides, expires, or ctx ends (returning timeout for
-// expiry/cancellation).
+// wait blocks until the challenge decides, expires, or ctx ends, returning timeout for the last
+// two. Expiry times the challenge out for every waiter; ctx ending stops only this one, as other
+// auth calls may be joined to the same push (see leave).
 func (s *Service) wait(ctx context.Context, c *model.Challenge) (model.ChallengeState, error) {
-	s.waitMu.Lock()
-	ch := s.waiters[c.ID]
-	s.waitMu.Unlock()
-	if ch == nil {
-		ch = make(chan struct{})
-	}
+	ch := s.join(c.ID)
+	defer s.leave(c.ID)
 	deadline := time.NewTimer(time.Until(c.ExpiresAt))
 	defer deadline.Stop()
 	tick := time.NewTicker(pollInterval)
@@ -188,7 +246,7 @@ func (s *Service) wait(ctx context.Context, c *model.Challenge) (model.Challenge
 			s.release(c.ID)
 			return cur.State, nil
 		}
-		if ctx.Err() != nil || !time.Now().Before(c.ExpiresAt) {
+		if !time.Now().Before(c.ExpiresAt) {
 			err := s.decide(bg, c.ID, model.StateTimeout)
 			if errors.Is(err, ErrGone) {
 				// Lost a race with a concurrent decision; loop to read it.
@@ -197,6 +255,9 @@ func (s *Service) wait(ctx context.Context, c *model.Challenge) (model.Challenge
 			if err != nil {
 				return model.StateDeny, err
 			}
+			return model.StateTimeout, nil
+		}
+		if ctx.Err() != nil {
 			return model.StateTimeout, nil
 		}
 	}

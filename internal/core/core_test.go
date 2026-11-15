@@ -211,6 +211,157 @@ func TestRetriedLoginJoinsPendingPush(t *testing.T) {
 	}
 }
 
+type loginResult struct {
+	state model.ChallengeState
+	err   error
+}
+
+// login runs alice's login on device from ip straight through core in the background, as the Duo
+// facade does; cancelling ctx drops the request.
+func login(ctx context.Context, h *testutil.Harness, device, ip string) <-chan loginResult {
+	out := make(chan loginResult, 1)
+	go func() {
+		state, err := h.Svc.Authenticate(ctx, core.AuthRequest{User: core.UserRef{Username: "alice"}, Device: device, IPAddr: ip})
+		out <- loginResult{state, err}
+	}()
+	return out
+}
+
+func awaitLogin(t *testing.T, ch <-chan loginResult) loginResult {
+	t.Helper()
+	select {
+	case r := <-ch:
+		return r
+	case <-time.After(20 * time.Second):
+		t.Fatal("login did not return")
+		return loginResult{}
+	}
+}
+
+// eventually fails t unless cond holds within a few seconds.
+func eventually(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); !cond(); time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+	}
+}
+
+func challengeID(t *testing.T, m ntfy.Message) string {
+	return strings.TrimPrefix(testutil.LocalPath(t, m.Click), "/challenge/")
+}
+
+// A login dropped by its client stops waiting, but the push stays up for the logins joined to it.
+func TestDroppedLoginLeavesJoinedLoginWaiting(t *testing.T) {
+	ctx := context.Background()
+	h := testutil.NewHarness(t, nil)
+	// Without a grace period, only the joined login keeps the push alive.
+	core.SetAbandonGrace(h.Svc, 0)
+	dev := h.Enroll(t, "alice", testutil.NewAuthenticator(t, testutil.PublicURL))
+
+	dropped, drop := context.WithCancel(ctx)
+	first := login(dropped, h, dev.DeviceID, testutil.LoginIP)
+	m := h.Ntfy.NextPublish(t)
+	id := challengeID(t, m)
+	second := h.StartLogin("alice", dev.DeviceID)
+	eventually(t, "the second login to join", func() bool { return core.Waiting(h.Svc, id) == 2 })
+	drop()
+	if r := awaitLogin(t, first); r.state != model.StateTimeout {
+		t.Fatalf("dropped login: %+v", r)
+	}
+	eventually(t, "the dropped login to leave", func() bool { return core.Waiting(h.Svc, id) == 1 })
+	if _, err := h.Svc.PendingChallenge(ctx, id); err != nil || len(h.Ntfy.Deleted()) != 0 {
+		t.Fatalf("challenge decided by a dropped login: %v, pushes cleared %v", err, h.Ntfy.Deleted())
+	}
+	if st := h.Approve(t, dev.Auth, m.Click); st != 200 {
+		t.Fatalf("approve: %d", st)
+	}
+	if r := testutil.Await(t, second); r.Response.Result != "allow" {
+		t.Fatalf("joined login: %+v", r.Response)
+	}
+}
+
+// Once the last login waiting on a push is dropped, the push stays up for a grace period, so a
+// retry rejoins it; with no retry it then times out and is cleared from the phone.
+func TestAbandonedPush(t *testing.T) {
+	ctx := context.Background()
+	const grace = time.Second
+	setup := func(t *testing.T) (*testutil.Harness, testutil.Enrolled, ntfy.Message) {
+		h := testutil.NewHarness(t, nil)
+		core.SetAbandonGrace(h.Svc, grace)
+		dev := h.Enroll(t, "alice", testutil.NewAuthenticator(t, testutil.PublicURL))
+		dropped, drop := context.WithCancel(ctx)
+		first := login(dropped, h, dev.DeviceID, testutil.LoginIP)
+		m := h.Ntfy.NextPublish(t)
+		eventually(t, "the login to wait", func() bool { return core.Waiting(h.Svc, challengeID(t, m)) == 1 })
+		drop()
+		if r := awaitLogin(t, first); r.state != model.StateTimeout {
+			t.Fatalf("dropped login: %+v", r)
+		}
+		return h, dev, m
+	}
+
+	t.Run("times out after the grace period", func(t *testing.T) {
+		h, dev, m := setup(t)
+		dropped := time.Now()
+		id := challengeID(t, m)
+		if _, err := h.Svc.PendingChallenge(ctx, id); err != nil {
+			t.Fatalf("challenge decided as soon as its login dropped: %v", err)
+		}
+		eventually(t, "the abandoned challenge to time out", func() bool {
+			_, err := h.Svc.PendingChallenge(ctx, id)
+			return errors.Is(err, core.ErrGone)
+		})
+		if waited := time.Since(dropped); waited < grace {
+			t.Fatalf("timed out %v after the drop, before the grace period", waited)
+		}
+		if got := h.Ntfy.Deleted(); len(got) != 1 || got[0] != dev.Topic+"/"+m.SequenceID {
+			t.Fatalf("deleted pushes %v", got)
+		}
+	})
+	t.Run("retry rejoins within the grace period", func(t *testing.T) {
+		h, dev, m := setup(t)
+		retry := h.StartLogin("alice", dev.DeviceID)
+		eventually(t, "the retry to join", func() bool { return core.Waiting(h.Svc, challengeID(t, m)) == 1 })
+		// Past the grace period the rejoined push is still up, and no second one was sent.
+		h.Ntfy.NoPublish(t, grace+500*time.Millisecond)
+		if st := h.Approve(t, dev.Auth, m.Click); st != 200 {
+			t.Fatalf("approve: %d", st)
+		}
+		if r := testutil.Await(t, retry); r.Response.Result != "allow" {
+			t.Fatalf("retried login: %+v", r.Response)
+		}
+	})
+}
+
+// Logins arriving together share one push: the first creates it, the others from its address join
+// it, and those from another address are refused.
+func TestSimultaneousLoginsSendOnePush(t *testing.T) {
+	h := testutil.NewHarness(t, nil)
+	dev := h.Enroll(t, "alice", testutil.NewAuthenticator(t, testutil.PublicURL))
+	ips := []string{testutil.LoginIP, testutil.LoginIP, testutil.LoginIP, "198.51.100.9", "198.51.100.9", "198.51.100.9"}
+	results := make([]<-chan loginResult, len(ips))
+	for i, ip := range ips {
+		results[i] = login(context.Background(), h, dev.DeviceID, ip)
+	}
+	m := h.Ntfy.NextPublish(t)
+	h.Ntfy.NoPublish(t, 500*time.Millisecond)
+	if st := h.Approve(t, dev.Auth, m.Click); st != 200 {
+		t.Fatalf("approve: %d", st)
+	}
+	for i, ip := range ips {
+		r := awaitLogin(t, results[i])
+		if strings.Contains(m.Message, ip) {
+			if r.state != model.StateAllow || r.err != nil {
+				t.Errorf("login from the push's address %s: %+v", ip, r)
+			}
+		} else if r.state != model.StateDeny || !errors.Is(r.err, core.ErrPushPending) {
+			t.Errorf("login from %s while another address's push was pending: %+v", ip, r)
+		}
+	}
+}
+
 func TestClonedPasskeyRefused(t *testing.T) {
 	h := testutil.NewHarness(t, nil)
 	auth := testutil.NewAuthenticator(t, testutil.PublicURL)
@@ -505,27 +656,25 @@ func TestRevokeWithNtfyReset(t *testing.T) {
 	}
 }
 
-func TestSyncedPasskeyRefused(t *testing.T) {
+// A phone passkey is synced (BE/BS) and attests "none", as iCloud Keychain's is: it enrolls and
+// approves sign-ins once the phone has verified the user, and is refused when it has not.
+func TestSyncedPasskeyWithoutAttestation(t *testing.T) {
 	h := testutil.NewHarness(t, nil)
 	a := testutil.NewAuthenticator(t, testutil.PublicURL)
 	a.Flags |= testutil.FlagBE | testutil.FlagBS
-	token, opts, _ := h.BeginEnroll(t, "alice", "", "Synced")
-	resp, b := h.Do(t, testutil.Request{Method: "POST", Path: "/enroll/finish?token=" + url.QueryEscape(token), Body: a.Create(t, opts), User: "alice"})
-	if resp.StatusCode != 403 || !strings.Contains(string(b), "synced") {
-		t.Fatalf("synced passkey: %d %s", resp.StatusCode, b)
+	dev := h.Enroll(t, "alice", a)
+	res := h.StartLogin("alice", dev.DeviceID)
+	if st := h.Approve(t, a, h.Ntfy.NextPublish(t).Click); st != 200 {
+		t.Fatalf("approve with a synced passkey: %d", st)
+	}
+	if r := testutil.Await(t, res); r.Response.Result != "allow" {
+		t.Fatalf("auth %+v", r.Response)
 	}
 
-	h = testutil.NewHarness(t, func(c *config.Config) { c.WebAuthnAllowSynced = true })
-	h.Enroll(t, "alice", a)
-}
-
-func TestRequireAttestationRefusesNone(t *testing.T) {
-	h := testutil.NewHarness(t, func(c *config.Config) { c.WebAuthnRequireAttestation = true })
-	a := testutil.NewAuthenticator(t, testutil.PublicURL)
-	token, opts, _ := h.BeginEnroll(t, "alice", "", "Phone")
-	resp, b := h.Do(t, testutil.Request{Method: "POST", Path: "/enroll/finish?token=" + url.QueryEscape(token), Body: a.Create(t, opts), User: "alice"})
-	if resp.StatusCode != 403 || !strings.Contains(string(b), "attestation") {
-		t.Fatalf("attestation none accepted: %d %s", resp.StatusCode, b)
+	unverified := testutil.NewAuthenticator(t, testutil.PublicURL)
+	unverified.Flags = testutil.FlagBE | testutil.FlagBS
+	if _, st, b := h.FinishEnroll(t, "alice", "", unverified); st != 403 {
+		t.Fatalf("synced passkey without user verification: %d %s", st, b)
 	}
 }
 
@@ -620,6 +769,7 @@ func TestProvisionRefusesUsernameThatReachesPushTopics(t *testing.T) {
 
 func TestEnrollLinkSingleUse(t *testing.T) {
 	h := testutil.NewHarness(t, nil)
+	h.Dir.Add("erin")
 	l, err := h.Svc.CreateEnrollLink(context.Background(), "erin", core.EnrollCodeTTL)
 	if err != nil {
 		t.Fatal(err)
@@ -631,6 +781,66 @@ func TestEnrollLinkSingleUse(t *testing.T) {
 	// A used code surfaces at begin, the page's first call.
 	if _, _, st := h.BeginEnroll(t, "", link, "Again"); st != 410 {
 		t.Fatalf("used link: %d", st)
+	}
+}
+
+// With a directory, only the people it lists may enroll, by any way in: the signed-in portal, an
+// enrollment link, or the IdP. A refusal leaves no account behind. Without a directory anyone the
+// proxy admits may enroll.
+func TestEnrollmentRequiresDirectoryMembership(t *testing.T) {
+	ctx := context.Background()
+	h := testutil.NewHarness(t, nil)
+	wantNoAccount := func(user string) {
+		t.Helper()
+		if _, _, err := h.Svc.DevicesOf(ctx, user); !errors.Is(err, core.ErrUnknownUser) || h.Ntfy.User(user) != nil {
+			t.Fatalf("refused enrollment left an account for %s: %v", user, err)
+		}
+	}
+
+	if _, _, err := h.Svc.BeginEnrollment(ctx, core.EnrollRequest{Username: "mallory"}); !errors.Is(err, core.ErrNotInDirectory) {
+		t.Fatalf("portal enrollment of an unlisted user: %v", err)
+	}
+	if _, err := h.Svc.StartIdPEnrollment(ctx, "mallory"); !errors.Is(err, core.ErrNotInDirectory) {
+		t.Fatalf("IdP enrollment of an unlisted user: %v", err)
+	}
+	wantNoAccount("mallory")
+
+	// A link minted while erin was listed stops working once the directory drops her.
+	h.Dir.Set(directory.Person{Username: "erin"})
+	l, err := h.Svc.CreateEnrollLink(ctx, "erin", core.EnrollCodeTTL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.Dir.Set()
+	if _, _, st := h.BeginEnroll(t, "", l.URL, "Phone"); st != 403 {
+		t.Fatalf("enrollment link of a dropped user: %d", st)
+	}
+	wantNoAccount("erin")
+
+	h = testutil.NewHarness(t, testutil.NoDirectory)
+	if _, err := h.Svc.StartIdPEnrollment(ctx, "mallory"); err != nil {
+		t.Fatalf("IdP enrollment without a directory: %v", err)
+	}
+}
+
+// Deleting a user voids the enrollment links issued to them, so a link minted before the delete
+// cannot recreate the account.
+func TestDeleteUserVoidsEnrollLinks(t *testing.T) {
+	ctx := context.Background()
+	h := testutil.NewHarness(t, nil)
+	h.Enroll(t, "erin", testutil.NewAuthenticator(t, testutil.PublicURL))
+	l, err := h.Svc.CreateEnrollLink(ctx, "erin", core.EnrollCodeTTL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Svc.DeleteUser(ctx, "erin"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, st := h.BeginEnroll(t, "", l.URL, "Phone"); st != 410 {
+		t.Fatalf("enrollment link after delete: %d", st)
+	}
+	if _, _, err := h.Svc.DevicesOf(ctx, "erin"); !errors.Is(err, core.ErrUnknownUser) {
+		t.Fatalf("enrollment link recreated the deleted user: %v", err)
 	}
 }
 
@@ -824,31 +1034,6 @@ func TestPendingLoginBlockedByLaterDisable(t *testing.T) {
 	})
 }
 
-func TestSyncedPasskeyLockedOutWhenPolicyTightened(t *testing.T) {
-	short := func(c *config.Config) { c.PushTimeout = config.Duration(2 * time.Second) }
-	h := testutil.NewHarness(t, func(c *config.Config) { short(c); c.WebAuthnAllowSynced = true })
-	a := testutil.NewAuthenticator(t, testutil.PublicURL)
-	a.Flags |= testutil.FlagBE | testutil.FlagBS
-	dev := h.Enroll(t, "alice", a)
-	res := h.StartLogin("alice", dev.DeviceID)
-	m := h.Ntfy.NextPublish(t)
-	path := testutil.LocalPath(t, m.Click)
-	// Options fetched while synced passkeys were allowed, asserted after they no longer are.
-	_, opts := h.Do(t, testutil.Request{Method: "GET", Path: path + "/options"})
-
-	h.Restart(t, func(c *config.Config) { c.WebAuthnAllowSynced = false })
-	resp, _ := h.Do(t, testutil.Request{Method: "POST", Path: path + "/assert", Body: a.Get(t, opts)})
-	if resp.StatusCode != 403 {
-		t.Fatalf("synced assertion after policy change: %d", resp.StatusCode)
-	}
-	if st := h.Approve(t, a, m.Click); st != 403 {
-		t.Fatalf("synced passkey approved after policy change: %d", st)
-	}
-	if r := testutil.Await(t, res); r.Response.Result != "deny" {
-		t.Fatalf("auth %+v", r.Response)
-	}
-}
-
 func TestRevokeResumesAfterNtfyFailure(t *testing.T) {
 	ctx := context.Background()
 	h := testutil.NewHarness(t, nil)
@@ -1026,6 +1211,7 @@ func TestResetRefusesForeignGrantUnderPushPrefix(t *testing.T) {
 func TestFailedEnrollmentKeepsCodeUsable(t *testing.T) {
 	ctx := context.Background()
 	h := testutil.NewHarness(t, nil)
+	h.Dir.Add("erin")
 	l, err := h.Svc.CreateEnrollLink(ctx, "erin", core.EnrollCodeTTL)
 	if err != nil {
 		t.Fatal(err)
@@ -1090,6 +1276,7 @@ func TestEnrollmentResultResend(t *testing.T) {
 func TestEnrollmentThroughCore(t *testing.T) {
 	ctx := context.Background()
 	h := testutil.NewHarness(t, nil)
+	h.Dir.Add("alice")
 	a := testutil.NewAuthenticator(t, testutil.PublicURL)
 
 	handle, _, err := h.Svc.BeginEnrollment(ctx, core.EnrollRequest{Username: "alice", DeviceName: "  Pixel 9 "})

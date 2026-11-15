@@ -70,9 +70,6 @@ type Config struct {
 	EnrollAccess          []string `yaml:"enroll-access"`
 	EnrollAccessReconcile bool     `yaml:"enroll-access-reconcile"`
 
-	WebAuthnAllowSynced        bool `yaml:"webauthn-allow-synced"`
-	WebAuthnRequireAttestation bool `yaml:"webauthn-require-attestation"`
-
 	Database string `yaml:"database"`
 
 	// The directory lists the people the shim keeps ntfy accounts for; it is polled every
@@ -120,10 +117,7 @@ func defaults() *Config {
 		DuoKeyGrace:     Duration(time.Hour),
 		NtfyTopicPrefix: "push-",
 		EnrollRole:      "user",
-		// A passkey without an attestation statement could come from any software authenticator;
-		// opting out is a deliberate loosening.
-		WebAuthnRequireAttestation: true,
-		Database:                   "/var/lib/ntfy-idp-push/db.sqlite",
+		Database:        "/var/lib/ntfy-idp-push/db.sqlite",
 
 		DirectorySyncInterval:             Duration(15 * time.Minute),
 		DirectoryLDAPUsersFilter:          "(objectClass=person)",
@@ -356,8 +350,8 @@ func (c *Config) readSecretFiles() error {
 }
 
 // RestartOnly lists the keys of next that differ from c and take effect only on a restart: the
-// listener and database are bound at startup, the WebAuthn relying party is built from public-url
-// and the webauthn-* keys, and the directory source and mail sender from the directory-*, smtp-*
+// listener and database are bound at startup, the WebAuthn relying party is built from public-url,
+// and the directory source and mail sender from the directory-*, smtp-*
 // and mail-* keys. Everything else applies to the next request after a reload.
 func (c *Config) RestartOnly(next *Config) []string {
 	var keys []string
@@ -369,8 +363,6 @@ func (c *Config) RestartOnly(next *Config) []string {
 	diff("listen-http", c.ListenHTTP != next.ListenHTTP)
 	diff("database", c.Database != next.Database)
 	diff("public-url", c.PublicURL != next.PublicURL)
-	diff("webauthn-allow-synced", c.WebAuthnAllowSynced != next.WebAuthnAllowSynced)
-	diff("webauthn-require-attestation", c.WebAuthnRequireAttestation != next.WebAuthnRequireAttestation)
 	// Existing devices keep topics under the old prefix, which the shim would then treat as foreign.
 	diff("ntfy-topic-prefix", c.NtfyTopicPrefix != next.NtfyTopicPrefix)
 	return append(keys, changedKeys(c, next, "directory-", "smtp-", "mail-")...)

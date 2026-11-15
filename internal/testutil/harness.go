@@ -89,8 +89,6 @@ func NewHarness(t *testing.T, mutate func(*config.Config)) *Harness {
 		SMTPHost:              "smtp.test",
 		SMTPPort:              587,
 		MailFrom:              "push@push.test",
-		// The software authenticator attests "none"; the opt-in default has its own config test.
-		WebAuthnRequireAttestation: false,
 	}
 	if mutate != nil {
 		mutate(cfg)
@@ -394,6 +392,10 @@ func enrollBase(t *testing.T, link string) (base, code string) {
 // the registration token and creation options.
 func (h *Harness) BeginEnroll(t *testing.T, user, link, name string) (string, json.RawMessage, int) {
 	t.Helper()
+	// Only people the directory lists may enroll, so the signed-in user is listed first.
+	if user != "" {
+		h.Dir.Add(user)
+	}
 	base, code := enrollBase(t, link)
 	body, _ := json.Marshal(map[string]string{"name": name, "code": code})
 	req := Request{Method: "POST", Path: base + "/begin", Body: body}

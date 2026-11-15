@@ -66,6 +66,12 @@ type IdPEnrollment struct {
 
 // StartIdPEnrollment provisions username and issues an enrollment link, the IdP-driven way in.
 func (s *Service) StartIdPEnrollment(ctx context.Context, username string) (*IdPEnrollment, error) {
+	if err := ValidUsername(username); err != nil {
+		return nil, err
+	}
+	if err := s.requireListed(ctx, username); err != nil {
+		return nil, err
+	}
 	u, err := s.provision(ctx, s.ntfy().Accounts(), username)
 	if err != nil {
 		return nil, err
@@ -156,6 +162,13 @@ func (s *Service) BeginEnrollment(ctx context.Context, r EnrollRequest) (handle 
 		}
 	}
 	name := deviceName(r.DeviceName)
+	if err := ValidUsername(username); err != nil {
+		return "", nil, err
+	}
+	// Checked again for a code: its user may have left the directory since it was minted.
+	if err := s.requireListed(ctx, username); err != nil {
+		return "", nil, err
+	}
 	u, err := s.ensureUser(ctx, username)
 	if err != nil {
 		return "", nil, err
@@ -256,8 +269,7 @@ func (s *Service) FinishEnrollment(ctx context.Context, handle, signedIn string,
 // responses, and verification failures. Verification detail is logged by the caller, never shown.
 func passkeyFailure(err error) error {
 	switch {
-	case errors.Is(err, webauthn.ErrSynced), errors.Is(err, webauthn.ErrNoUsableCredential),
-		errors.Is(err, webauthn.ErrNoAttestation), errors.Is(err, webauthn.ErrNotUserVerified):
+	case errors.Is(err, webauthn.ErrNotUserVerified):
 		return ErrPasskeyPolicy.because(err, true)
 	case errors.Is(err, webauthn.ErrMalformed):
 		return ErrMalformed.because(err, true)

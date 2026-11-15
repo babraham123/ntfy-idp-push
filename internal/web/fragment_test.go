@@ -27,6 +27,7 @@ func TestTokenSecretsTravelInFragment(t *testing.T) {
 		return resp.StatusCode, string(b)
 	}
 
+	h.Dir.Add("erin")
 	l, err := h.Svc.CreateEnrollLink(ctx, "erin", core.EnrollCodeTTL)
 	if err != nil {
 		t.Fatal(err)

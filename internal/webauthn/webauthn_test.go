@@ -15,9 +15,9 @@ import (
 
 var alice = &model.User{ID: "user-alice", Username: "alice"}
 
-func newRP(t *testing.T, allowSynced bool) *webauthn.RP {
+func newRP(t *testing.T) *webauthn.RP {
 	t.Helper()
-	rp, err := webauthn.New(webauthn.Config{RPID: "push.test", Origin: testutil.PublicURL, AllowSynced: allowSynced})
+	rp, err := webauthn.New(webauthn.Config{RPID: "push.test", Origin: testutil.PublicURL})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +51,7 @@ func loginOptions(t *testing.T, rp *webauthn.RP, pks []model.Passkey, n []byte) 
 }
 
 func TestRegisterThenLogin(t *testing.T) {
-	rp := newRP(t, false)
+	rp := newRP(t)
 	a := testutil.NewAuthenticator(t, testutil.PublicURL)
 	pk, err := register(t, rp, a)
 	if err != nil {
@@ -103,7 +103,7 @@ func TestRegisterThenLogin(t *testing.T) {
 }
 
 func TestLoginRefusals(t *testing.T) {
-	rp := newRP(t, false)
+	rp := newRP(t)
 	a := testutil.NewAuthenticator(t, testutil.PublicURL)
 	pk, err := register(t, rp, a)
 	if err != nil {
@@ -122,39 +122,30 @@ func TestLoginRefusals(t *testing.T) {
 	if _, err := rp.FinishLogin(alice.ID, []model.Passkey{pk}, nonce(t), bytes.NewReader(assertion)); err == nil {
 		t.Fatal("assertion over another nonce accepted")
 	}
-	a.Flags |= testutil.FlagBE | testutil.FlagBS
-	if _, err := rp.FinishLogin(alice.ID, []model.Passkey{pk}, n, bytes.NewReader(a.Get(t, loginOptions(t, rp, []model.Passkey{pk}, n)))); err == nil {
-		t.Fatal("backup-eligible assertion accepted")
-	}
 	a.Flags = 0
 	if _, err := rp.FinishLogin(alice.ID, []model.Passkey{pk}, n, bytes.NewReader(a.Get(t, loginOptions(t, rp, []model.Passkey{pk}, n)))); err == nil {
 		t.Fatal("assertion without user verification accepted")
 	}
 }
 
-func TestSyncedPasskeyPolicy(t *testing.T) {
-	strict, lenient := newRP(t, false), newRP(t, true)
+// Phone passkeys are synced (BE/BS) and attest "none": they register and sign in with user
+// verification, and are refused without it.
+func TestSyncedPasskey(t *testing.T) {
+	rp := newRP(t)
 	a := testutil.NewAuthenticator(t, testutil.PublicURL)
 	a.Flags |= testutil.FlagBE | testutil.FlagBS
-
-	if _, err := register(t, strict, a); !errors.Is(err, webauthn.ErrSynced) {
-		t.Fatalf("strict registration of a synced passkey: %v", err)
-	}
-	pk, err := register(t, lenient, a)
+	pk, err := register(t, rp, a)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("synced passkey registration: %v", err)
 	}
 	n := nonce(t)
-	assertion := a.Get(t, loginOptions(t, lenient, []model.Passkey{pk}, n))
-	if _, err := lenient.FinishLogin(alice.ID, []model.Passkey{pk}, n, bytes.NewReader(assertion)); err != nil {
-		t.Fatalf("lenient login with a synced passkey: %v", err)
+	if _, err := rp.FinishLogin(alice.ID, []model.Passkey{pk}, n, bytes.NewReader(a.Get(t, loginOptions(t, rp, []model.Passkey{pk}, n)))); err != nil {
+		t.Fatalf("synced passkey login: %v", err)
 	}
 
-	// A synced passkey enrolled while allowed is locked out once the policy is tightened.
-	if _, err := strict.BeginLogin(alice.ID, []model.Passkey{pk}, n); !errors.Is(err, webauthn.ErrNoUsableCredential) {
-		t.Fatalf("strict begin with a synced passkey: %v", err)
-	}
-	if _, err := strict.FinishLogin(alice.ID, []model.Passkey{pk}, n, bytes.NewReader(assertion)); !errors.Is(err, webauthn.ErrNoUsableCredential) {
-		t.Fatalf("strict finish with a synced passkey: %v", err)
+	unverified := testutil.NewAuthenticator(t, testutil.PublicURL)
+	unverified.Flags = testutil.FlagBE | testutil.FlagBS
+	if _, err := register(t, rp, unverified); err == nil {
+		t.Fatal("synced passkey without user verification registered")
 	}
 }

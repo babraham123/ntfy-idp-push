@@ -57,9 +57,13 @@ type Service struct {
 	mail mail.Sender
 
 	waitMu sync.Mutex
-	// waiters holds a channel per pending auth call challenge in this process, closed upon
-	// decision.
-	waiters map[string]chan struct{}
+	// waiting holds the auth calls in this process blocked on each pending challenge.
+	waiting map[string]*waiters
+	// abandonGrace is the abandonGrace constant, shortened by tests.
+	abandonGrace time.Duration
+	// pushing is held per device from looking for its pending push to creating a new one, so
+	// simultaneous logins share one push.
+	pushing keyedMutex
 
 	enrollMu sync.Mutex
 	// enrolling holds the passkey ceremonies begun in this process, by handle.
@@ -75,24 +79,20 @@ type Service struct {
 
 func New(cfg *config.Config, st *store.Store, log *slog.Logger, dir directory.Source, mailer mail.Sender) (*Service, error) {
 	pub, _ := url.Parse(cfg.PublicURL)
-	rp, err := webauthn.New(webauthn.Config{
-		RPID:               pub.Hostname(),
-		Origin:             cfg.PublicOrigin,
-		AllowSynced:        cfg.WebAuthnAllowSynced,
-		RequireAttestation: cfg.WebAuthnRequireAttestation,
-	})
+	rp, err := webauthn.New(webauthn.Config{RPID: pub.Hostname(), Origin: cfg.PublicOrigin})
 	if err != nil {
 		return nil, err
 	}
 	s := &Service{
-		store:     st,
-		rp:        rp,
-		Log:       log,
-		dir:       dir,
-		mail:      mailer,
-		waiters:   map[string]chan struct{}{},
-		enrolling: map[string]*pendingEnrollment{},
-		pushes:    map[string]*rate.Limiter{},
+		store:        st,
+		rp:           rp,
+		Log:          log,
+		dir:          dir,
+		mail:         mailer,
+		waiting:      map[string]*waiters{},
+		abandonGrace: abandonGrace,
+		enrolling:    map[string]*pendingEnrollment{},
+		pushes:       map[string]*rate.Limiter{},
 	}
 	s.cfg.Store(cfg)
 	s.ntfyc.Store(ntfy.New(cfg.NtfyBaseURL, cfg.NtfyAdminToken))

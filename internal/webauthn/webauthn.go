@@ -1,5 +1,5 @@
 // Package webauthn encapsulates go-webauthn, keeping its types internal while binding approvals to
-// device-bound passkeys.
+// user-verified passkeys.
 package webauthn
 
 import (
@@ -17,11 +17,7 @@ import (
 )
 
 var (
-	ErrSynced          = errors.New("synced passkeys are not allowed; use a device-bound passkey")
-	ErrNoAttestation   = errors.New("authenticator did not provide attestation")
 	ErrNotUserVerified = errors.New("user verification is required")
-	// ErrNoUsableCredential means every passkey of the device is excluded by policy (synced).
-	ErrNoUsableCredential = errors.New("no passkey of this device is allowed; enroll a device-bound passkey")
 	// ErrMalformed is a browser response that does not parse as WebAuthn JSON.
 	ErrMalformed = errors.New("malformed WebAuthn response")
 	// ErrCloned is an assertion whose signature counter did not advance past the stored one: a
@@ -30,15 +26,12 @@ var (
 )
 
 type Config struct {
-	RPID               string
-	Origin             string
-	AllowSynced        bool
-	RequireAttestation bool
+	RPID   string
+	Origin string
 }
 
 type RP struct {
-	wa  *gowebauthn.WebAuthn
-	cfg Config
+	wa *gowebauthn.WebAuthn
 }
 
 // Session tracks an in-progress registration.
@@ -57,10 +50,12 @@ func (o owner) WebAuthnCredentials() []gowebauthn.Credential { return o.creds }
 
 func New(cfg Config) (*RP, error) {
 	wa, err := gowebauthn.New(&gowebauthn.Config{
-		RPID:                  cfg.RPID,
-		RPDisplayName:         "ntfy-idp-push",
-		RPOrigins:             []string{cfg.Origin},
-		AttestationPreference: protocol.PreferDirectAttestation,
+		RPID:          cfg.RPID,
+		RPDisplayName: "ntfy-idp-push",
+		RPOrigins:     []string{cfg.Origin},
+		// Phone passkeys attest nothing that could be checked (iCloud Keychain sends none, Google
+		// Password Manager omits it), so asking for attestation would only add a consent prompt.
+		AttestationPreference: protocol.PreferNoAttestation,
 		AuthenticatorSelection: protocol.AuthenticatorSelection{
 			AuthenticatorAttachment: protocol.Platform,
 			ResidentKey:             protocol.ResidentKeyRequirementDiscouraged,
@@ -70,12 +65,11 @@ func New(cfg Config) (*RP, error) {
 			Login:        gowebauthn.TimeoutConfig{Enforce: true, Timeout: 2 * time.Minute},
 			Registration: gowebauthn.TimeoutConfig{Enforce: true, Timeout: 5 * time.Minute},
 		},
-		Filtering: &gowebauthn.FilteringConfig{ProhibitBackupEligibility: !cfg.AllowSynced},
 	})
 	if err != nil {
 		return nil, err
 	}
-	return &RP{wa: wa, cfg: cfg}, nil
+	return &RP{wa: wa}, nil
 }
 
 func registrant(u *model.User, deviceName string) owner {
@@ -92,15 +86,12 @@ func (rp *RP) BeginRegistration(u *model.User, deviceName string) (json.RawMessa
 	return b, Session{*session}, err
 }
 
-// FinishRegistration verifies attestation against the device-binding policy and returns the store
-// passkey and format.
+// FinishRegistration verifies a registration, requiring user verification, and returns the store
+// passkey and attestation format.
 func (rp *RP) FinishRegistration(u *model.User, session Session, attestation io.Reader) (_ model.Passkey, attestationFormat string, _ error) {
 	parsed, err := protocol.ParseCredentialCreationResponseBody(attestation)
 	if err != nil {
 		return model.Passkey{}, "", fmt.Errorf("%w: %w", ErrMalformed, describe(err))
-	}
-	if !rp.cfg.AllowSynced && parsed.Response.AttestationObject.AuthData.Flags.HasBackupEligible() {
-		return model.Passkey{}, "", ErrSynced
 	}
 	cred, err := rp.wa.CreateCredential(registrant(u, ""), session.data, parsed)
 	if err != nil {
@@ -108,9 +99,6 @@ func (rp *RP) FinishRegistration(u *model.User, session Session, attestation io.
 	}
 	if !cred.Flags.UserVerified {
 		return model.Passkey{}, "", ErrNotUserVerified
-	}
-	if rp.cfg.RequireAttestation && (cred.AttestationFormat == "" || cred.AttestationFormat == "none") {
-		return model.Passkey{}, "", ErrNoAttestation
 	}
 	b, err := json.Marshal(cred)
 	if err != nil {
@@ -120,28 +108,22 @@ func (rp *RP) FinishRegistration(u *model.User, session Session, attestation io.
 		cred.AttestationFormat, nil
 }
 
-// asserter filters login passkeys against the device-binding policy (since go-webauthn only filters
-// at registration).
-func (rp *RP) asserter(userID string, passkeys []model.Passkey) (owner, error) {
+// asserter is the WebAuthn user entity holding the device's stored passkeys.
+func asserter(userID string, passkeys []model.Passkey) (owner, error) {
 	o := owner{id: userID}
 	for _, p := range passkeys {
 		cred, err := unmarshal(p.CredentialJSON)
 		if err != nil {
 			return owner{}, err
 		}
-		if rp.cfg.AllowSynced || !cred.Flags.BackupEligible {
-			o.creds = append(o.creds, cred)
-		}
-	}
-	if len(o.creds) == 0 {
-		return owner{}, ErrNoUsableCredential
+		o.creds = append(o.creds, cred)
 	}
 	return o, nil
 }
 
 // loginSession is derived from the nonce, avoiding state outside the challenge row.
 func (rp *RP) loginSession(userID string, passkeys []model.Passkey, nonce []byte) (owner, *protocol.CredentialAssertion, *gowebauthn.SessionData, error) {
-	o, err := rp.asserter(userID, passkeys)
+	o, err := asserter(userID, passkeys)
 	if err != nil {
 		return owner{}, nil, nil, err
 	}
@@ -159,8 +141,8 @@ func (rp *RP) BeginLogin(userID string, passkeys []model.Passkey, nonce []byte) 
 	return json.Marshal(opts)
 }
 
-// FinishLogin verifies an assertion (UP/UV required, BE refused unless synced allowed, counter
-// advanced unless the authenticator keeps none) and returns the updated passkey.
+// FinishLogin verifies an assertion (UP/UV required, counter advanced unless the authenticator
+// keeps none) and returns the updated passkey.
 func (rp *RP) FinishLogin(userID string, passkeys []model.Passkey, nonce []byte, assertion io.Reader) (model.Passkey, error) {
 	o, _, session, err := rp.loginSession(userID, passkeys, nonce)
 	if err != nil {
@@ -176,9 +158,6 @@ func (rp *RP) FinishLogin(userID string, passkeys []model.Passkey, nonce []byte,
 	}
 	if !parsed.Response.AuthenticatorData.Flags.HasUserVerified() {
 		return model.Passkey{}, ErrNotUserVerified
-	}
-	if !rp.cfg.AllowSynced && parsed.Response.AuthenticatorData.Flags.HasBackupEligible() {
-		return model.Passkey{}, ErrSynced
 	}
 	if cred.Authenticator.CloneWarning {
 		return model.Passkey{}, ErrCloned

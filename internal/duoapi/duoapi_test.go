@@ -169,6 +169,7 @@ func TestHostHeaderMustMatch(t *testing.T) {
 
 func TestReplay(t *testing.T) {
 	h := testutil.NewHarness(t, nil)
+	h.Dir.Add("alice")
 	date := time.Now().UTC().Format(time.RFC1123Z)
 	// enroll has side effects: a replayed request is refused.
 	req := signedPOST{path: "/auth/v2/enroll", signed: url.Values{"username": {"alice"}}, date: date}
@@ -324,6 +325,7 @@ func TestV5SignedGET(t *testing.T) {
 func TestV5JSONEnrollAndStatus(t *testing.T) {
 	// authentik's duo_client signs JSON bodies with v5; duo_api_golang's JSONSignedCall does the same.
 	h := testutil.NewHarness(t, nil)
+	h.Dir.Add("carol")
 	duo := h.DuoClient()
 	_, body, err := duo.JSONSignedCall("POST", "/auth/v2/enroll", duoapigo.JSONParams{"username": "carol"}, duoapigo.UseTimeout)
 	if err != nil {

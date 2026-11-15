@@ -27,6 +27,17 @@ func (f *FakeDirectory) Set(people ...directory.Person) {
 	f.people = slices.Clone(people)
 }
 
+// Add lists a bare entry for each username the directory does not list yet.
+func (f *FakeDirectory) Add(usernames ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, u := range usernames {
+		if !slices.ContainsFunc(f.people, func(p directory.Person) bool { return p.Username == u }) {
+			f.people = append(f.people, directory.Person{Username: u})
+		}
+	}
+}
+
 // Fail makes every later List return err; nil restores listing.
 func (f *FakeDirectory) Fail(err error) {
 	f.mu.Lock()

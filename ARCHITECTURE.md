@@ -1,6 +1,6 @@
 # Architecture
 
-ntfy-idp-push implements the Duo **Auth API**, allowing identity providers (Authelia `duo_api`, authentik's Duo stage) to deliver mobile push via ntfy. ntfy acts only as the transport layer; sign-in approval requires a signature from a device-bound passkey.
+ntfy-idp-push implements the Duo **Auth API**, allowing identity providers (Authelia `duo_api`, authentik's Duo stage) to deliver mobile push via ntfy. ntfy acts only as the transport layer; sign-in approval requires a user-verified signature from the enrolled phone's passkey.
 
 ```
 browser ──1FA──▶ IdP ──signed Duo API──▶ proxy ──▶ ntfy-idp-push ──publish──▶ ntfy ──▶ phone (ntfy app)
@@ -34,7 +34,7 @@ internal/directory/  the user directory: LDAP (paged search, group filter)
 internal/mail/       the welcome email (text + HTML templates) and SMTP delivery (STARTTLS or implicit TLS)
 internal/model/      the records core reasons about and store persists (user, device, passkey, challenge, enrollment code)
 internal/routes/     the public URL scheme: path prefixes and the links core pushes, built and parsed in one place
-internal/webauthn/   passkey registration/assertion over stored passkeys (wraps go-webauthn); synced-passkey (BE flag) policy
+internal/webauthn/   passkey registration/assertion over stored passkeys (wraps go-webauthn); user verification required
 internal/web/        enrollment, approval and device pages; identity from the proxy's header
 internal/ntfy/       the ntfy adapter: accounts and grants, the login and setup pushes, the startup safety check; the wire format stays inside
 internal/store/      SQLite (modernc.org/sqlite, pure Go), migrations
@@ -87,7 +87,7 @@ Request validation order:
 
 `/auth/v2/auth` blocks up to `push-timeout`, extending its write deadline. Reloading `push-timeout` applies to subsequent requests.
 
-An `auth` for a device that already has a pending push from the same client address joins that push instead of sending another: every login waiting on it gets its decision. One from another address is denied (`status_msg: A sign-in request from another address is pending`), so one approval never admits a second party. Beyond that, each user gets a burst of 3 pushes refilled one per 30 s; further `auth` calls answer `deny` (`status_msg: Too many sign-in requests`) without touching the phone, so a stolen password cannot be turned into push bombing.
+An `auth` for a device that already has a pending push from the same client address joins that push instead of sending another: every login waiting on it gets its decision. Looking for the pending push and creating a new one happen under a per-device lock, so simultaneous logins share one push. A login whose client hangs up stops waiting without deciding the push; once no login waits on it, the push stays up for a short grace period so that a retry rejoins it, and then times out and is cleared from the phone. One from another address is denied (`status_msg: A sign-in request from another address is pending`), so one approval never admits a second party. Beyond that, each user gets a burst of 3 pushes refilled one per 30 s; further `auth` calls answer `deny` (`status_msg: Too many sign-in requests`) without touching the phone, so a stolen password cannot be turned into push bombing.
 
 Disabling a user or enabling the `push-disabled: true` kill switch causes preauth/auth to return `deny`. This affects in-flight logins: pending challenges are denied, and eligibility is re-verified upon approval and immediately before `auth` returns `allow`.
 
@@ -108,7 +108,7 @@ Disabling a user or enabling the `push-disabled: true` kill switch causes preaut
    }
    ```
 2. `/challenge/<id>` displays the request. It calls `navigator.credentials.get()` using the nonce as the challenge, the device's passkeys as `allowCredentials`, and requires user verification.
-3. `POST /challenge/<id>/assert` verifies origin, RP ID, nonce, UP+UV, device credential ownership, the BE flag (unless `webauthn-allow-synced`), and that the signature counter advanced when the authenticator keeps one (a stale counter means a second copy of the passkey has been signing; audited as `passkey_cloned`); a refused assertion is 403. State becomes `allow`.
+3. `POST /challenge/<id>/assert` verifies origin, RP ID, nonce, UP+UV, device credential ownership, and that the signature counter advanced when the authenticator keeps one (a stale counter means a second copy of the passkey has been signing; audited as `passkey_cloned`); a refused assertion is 403. State becomes `allow`.
 4. `POST /challenge/<id>/deny` with the deny token yields `deny`; "This wasn't me" yields `fraud`.
 5. The blocked `auth` wakes and responds to the IdP. The push is then deleted from the device (ntfy `DELETE /<topic>/<sequence_id>`).
 
@@ -130,13 +130,15 @@ The welcome sets a new random ntfy password and emails it with the server URL, a
 
 Entry points: `enroll-portal-url` (via preauth) to `/enroll` behind the proxy's forward-auth; or `enroll-link <user>`, generating a single-use `/token/#<code>` link (valid 5 minutes) to bootstrap users lacking a second factor. Both render the same page; it posts to `/enroll/begin` and `/enroll/finish` (identity routes) or `/token/begin` and `/token/finish` (code routes). A ceremony begun on one family cannot be finished on the other.
 
-1. **Passkey**: `navigator.credentials.create()` requires a platform authenticator, user verification, and direct attestation. Synced passkeys (BE flag) are rejected unless `webauthn-allow-synced`; a passkey with no attestation statement (`fmt: none`) is rejected unless `webauthn-require-attestation: false`.
+1. **Passkey**: `navigator.credentials.create()` requires a platform authenticator and user verification (UV flag), which on a phone means its biometric or device passcode; WebAuthn does not say which. Attestation is not requested and not checked: phone passkeys cannot offer any that vouches for the device (iCloud Keychain sends `fmt: none`, Google Password Manager sends none at all), and both are synced across the user's devices (BE flag), which is accepted.
 2. **ntfy account**: Provisioned as described in Provisioning.
 3. **Topic grant**: `PUT /v1/users/access` grants read-only access to the device's topic.
 4. **Link**: The result page hands out the device topic as `ntfy://<host>/<topic>?user=<u>` (plus `secure=false` for a plain-HTTP ntfy), laid out by User-Agent. Android gets a tap button whose link is the Chrome intent form, `intent://<host>/<topic>?user=<u>#Intent;scheme=ntfy;package=io.heckel.ntfy;end`, which opens ntfy's Play Store listing when the app is missing, with the server URL and topic to add by hand if the app does not subscribe. iOS gets the server URL and topic with copy buttons and the manual steps (+, "Use another server", Subscribe), because the ntfy iOS app does not open `ntfy://` links. Desktops get a QR of the link plus both. The link carries no credentials: the phone's ntfy app must already be signed in with the credentials from the welcome email. The page also offers "Resend setup push". The welcome email's topic links lead to `/subscribe/<topic>?user=<u>`, which lays out the same instructions for that topic, because mail clients drop `ntfy://` links; it serves only the user's `default-topics`, which name nothing secret.
 5. **Test push**: Sends a "Finish setup" action to `/token/verify/<device>#t=<token>` to activate the device. Unverified devices are hidden from preauth and purged after 24 hours.
 
-Execution order: verify attestation (read-only), claim the code and insert the unverified device/passkey in one transaction, then execute remote steps. Failed remote steps rollback the device and release the code for retry. Crashes leave unverified devices for the 24-hour purge.
+With a directory configured, only people it lists may enroll, by any entry point: `/enroll/begin`, `/token/begin` and the IdP's `enroll` check membership before creating the user, so an enrollment link stops working once its user leaves the directory. Deleting a user also deletes the enrollment codes issued to them.
+
+Execution order: verify the registration (read-only), claim the code and insert the unverified device/passkey in one transaction, then execute remote steps. Failed remote steps rollback the device and release the code for retry. Crashes leave unverified devices for the 24-hour purge.
 
 ### Identity
 
@@ -168,7 +170,7 @@ All actions are audited (`audit`).
 
 ## Configuration
 
-See [`deploy/server.yml`](deploy/server.yml). Configuration mirrors ntfy's `server.yml`. Set keys via `NTFY_IDP_PUSH_<KEY>`. Secrets (`duo-secret-key`, `duo-secret-key-previous`, `ntfy-admin-token`, `directory-ldap-password`, `smtp-password`) support `<key>-file` or `NTFY_IDP_PUSH_<KEY>_FILE`. `smtp-host` and `mail-from` are required; `directory-type` is `ldap` or empty for no directory. The directory source and the mail sender validate the rest of their keys at startup, without connecting; `serve` then checks the directory, if any. `SIGHUP` re-reads the configuration and applies it to the next request: keys, kill switch, `enroll-access`, `push-timeout`, `trusted-proxies`, `identity-header`, and the ntfy connection (`ntfy-base-url`, `ntfy-admin-token`, so a rotated token file takes effect without a restart). Keys bound at startup (`listen-http`, `database`, `public-url`, `webauthn-*`, `ntfy-topic-prefix`, and the `directory-*`, `smtp-*` and `mail-*` keys the directory source and mail sender are built from, secrets included) refuse the whole reload: the running configuration stays and the log names the keys.
+See [`deploy/server.yml`](deploy/server.yml). Configuration mirrors ntfy's `server.yml`. Set keys via `NTFY_IDP_PUSH_<KEY>`. Secrets (`duo-secret-key`, `duo-secret-key-previous`, `ntfy-admin-token`, `directory-ldap-password`, `smtp-password`) support `<key>-file` or `NTFY_IDP_PUSH_<KEY>_FILE`. `smtp-host` and `mail-from` are required; `directory-type` is `ldap` or empty for no directory. The directory source and the mail sender validate the rest of their keys at startup, without connecting; `serve` then checks the directory, if any. `SIGHUP` re-reads the configuration and applies it to the next request: keys, kill switch, `enroll-access`, `push-timeout`, `trusted-proxies`, `identity-header`, and the ntfy connection (`ntfy-base-url`, `ntfy-admin-token`, so a rotated token file takes effect without a restart). Keys bound at startup (`listen-http`, `database`, `public-url`, `ntfy-topic-prefix`, and the `directory-*`, `smtp-*` and `mail-*` keys the directory source and mail sender are built from, secrets included) refuse the whole reload: the running configuration stays and the log names the keys.
 
 ### Failures
 
@@ -192,7 +194,7 @@ auth-tokens: ["idp-push:tk_…:ntfy-idp-push"]
 
 ## Testing
 
-Integration tests execute `duo_api_golang` (v2 form and v5 JSON signing) against the handler `app` assembles for `serve`, using a fake ntfy (v2.30 error contract), a fake directory, a mail sender that records what it sends, and a software WebAuthn authenticator; the test client connects from the configured trusted proxy address and sets the identity header as forward-auth would. They cover directory sync (new users provisioned and welcomed once, dropped and disabled people deleted and recreated when they return, an admin's disable kept, deletions not held up by mail, one ntfy user listing per round, a broken directory skipping the round, failed and interrupted welcomes retried, concurrent welcomes), welcome resends and the welcome after a reset, enrollment (including the per-platform result page), push, joining a pending push, the per-user push cap, passkey approval, deny, fraud, timeout, revocation recovery, provisioning, proxy identity (untrusted peers, forged headers on bypassed routes), config reload (token rotation, refused restart-only keys), the CLI, and config loading. Tests read state through core; the harness's store handle only fabricates what another process would have left. Forms simulate browser submissions, matching referrer policy Origins.
+Integration tests execute `duo_api_golang` (v2 form and v5 JSON signing) against the handler `app` assembles for `serve`, using a fake ntfy (v2.30 error contract), a fake directory, a mail sender that records what it sends, and a software WebAuthn authenticator; the test client connects from the configured trusted proxy address and sets the identity header as forward-auth would. They cover directory sync (new users provisioned and welcomed once, dropped and disabled people deleted and recreated when they return, an admin's disable kept, deletions not held up by mail, one ntfy user listing per round, a broken directory skipping the round, failed and interrupted welcomes retried, concurrent welcomes), welcome resends and the welcome after a reset, enrollment (including the per-platform result page and directory membership), push, joining a pending push, simultaneous logins, dropped and retried logins, the per-user push cap, passkey approval, deny, fraud, timeout, revocation recovery, provisioning, proxy identity (untrusted peers, forged headers on bypassed routes), config reload (token rotation, refused restart-only keys), the CLI, and config loading. Tests read state through core; the harness's store handle only fabricates what another process would have left. Forms simulate browser submissions, matching referrer policy Origins.
 Live tests for `internal/ntfy` require a real ntfy server via `NTFY_IDP_PUSH_TEST_NTFY_URL`/`_TOKEN`.
 
 ## Other IdPs

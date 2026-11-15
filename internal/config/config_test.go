@@ -105,9 +105,6 @@ func TestNoDirectory(t *testing.T) {
 
 func TestDefaults(t *testing.T) {
 	d := defaults()
-	if !d.WebAuthnRequireAttestation {
-		t.Fatal("webauthn-require-attestation should default to true")
-	}
 	if d.DirectorySyncInterval.D() != 15*time.Minute || d.DirectoryLDAPUsersFilter != "(objectClass=person)" ||
 		d.DirectoryLDAPAttributeUsername != "uid" || d.DirectoryLDAPAttributeMail != "mail" ||
 		d.DirectoryLDAPAttributeDisplayName != "displayName" || d.DirectoryLDAPAttributeMemberOf != "memberOf" ||

@@ -137,9 +137,21 @@ func (s *Store) SetUserWelcomed(ctx context.Context, userID string, t *time.Time
 	return err
 }
 
+// DeleteUser removes the user and the enrollment codes issued to them, so a code minted before
+// the delete cannot bring the user back.
 func (s *Store) DeleteUser(ctx context.Context, userID string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM users WHERE id = ?`, userID)
-	return err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM enroll_codes WHERE username = (SELECT username FROM users WHERE id = ?)`, userID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM users WHERE id = ?`, userID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // ---- devices
