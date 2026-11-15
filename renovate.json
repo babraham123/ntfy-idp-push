@@ -27,6 +27,11 @@
       "minimumReleaseAge": "0 days"
     },
     {
+      "description": "Digest updates and lock file refreshes carry no release timestamp, so a release-age wait would hold them pending forever",
+      "matchUpdateTypes": ["digest", "lockFileMaintenance"],
+      "minimumReleaseAge": "0 days"
+    },
+    {
       "matchManagers": ["gomod"],
       "matchUpdateTypes": ["minor", "patch", "digest"],
       "groupName": "Go modules"
