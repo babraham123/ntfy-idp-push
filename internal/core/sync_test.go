@@ -124,6 +124,14 @@ func wantSyncCounts(t *testing.T, got core.SyncCounts, created, welcomed, delete
 	}
 }
 
+// wantEnrollAccess asserts that user's ntfy account holds the harness's enroll-access grants.
+func wantEnrollAccess(t *testing.T, h *testutil.Harness, user string) {
+	t.Helper()
+	if h.Ntfy.Grant(user, user+"-*") != config.PermReadWrite || h.Ntfy.Grant(user, "alerts") != config.PermReadOnly {
+		t.Fatalf("enroll-access not applied to %s: %+v", user, h.Ntfy.User(user))
+	}
+}
+
 func preauthResult(t *testing.T, h *testutil.Harness, user string) *authapi.PreauthResult {
 	t.Helper()
 	pre, err := h.Duo(testutil.IKey, testutil.SKey).Preauth(authapi.PreauthUsername(user))
@@ -140,9 +148,7 @@ func TestSyncProvisionsAndWelcomesOnce(t *testing.T) {
 	h.Dir.Set(carol, dave)
 	n := h.Sync(t)
 	for _, p := range []directory.Person{carol, dave} {
-		if h.Ntfy.Grant(p.Username, p.Username+"-*") != config.PermReadWrite || h.Ntfy.Grant(p.Username, "alerts") != config.PermReadOnly {
-			t.Fatalf("enroll-access not applied to %s: %+v", p.Username, h.Ntfy.User(p.Username))
-		}
+		wantEnrollAccess(t, h, p.Username)
 		checkWelcome(t, h, welcomeTo(t, h, p.Email, 1), p)
 		u := userNamed(t, h, p.Username)
 		if u.Email != p.Email || u.DisplayName != p.DisplayName || u.WelcomedAt == nil || u.SyncedAt == nil {
@@ -169,6 +175,62 @@ func TestSyncProvisionsAndWelcomesOnce(t *testing.T) {
 		t.Fatalf("profile not updated: %+v", u.User)
 	}
 	wantSyncCounts(t, n, 0, 0, 0, 1)
+}
+
+// Someone who opened /enroll and never finished has a user row but no ntfy grants. Once the
+// directory lists them, a round grants enroll-access before the welcome hands out a password, and
+// a later round applies an enroll-access change.
+func TestSyncGrantsAbandonedEnrollment(t *testing.T) {
+	h := testutil.NewHarness(t, nil)
+	if _, _, st := h.BeginEnroll(t, "carol", "", "Phone"); st != 200 {
+		t.Fatalf("begin enrollment: %d", st)
+	}
+	if h.Ntfy.User("carol") != nil {
+		t.Fatal("begin enrollment created the ntfy user")
+	}
+	h.Dir.Set(carol)
+	n := h.Sync(t)
+	wantEnrollAccess(t, h, "carol")
+	checkWelcome(t, h, welcomeTo(t, h, carol.Email, 1), carol)
+	wantSyncCounts(t, n, 0, 1, 0, 1)
+	wantSyncCounts(t, h.Sync(t), 0, 0, 0, 0)
+
+	h.Reload(t, func(c *config.Config) { c.EnrollAccess = []string{"${user}-*:rw", "alerts:ro", "news:ro"} })
+	wantSyncCounts(t, h.Sync(t), 0, 0, 0, 1)
+	wantEnrollAccess(t, h, "carol")
+	if h.Ntfy.Grant("carol", "news") != config.PermReadOnly {
+		t.Fatalf("enroll-access change not applied: %+v", h.Ntfy.User("carol"))
+	}
+	welcomeTo(t, h, carol.Email, 1)
+}
+
+// A first round where a grant call fails leaves an ntfy account without its grants. The next
+// round provisions it again, and the welcome provisions before it sets the password, so even when
+// that round's own attempt fails the password the email carries comes with enroll-access.
+func TestSyncRegrantsAfterPartialRound(t *testing.T) {
+	ctx := context.Background()
+	h := testutil.NewHarness(t, nil)
+	h.Dir.Set(carol)
+	h.Ntfy.FailNext("PUT", "/v1/users/access", 1)
+	if _, err := h.Svc.Sync(ctx); err == nil {
+		t.Fatal("sync hid the failed grant")
+	}
+	if u := h.Ntfy.User("carol"); u == nil || len(u.Grants) != 0 {
+		t.Fatalf("after the failed grant: %+v", u)
+	}
+	if len(h.Mail.Sent()) != 0 {
+		t.Fatal("a welcome went out with the account half provisioned")
+	}
+
+	h.Ntfy.FailNext("PUT", "/v1/users/access", 1)
+	n, err := h.Svc.Sync(ctx)
+	if err == nil {
+		t.Fatal("sync hid the failed grant")
+	}
+	wantSyncCounts(t, n, 0, 1, 0, 1)
+	wantEnrollAccess(t, h, "carol")
+	checkWelcome(t, h, welcomeTo(t, h, carol.Email, 1), carol)
+	wantSyncCounts(t, h.Sync(t), 0, 0, 0, 0)
 }
 
 // The directory decides who has an account: a user it stops listing is deleted with their phones

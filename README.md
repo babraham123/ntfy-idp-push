@@ -56,7 +56,7 @@ Setting `directory-type: ldap` enables automatic ntfy account provisioning, sync
 **Sync Behavior**
 * Runs at startup and every `directory-sync-interval` (default `15m`).
 * **Creates** accounts for new users, applies `enroll-access`, and emails a welcome (URL, username, random password, app links, login steps, and a link per `default-topics` entry to a `/subscribe` page that hands the phone the topic's `ntfy://` link, since mail clients drop `ntfy://` links).
-* **Updates** email and display name automatically.
+* **Updates** email and display name automatically, and re-applies `enroll-access` to accounts whose recorded grants differ from it.
 * **Deletes** accounts and devices for users missing from LDAP. Returning users get a fresh account and welcome email.
 * **Preserves** manual `user disable` states.
 

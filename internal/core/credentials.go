@@ -68,8 +68,8 @@ func (s *Service) welcome(ctx context.Context, acc *ntfy.Accounts, username stri
 	return true, nil
 }
 
-// sendWelcome replaces u's ntfy password and emails the new one. The account is created if it is
-// gone; its grants are provision's business.
+// sendWelcome replaces u's ntfy password and emails the new one. It provisions first, so the
+// account exists and holds its enroll-access grants before the password the email carries works.
 func (s *Service) sendWelcome(ctx context.Context, acc *ntfy.Accounts, u *model.User) error {
 	if u.Email == "" {
 		return ErrNoEmail
@@ -77,7 +77,7 @@ func (s *Service) sendWelcome(ctx context.Context, acc *ntfy.Accounts, u *model.
 	if !u.Enabled() {
 		return ErrUserDisabled
 	}
-	if err := acc.Ensure(ctx, u.Username); err != nil {
+	if _, err := s.provision(ctx, acc, u.Username); err != nil {
 		return err
 	}
 	password := token.Random(18)

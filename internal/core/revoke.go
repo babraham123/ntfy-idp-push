@@ -60,18 +60,39 @@ func (s *Service) revoke(ctx context.Context, acc *ntfy.Accounts, d *model.Devic
 		}
 		s.store.Audit(ctx, d.Username, "device_revoked", map[string]any{"device": d.ID, "by": r.Actor, "reset_ntfy_user": r.ResetNtfyUser})
 	}
+	if err := s.cleanUpRevoked(ctx, acc, d, r); err != nil {
+		return &RevokeIncomplete{err}
+	}
+	return nil
+}
+
+// RevokeIncomplete is a revocation that failed after the device was revoked locally: the device
+// can approve nothing more, and running the revocation again finishes the cleanup.
+type RevokeIncomplete struct{ err error }
+
+func (e *RevokeIncomplete) Error() string {
+	return "device revoked but cleanup failed; re-run to retry: " + e.err.Error()
+}
+func (e *RevokeIncomplete) Unwrap() error { return e.err }
+
+// cleanUpRevoked is what follows a device's local revocation: its pending logins denied, its
+// topic grant removed, the requested reset done, and its row deleted.
+func (s *Service) cleanUpRevoked(ctx context.Context, acc *ntfy.Accounts, d *model.Device, r Revocation) error {
 	if err := s.denyPending(ctx, store.ChallengeFilter{DeviceID: d.ID}); err != nil {
-		return err
+		return fmt.Errorf("deny pending logins: %w", err)
 	}
 	if err := s.revokeDeviceGrant(ctx, d); err != nil {
-		return fmt.Errorf("device revoked but its ntfy grant was not removed; re-run to retry: %w", err)
+		return fmt.Errorf("remove the ntfy grant: %w", err)
 	}
 	if r.ResetNtfyUser {
 		if err := s.finishReset(ctx, acc, d.Username); err != nil {
-			return fmt.Errorf("device revoked but the ntfy user was not reset; re-run to retry: %w", err)
+			return fmt.Errorf("reset the ntfy user: %w", err)
 		}
 	}
-	return s.store.DeleteDevice(ctx, d.ID)
+	if err := s.store.DeleteDevice(ctx, d.ID); err != nil {
+		return fmt.Errorf("delete the device: %w", err)
+	}
+	return nil
 }
 
 // ResetNtfyUser deletes and recreates the ntfy user to invalidate all its tokens (since ntfy lacks

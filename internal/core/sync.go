@@ -24,8 +24,8 @@ type SyncCounts struct {
 // Sync runs one directory sync round and reports what it changed; without a directory it refuses
 // with ErrNoDirectory and changes nothing. A directory that fails skips the round and changes nothing, since deletes
 // cannot be undone and a broken directory would delete everyone.
-// The round first reconciles accounts: it creates listed people, records profiles, and deletes
-// the users it manages that the directory no longer lists. Only then does it send owed welcomes, so
+// The round first reconciles accounts: it creates listed people, provisions again those whose
+// recorded grants are out of date, records profiles, and deletes the users it manages that the directory no longer lists. Only then does it send owed welcomes, so
 // a slow or failing mail server never holds up a deletion. A failure for one user does not stop
 // the round; every failure is logged, and they are returned together.
 func (s *Service) Sync(ctx context.Context) (SyncCounts, error) {
@@ -71,6 +71,13 @@ func (s *Service) Sync(ctx context.Context) (SyncCounts, error) {
 			continue
 		}
 		changed := u.Email != p.Email || u.DisplayName != p.DisplayName
+		regranted, err := s.regrant(ctx, acc, u)
+		if err != nil {
+			fail(p.Username, err)
+		}
+		if regranted != nil {
+			u, changed = regranted, true
+		}
 		if err := s.recordProfile(ctx, u, p, &now); err != nil {
 			fail(p.Username, err)
 			continue
@@ -121,6 +128,21 @@ func (s *Service) Sync(ctx context.Context) (SyncCounts, error) {
 		"failed": len(errs),
 	})
 	return n, errors.Join(errs...)
+}
+
+// regrant provisions u again when its recorded grants are not what provision would record now,
+// and returns the provisioned user, or nil when nothing needed doing. A row can exist without its
+// grants: an enrollment abandoned before the passkey, a first round where a grant call failed, or
+// an enroll-access change since. A disabled user is left until enabled, as provision refuses them.
+func (s *Service) regrant(ctx context.Context, acc *ntfy.Accounts, u *model.User) (*model.User, error) {
+	if !u.Enabled() {
+		return nil, nil
+	}
+	current, err := s.grantsCurrent(u)
+	if err != nil || current {
+		return nil, err
+	}
+	return s.provision(ctx, acc, u.Username)
 }
 
 // ProvisionFromDirectory provisions a user the directory lists, records their directory profile,

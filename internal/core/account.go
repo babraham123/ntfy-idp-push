@@ -12,6 +12,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"github.com/babraham123/ntfy-idp-push/internal/config"
 	"github.com/babraham123/ntfy-idp-push/internal/model"
@@ -46,11 +47,8 @@ func (s *Service) applyNtfyAccount(ctx context.Context, acc *ntfy.Accounts, u *m
 			return err
 		}
 	}
-	recorded := grants
-	if !s.Config().EnrollAccessReconcile {
-		// Keep remembering grants dropped from config so a later reconcile or reset can see them.
-		recorded = mergeGrants(grants, u.Grants)
-	} else {
+	recorded := s.recordedGrants(u, grants)
+	if s.Config().EnrollAccessReconcile {
 		for _, old := range u.Grants {
 			if !hasTopic(grants, old.Topic) {
 				if err := s.ntfy().ResetAccess(ctx, u.Username, old.Topic); err != nil {
@@ -64,6 +62,35 @@ func (s *Service) applyNtfyAccount(ctx context.Context, acc *ntfy.Accounts, u *m
 	}
 	u.Grants = recorded
 	return nil
+}
+
+// recordedGrants is what applyNtfyAccount records for u once grants are applied. Without
+// enroll-access-reconcile it keeps remembering grants dropped from config, so that a later
+// reconcile or reset can see them.
+func (s *Service) recordedGrants(u *model.User, grants []config.Grant) []config.Grant {
+	if s.Config().EnrollAccessReconcile {
+		return grants
+	}
+	return mergeGrants(grants, u.Grants)
+}
+
+// grantsCurrent reports whether provisioning u would leave its recorded grants as they are. It
+// reads only the store, so a round with nothing to change never asks ntfy.
+func (s *Service) grantsCurrent(u *model.User) (bool, error) {
+	grants, err := s.enrollGrants(u.Username)
+	if err != nil {
+		return false, err
+	}
+	want := s.recordedGrants(u, grants)
+	if len(want) != len(u.Grants) {
+		return false, nil
+	}
+	for _, g := range want {
+		if !slices.Contains(u.Grants, g) {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // convergeNtfyAccount brings u's ntfy account to the intended state, recreating it first when

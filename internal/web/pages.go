@@ -84,25 +84,19 @@ func (s *Server) revoke(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, routes.Devices, http.StatusSeeOther)
 		return
 	}
-	if m, ok := revokeMessages[core.ReasonOf(err)]; ok {
-		if m.status == http.StatusInternalServerError {
-			s.log.Error("revoke", "device", id, "err", err)
-		}
-		s.message(w, m.status, m.title, m.text)
-		return
+	var incomplete *core.RevokeIncomplete
+	switch {
+	case errors.As(err, &incomplete):
+		s.log.Error("revoke", "device", id, "err", err)
+		s.message(w, http.StatusInternalServerError, "Error",
+			"The phone can no longer approve sign-ins, but cleaning up its ntfy access failed. Try again.")
+	case errors.Is(err, core.ErrForeignGrants):
+		s.message(w, http.StatusConflict, "Ask an administrator",
+			"Your ntfy account has permissions this service did not set up, so it cannot sign out your ntfy apps for you. The phone was not revoked.")
+	case core.KindOf(err) == core.Internal:
+		s.log.Error("revoke", "device", id, "err", err)
+		s.message(w, http.StatusInternalServerError, "Error", "Couldn't revoke the phone. Try again.")
+	default:
+		s.pageFail(w, err, "revoke")
 	}
-	s.pageFail(w, err, "revoke")
-}
-
-// revokeMessages is what the devices page says for the revoke failures that core's reason does
-// not explain to a user by itself, by reason; "" is an internal failure, which has already
-// revoked the phone locally.
-var revokeMessages = map[core.Reason]struct {
-	status      int
-	title, text string
-}{
-	core.ErrForeignGrants.Reason: {http.StatusConflict, "Ask an administrator",
-		"Your ntfy account has permissions this service did not set up, so it cannot sign out your ntfy apps for you. The phone was not revoked."},
-	"": {http.StatusInternalServerError, "Error",
-		"The phone can no longer approve sign-ins, but cleaning up its ntfy access failed. Try again."},
 }
