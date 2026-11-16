@@ -269,7 +269,8 @@ func (s *Service) FinishEnrollment(ctx context.Context, handle, signedIn string,
 // responses, and verification failures. Verification detail is logged by the caller, never shown.
 func passkeyFailure(err error) error {
 	switch {
-	case errors.Is(err, webauthn.ErrNotUserVerified):
+	case errors.Is(err, webauthn.ErrSynced), errors.Is(err, webauthn.ErrNoUsableCredential),
+		errors.Is(err, webauthn.ErrNoAttestation), errors.Is(err, webauthn.ErrNotUserVerified):
 		return ErrPasskeyPolicy.because(err, true)
 	case errors.Is(err, webauthn.ErrMalformed):
 		return ErrMalformed.because(err, true)

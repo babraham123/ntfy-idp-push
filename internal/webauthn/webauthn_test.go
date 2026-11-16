@@ -8,6 +8,9 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/google/uuid"
+
+	"github.com/babraham123/ntfy-idp-push/internal/config"
 	"github.com/babraham123/ntfy-idp-push/internal/model"
 	"github.com/babraham123/ntfy-idp-push/internal/testutil"
 	"github.com/babraham123/ntfy-idp-push/internal/webauthn"
@@ -15,13 +18,32 @@ import (
 
 var alice = &model.User{ID: "user-alice", Username: "alice"}
 
+// newRP builds a relying party with the default policy: device-bound and attested, except the
+// phones' built-in providers.
 func newRP(t *testing.T) *webauthn.RP {
 	t.Helper()
-	rp, err := webauthn.New(webauthn.Config{RPID: "push.test", Origin: testutil.PublicURL})
+	var exempt []uuid.UUID
+	for _, a := range config.PhonePasskeyProviders {
+		exempt = append(exempt, uuid.MustParse(a))
+	}
+	return newRPWith(t, webauthn.Config{RequireAttestation: true, Exempt: exempt})
+}
+
+func newRPWith(t *testing.T, cfg webauthn.Config) *webauthn.RP {
+	t.Helper()
+	cfg.RPID, cfg.Origin = "push.test", testutil.PublicURL
+	rp, err := webauthn.New(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return rp
+}
+
+func login(t *testing.T, rp *webauthn.RP, a *testutil.Authenticator, pk model.Passkey) error {
+	t.Helper()
+	n := nonce(t)
+	_, err := rp.FinishLogin(alice.ID, []model.Passkey{pk}, n, bytes.NewReader(a.Get(t, loginOptions(t, rp, []model.Passkey{pk}, n))))
+	return err
 }
 
 func register(t *testing.T, rp *webauthn.RP, a *testutil.Authenticator) (model.Passkey, error) {
@@ -122,30 +144,66 @@ func TestLoginRefusals(t *testing.T) {
 	if _, err := rp.FinishLogin(alice.ID, []model.Passkey{pk}, nonce(t), bytes.NewReader(assertion)); err == nil {
 		t.Fatal("assertion over another nonce accepted")
 	}
+	a.Flags |= testutil.FlagBE | testutil.FlagBS
+	if _, err := rp.FinishLogin(alice.ID, []model.Passkey{pk}, n, bytes.NewReader(a.Get(t, loginOptions(t, rp, []model.Passkey{pk}, n)))); err == nil {
+		t.Fatal("backup-eligible assertion by a device-bound passkey accepted")
+	}
 	a.Flags = 0
 	if _, err := rp.FinishLogin(alice.ID, []model.Passkey{pk}, n, bytes.NewReader(a.Get(t, loginOptions(t, rp, []model.Passkey{pk}, n)))); err == nil {
 		t.Fatal("assertion without user verification accepted")
 	}
 }
 
-// Phone passkeys are synced (BE/BS) and attest "none": they register and sign in with user
-// verification, and are refused without it.
-func TestSyncedPasskey(t *testing.T) {
+// Passkeys must be device-bound and attested, except phone passkeys from the phones' built-in
+// providers, which are synced and attest "none"; user verification is required of all.
+func TestPasskeyPolicy(t *testing.T) {
 	rp := newRP(t)
-	a := testutil.NewAuthenticator(t, testutil.PublicURL)
-	a.Flags |= testutil.FlagBE | testutil.FlagBS
-	pk, err := register(t, rp, a)
-	if err != nil {
-		t.Fatalf("synced passkey registration: %v", err)
-	}
-	n := nonce(t)
-	if _, err := rp.FinishLogin(alice.ID, []model.Passkey{pk}, n, bytes.NewReader(a.Get(t, loginOptions(t, rp, []model.Passkey{pk}, n)))); err != nil {
-		t.Fatalf("synced passkey login: %v", err)
+	for _, aaguid := range config.PhonePasskeyProviders {
+		a := testutil.NewAuthenticator(t, testutil.PublicURL).AsPhonePasskey(t, aaguid)
+		pk, err := register(t, rp, a)
+		if err != nil {
+			t.Fatalf("phone passkey from %s: %v", aaguid, err)
+		}
+		if err := login(t, rp, a, pk); err != nil {
+			t.Fatalf("phone passkey login from %s: %v", aaguid, err)
+		}
 	}
 
-	unverified := testutil.NewAuthenticator(t, testutil.PublicURL)
-	unverified.Flags = testutil.FlagBE | testutil.FlagBS
-	if _, err := register(t, rp, unverified); err == nil {
-		t.Fatal("synced passkey without user verification registered")
+	const otherProvider = "d548826e-79b4-db40-a3d8-11116f7e8349" // a third-party password manager
+	// want is the policy error, or nil where go-webauthn refuses first.
+	for name, tc := range map[string]struct {
+		a    *testutil.Authenticator
+		want error
+	}{
+		"synced, other provider": {testutil.NewAuthenticator(t, testutil.PublicURL).AsPhonePasskey(t, otherProvider), webauthn.ErrSynced},
+		"synced, no provider":    {testutil.NewAuthenticator(t, testutil.PublicURL).AsPhonePasskey(t, uuid.Nil.String()), webauthn.ErrSynced},
+		"device-bound, unattested": {func() *testutil.Authenticator {
+			a := testutil.NewAuthenticator(t, testutil.PublicURL)
+			a.Unattested = true
+			return a
+		}(), webauthn.ErrNoAttestation},
+		"exempt, no user verification": {func() *testutil.Authenticator {
+			a := testutil.NewAuthenticator(t, testutil.PublicURL).AsPhonePasskey(t, config.AAGUIDGooglePasswordManager)
+			a.Flags &^= testutil.FlagUV
+			return a
+		}(), nil},
+	} {
+		if _, err := register(t, rp, tc.a); err == nil || tc.want != nil && !errors.Is(err, tc.want) {
+			t.Fatalf("%s: %v, want %v", name, err, tc.want)
+		}
+	}
+
+	// A passkey enrolled under a looser policy is locked out once it is tightened.
+	lenient := newRPWith(t, webauthn.Config{AllowSynced: true})
+	a := testutil.NewAuthenticator(t, testutil.PublicURL).AsPhonePasskey(t, otherProvider)
+	pk, err := register(t, lenient, a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := login(t, lenient, a, pk); err != nil {
+		t.Fatalf("lenient login: %v", err)
+	}
+	if _, err := rp.BeginLogin(alice.ID, []model.Passkey{pk}, nonce(t)); !errors.Is(err, webauthn.ErrNoUsableCredential) {
+		t.Fatalf("strict begin with a synced passkey: %v", err)
 	}
 }

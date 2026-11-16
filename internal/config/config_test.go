@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -105,11 +106,26 @@ func TestNoDirectory(t *testing.T) {
 
 func TestDefaults(t *testing.T) {
 	d := defaults()
+	if !d.WebAuthnRequireAttestation || d.WebAuthnAllowSynced || !reflect.DeepEqual(d.WebAuthnExemptAAGUIDs, PhonePasskeyProviders) {
+		t.Fatalf("passkeys should be device-bound and attested except the phones' built-in providers: %+v", d)
+	}
 	if d.DirectorySyncInterval.D() != 15*time.Minute || d.DirectoryLDAPUsersFilter != "(objectClass=person)" ||
 		d.DirectoryLDAPAttributeUsername != "uid" || d.DirectoryLDAPAttributeMail != "mail" ||
 		d.DirectoryLDAPAttributeDisplayName != "displayName" || d.DirectoryLDAPAttributeMemberOf != "memberOf" ||
 		d.SMTPPort != 587 || !d.SMTPStartTLS {
 		t.Fatalf("directory and smtp defaults: %+v", d)
+	}
+}
+
+func TestExemptAAGUIDs(t *testing.T) {
+	c := valid()
+	c.WebAuthnExemptAAGUIDs = []string{AAGUIDGooglePasswordManager}
+	if err := c.Validate(); err != nil || len(c.WebAuthnExempt) != 1 || c.WebAuthnExempt[0].String() != AAGUIDGooglePasswordManager {
+		t.Fatalf("exempt AAGUIDs %v: %v", c.WebAuthnExempt, err)
+	}
+	c.WebAuthnExemptAAGUIDs = []string{"Google Password Manager"}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "webauthn-exempt-aaguids") {
+		t.Fatalf("a provider name instead of its AAGUID: %v", err)
 	}
 }
 

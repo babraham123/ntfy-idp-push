@@ -79,7 +79,13 @@ type Service struct {
 
 func New(cfg *config.Config, st *store.Store, log *slog.Logger, dir directory.Source, mailer mail.Sender) (*Service, error) {
 	pub, _ := url.Parse(cfg.PublicURL)
-	rp, err := webauthn.New(webauthn.Config{RPID: pub.Hostname(), Origin: cfg.PublicOrigin})
+	rp, err := webauthn.New(webauthn.Config{
+		RPID:               pub.Hostname(),
+		Origin:             cfg.PublicOrigin,
+		AllowSynced:        cfg.WebAuthnAllowSynced,
+		RequireAttestation: cfg.WebAuthnRequireAttestation,
+		Exempt:             cfg.WebAuthnExempt,
+	})
 	if err != nil {
 		return nil, err
 	}

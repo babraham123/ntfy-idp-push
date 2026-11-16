@@ -89,6 +89,9 @@ func NewHarness(t *testing.T, mutate func(*config.Config)) *Harness {
 		SMTPHost:              "smtp.test",
 		SMTPPort:              587,
 		MailFrom:              "push@push.test",
+		// The production passkey policy; the default Authenticator is device-bound and attested.
+		WebAuthnRequireAttestation: true,
+		WebAuthnExemptAAGUIDs:      config.PhonePasskeyProviders,
 	}
 	if mutate != nil {
 		mutate(cfg)

@@ -1,6 +1,6 @@
 # ntfy-idp-push
 
-ntfy-idp-push replaces the Duo Auth API to deliver secure mobile push notifications over [ntfy](https://ntfy.sh) for Authelia and authentik. ntfy acts only as transport; approvals require a passkey signature from the enrolled phone, made after its biometric or passcode check. See [ARCHITECTURE.md](ARCHITECTURE.md) for design details.
+ntfy-idp-push replaces the Duo Auth API to deliver secure mobile push notifications over [ntfy](https://ntfy.sh) for Authelia and authentik. ntfy acts only as transport; approvals require a passkey signature from the enrolled phone, made after its biometric or passcode check. The passkey must be device-bound, or come from the phone's built-in password manager (iCloud Keychain, Google Password Manager, Samsung Pass). See [ARCHITECTURE.md](ARCHITECTURE.md) for design details.
 
 Accounts follow your LDAP directory: the shim polls it, creates an ntfy account for each new person, emails them a welcome with their ntfy password, and deletes accounts the directory drops. Without a directory, `user provision <user> --email <addr>` creates each account. Users enroll their phone's passkey at `/enroll`.
 
@@ -47,7 +47,7 @@ volumes:
 
 Build the local image with `make image`. Execute CLI commands inside the container using `docker compose -f deploy/compose.yaml exec ntfy-idp-push ntfy-idp-push <command>`.
 
-**Configuration:** Set keys from [`deploy/server.yml`](deploy/server.yml) via environment variables as `NTFY_IDP_PUSH_<KEY>`. Load secrets (`duo-secret-key`, `duo-secret-key-previous`, `ntfy-admin-token`, `directory-ldap-password`, `smtp-password`) from files using `<key>-file` or `NTFY_IDP_PUSH_<KEY>_FILE` (ideal for Docker secrets or systemd credentials). Reload per-request settings (`push-disabled`, keys, secret files including a rotated `ntfy-admin-token`, `enroll-access`, `push-timeout`, `trusted-proxies`, `identity-header`) with `SIGHUP` (`docker compose kill -s HUP`). A reload that changes `listen-http`, `database`, `public-url`, `ntfy-topic-prefix`, or any `directory-*`, `smtp-*` or `mail-*` key (their secret files included) is refused and logged; restart instead.
+**Configuration:** Set keys from [`deploy/server.yml`](deploy/server.yml) via environment variables as `NTFY_IDP_PUSH_<KEY>`. Load secrets (`duo-secret-key`, `duo-secret-key-previous`, `ntfy-admin-token`, `directory-ldap-password`, `smtp-password`) from files using `<key>-file` or `NTFY_IDP_PUSH_<KEY>_FILE` (ideal for Docker secrets or systemd credentials). Reload per-request settings (`push-disabled`, keys, secret files including a rotated `ntfy-admin-token`, `enroll-access`, `push-timeout`, `trusted-proxies`, `identity-header`) with `SIGHUP` (`docker compose kill -s HUP`). A reload that changes `listen-http`, `database`, `public-url`, `webauthn-*`, `ntfy-topic-prefix`, or any `directory-*`, `smtp-*` or `mail-*` key (their secret files included) is refused and logged; restart instead.
 
 ## Sync and enrollment
 

@@ -656,25 +656,29 @@ func TestRevokeWithNtfyReset(t *testing.T) {
 	}
 }
 
-// A phone passkey is synced (BE/BS) and attests "none", as iCloud Keychain's is: it enrolls and
-// approves sign-ins once the phone has verified the user, and is refused when it has not.
-func TestSyncedPasskeyWithoutAttestation(t *testing.T) {
+// A phone passkey from iCloud Keychain or Google Password Manager is synced (BE/BS) and attests
+// "none": it enrolls and approves sign-ins once the phone has verified the user. The same passkey
+// from any other provider is refused.
+func TestPhonePasskey(t *testing.T) {
 	h := testutil.NewHarness(t, nil)
-	a := testutil.NewAuthenticator(t, testutil.PublicURL)
-	a.Flags |= testutil.FlagBE | testutil.FlagBS
+	a := testutil.NewAuthenticator(t, testutil.PublicURL).AsPhonePasskey(t, config.AAGUIDApplePasswords)
 	dev := h.Enroll(t, "alice", a)
 	res := h.StartLogin("alice", dev.DeviceID)
 	if st := h.Approve(t, a, h.Ntfy.NextPublish(t).Click); st != 200 {
-		t.Fatalf("approve with a synced passkey: %d", st)
+		t.Fatalf("approve with a phone passkey: %d", st)
 	}
 	if r := testutil.Await(t, res); r.Response.Result != "allow" {
 		t.Fatalf("auth %+v", r.Response)
 	}
 
-	unverified := testutil.NewAuthenticator(t, testutil.PublicURL)
-	unverified.Flags = testutil.FlagBE | testutil.FlagBS
+	other := testutil.NewAuthenticator(t, testutil.PublicURL).AsPhonePasskey(t, "d548826e-79b4-db40-a3d8-11116f7e8349")
+	if _, st, b := h.FinishEnroll(t, "alice", "", other); st != 403 || !strings.Contains(string(b), "built-in password manager") {
+		t.Fatalf("synced passkey from another provider: %d %s", st, b)
+	}
+	unverified := testutil.NewAuthenticator(t, testutil.PublicURL).AsPhonePasskey(t, config.AAGUIDGooglePasswordManager)
+	unverified.Flags &^= testutil.FlagUV
 	if _, st, b := h.FinishEnroll(t, "alice", "", unverified); st != 403 {
-		t.Fatalf("synced passkey without user verification: %d %s", st, b)
+		t.Fatalf("phone passkey without user verification: %d %s", st, b)
 	}
 }
 

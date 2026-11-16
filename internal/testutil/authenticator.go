@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/fxamacker/cbor/v2"
+	"github.com/google/uuid"
 )
 
 // Authenticator flags (WebAuthn §6.1).
@@ -23,13 +24,31 @@ const (
 )
 
 // Authenticator simulates a software platform authenticator generating WebAuthn browser payloads.
+// By default it is device-bound and self-attests ("packed"), which the default policy accepts.
 type Authenticator struct {
 	Origin string
 	// Flags are set on every response in addition to UP (and AT on registration).
-	Flags  byte
-	CredID []byte
-	key    *ecdsa.PrivateKey
-	count  uint32
+	Flags byte
+	// AAGUID names the passkey provider; zero by default.
+	AAGUID []byte
+	// Unattested registers with fmt "none", as phone passkey providers do.
+	Unattested bool
+	CredID     []byte
+	key        *ecdsa.PrivateKey
+	count      uint32
+}
+
+// AsPhonePasskey makes the passkey synced and unattested and from the provider aaguid names, as
+// phone platform passkeys are.
+func (a *Authenticator) AsPhonePasskey(t *testing.T, aaguid string) *Authenticator {
+	t.Helper()
+	id, err := uuid.Parse(aaguid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.AAGUID, a.Unattested = id[:], true
+	a.Flags |= FlagBE | FlagBS
+	return a
 }
 
 func NewAuthenticator(t *testing.T, origin string) *Authenticator {
@@ -83,15 +102,19 @@ func (a *Authenticator) Create(t *testing.T, options json.RawMessage) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
-	attested := make([]byte, 16) // zero AAGUID
+	attested := make([]byte, 16)
+	copy(attested, a.AAGUID)
 	attested = binary.BigEndian.AppendUint16(attested, uint16(len(a.CredID)))
 	attested = append(attested, a.CredID...)
 	attested = append(attested, cose...)
-	attObj, err := cbor.Marshal(map[string]any{
-		"fmt":      "none",
-		"attStmt":  map[string]any{},
-		"authData": a.authData(o.PublicKey.RP.ID, FlagUP|FlagAT|a.Flags, attested),
-	})
+	cd := a.clientData("webauthn.create", o.PublicKey.Challenge)
+	ad := a.authData(o.PublicKey.RP.ID, FlagUP|FlagAT|a.Flags, attested)
+	format, stmt := "none", map[string]any{}
+	if !a.Unattested {
+		// Self attestation: the credential key signs authData || SHA-256(clientDataJSON).
+		format, stmt = "packed", map[string]any{"alg": -7, "sig": a.sign(t, ad, cd)}
+	}
+	attObj, err := cbor.Marshal(map[string]any{"fmt": format, "attStmt": stmt, "authData": ad})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +125,7 @@ func (a *Authenticator) Create(t *testing.T, options json.RawMessage) []byte {
 		"authenticatorAttachment": "platform",
 		"clientExtensionResults":  map[string]any{},
 		"response": map[string]any{
-			"clientDataJSON":    b64.EncodeToString(a.clientData("webauthn.create", o.PublicKey.Challenge)),
+			"clientDataJSON":    b64.EncodeToString(cd),
 			"attestationObject": b64.EncodeToString(attObj),
 			"transports":        []string{"internal"},
 		},
@@ -120,12 +143,7 @@ func (a *Authenticator) Get(t *testing.T, options json.RawMessage) []byte {
 	a.count++
 	cd := a.clientData("webauthn.get", o.PublicKey.Challenge)
 	ad := a.authData(o.PublicKey.RPID, FlagUP|a.Flags, nil)
-	cdHash := sha256.Sum256(cd)
-	digest := sha256.Sum256(append(append([]byte{}, ad...), cdHash[:]...))
-	sig, err := ecdsa.SignASN1(rand.Reader, a.key, digest[:])
-	if err != nil {
-		t.Fatal(err)
-	}
+	sig := a.sign(t, ad, cd)
 	b, _ := json.Marshal(map[string]any{
 		"id":                      b64.EncodeToString(a.CredID),
 		"rawId":                   b64.EncodeToString(a.CredID),
@@ -139,4 +157,16 @@ func (a *Authenticator) Get(t *testing.T, options json.RawMessage) []byte {
 		},
 	})
 	return b
+}
+
+// sign is the credential key's signature over authData || SHA-256(clientDataJSON).
+func (a *Authenticator) sign(t *testing.T, authData, clientData []byte) []byte {
+	t.Helper()
+	cdHash := sha256.Sum256(clientData)
+	digest := sha256.Sum256(append(append([]byte{}, authData...), cdHash[:]...))
+	sig, err := ecdsa.SignASN1(rand.Reader, a.key, digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sig
 }

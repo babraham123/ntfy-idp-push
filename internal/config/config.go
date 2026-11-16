@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"gopkg.in/yaml.v3"
 )
 
@@ -70,6 +71,12 @@ type Config struct {
 	EnrollAccess          []string `yaml:"enroll-access"`
 	EnrollAccessReconcile bool     `yaml:"enroll-access-reconcile"`
 
+	// Passkeys must be device-bound (no BE flag) and attested, except those whose AAGUID names a
+	// provider in webauthn-exempt-aaguids: phone platform passkeys are synced and attest nothing.
+	WebAuthnAllowSynced        bool     `yaml:"webauthn-allow-synced"`
+	WebAuthnRequireAttestation bool     `yaml:"webauthn-require-attestation"`
+	WebAuthnExemptAAGUIDs      []string `yaml:"webauthn-exempt-aaguids"`
+
 	Database string `yaml:"database"`
 
 	// The directory lists the people the shim keeps ntfy accounts for; it is polled every
@@ -105,8 +112,21 @@ type Config struct {
 	Access         []AccessRule `yaml:"-"`
 	TrustedNets    []*net.IPNet `yaml:"-"`
 	PublicOrigin   string       `yaml:"-"`
+	WebAuthnExempt []uuid.UUID  `yaml:"-"`
 	previousKeyEnd time.Time
 }
+
+// AAGUIDs of the phones' built-in passkey providers, as browsers report them
+// (github.com/passkeydeveloper/passkey-authenticator-aaguids).
+const (
+	AAGUIDApplePasswords        = "fbfc3007-154e-4ecc-8c0b-6e020557d7bd" // iCloud Keychain
+	AAGUIDAppleManaged          = "dd4ec289-e01d-41c9-bb89-70fa845d4bf2" // iCloud Keychain on a managed device
+	AAGUIDGooglePasswordManager = "ea9b8d66-4d01-1d21-3ce4-b6b48cb575d4"
+	AAGUIDSamsungPass           = "53414d53-554e-4700-0000-000000000000"
+)
+
+// PhonePasskeyProviders are the default webauthn-exempt-aaguids.
+var PhonePasskeyProviders = []string{AAGUIDApplePasswords, AAGUIDAppleManaged, AAGUIDGooglePasswordManager, AAGUIDSamsungPass}
 
 func defaults() *Config {
 	return &Config{
@@ -117,7 +137,11 @@ func defaults() *Config {
 		DuoKeyGrace:     Duration(time.Hour),
 		NtfyTopicPrefix: "push-",
 		EnrollRole:      "user",
-		Database:        "/var/lib/ntfy-idp-push/db.sqlite",
+		// A passkey without an attestation statement could come from any software authenticator;
+		// opting out is a deliberate loosening.
+		WebAuthnRequireAttestation: true,
+		WebAuthnExemptAAGUIDs:      append([]string(nil), PhonePasskeyProviders...),
+		Database:                   "/var/lib/ntfy-idp-push/db.sqlite",
 
 		DirectorySyncInterval:             Duration(15 * time.Minute),
 		DirectoryLDAPUsersFilter:          "(objectClass=person)",
@@ -281,6 +305,16 @@ func (c *Config) Validate() error {
 		c.TrustedNets = append(c.TrustedNets, n)
 	}
 
+	c.WebAuthnExempt = nil
+	for _, a := range c.WebAuthnExemptAAGUIDs {
+		id, err := uuid.Parse(a)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("webauthn-exempt-aaguids: %q: %w", a, err))
+			continue
+		}
+		c.WebAuthnExempt = append(c.WebAuthnExempt, id)
+	}
+
 	// Refusing roles other than "user" prevents enrollment from escalating to ntfy admin.
 	if c.EnrollRole != "user" {
 		errs = append(errs, fmt.Errorf("enroll-role must be \"user\", got %q", c.EnrollRole))
@@ -350,8 +384,8 @@ func (c *Config) readSecretFiles() error {
 }
 
 // RestartOnly lists the keys of next that differ from c and take effect only on a restart: the
-// listener and database are bound at startup, the WebAuthn relying party is built from public-url,
-// and the directory source and mail sender from the directory-*, smtp-*
+// listener and database are bound at startup, the WebAuthn relying party is built from public-url
+// and the webauthn-* keys, and the directory source and mail sender from the directory-*, smtp-*
 // and mail-* keys. Everything else applies to the next request after a reload.
 func (c *Config) RestartOnly(next *Config) []string {
 	var keys []string
@@ -365,7 +399,7 @@ func (c *Config) RestartOnly(next *Config) []string {
 	diff("public-url", c.PublicURL != next.PublicURL)
 	// Existing devices keep topics under the old prefix, which the shim would then treat as foreign.
 	diff("ntfy-topic-prefix", c.NtfyTopicPrefix != next.NtfyTopicPrefix)
-	return append(keys, changedKeys(c, next, "directory-", "smtp-", "mail-")...)
+	return append(keys, changedKeys(c, next, "webauthn-", "directory-", "smtp-", "mail-")...)
 }
 
 // changedKeys lists the keys with one of prefixes whose values differ between a and b, in field

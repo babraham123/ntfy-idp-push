@@ -39,6 +39,18 @@ enroll-access:
   - "alerts:ro"
 enroll-access-reconcile: false
 
+# Passkeys must be device-bound and attested, except those from the phones' built-in password
+# managers, which are synced and attest nothing. The AAGUID a passkey reports names its provider;
+# without attestation nothing vouches for it, so the exemption steers honest users but does not stop
+# a client that lies. Defaults: Apple Passwords (iCloud Keychain), its managed-device variant,
+# Google Password Manager, and Samsung Pass.
+webauthn-allow-synced: false
+webauthn-require-attestation: true
+webauthn-exempt-aaguids:
+  - "fbfc3007-154e-4ecc-8c0b-6e020557d7bd"
+  - "dd4ec289-e01d-41c9-bb89-70fa845d4bf2"
+  - "ea9b8d66-4d01-1d21-3ce4-b6b48cb575d4"
+  - "53414d53-554e-4700-0000-000000000000"
 database: "/var/lib/ntfy-idp-push/db.sqlite"
 
 # The user directory controls who has an ntfy account. Every directory-sync-interval (and once at
